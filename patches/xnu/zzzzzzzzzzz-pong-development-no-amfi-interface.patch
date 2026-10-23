@@ -1,0 +1,99 @@
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -3889,7 +3889,7 @@ cs_blob_cleanup(struct cs_blob *blob)
+ 		blob->csb_native4k_hash_count = 0;
+ 	}
+ 	if (blob->csb_entitlements != NULL) {
+-		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++		if (amfi != NULL) amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+ 		osobject_release(blob->csb_entitlements);
+ 		blob->csb_entitlements = NULL;
+ 	}
+@@ -4347,6 +4347,27 @@ accelerate_entitlement_queries(
+ 	 */
+ 	assert(ret == KERN_NOT_SUPPORTED);
+ 
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++	/* AMFI is deliberately absent from this development prelink. Disabling
++	 * enforcement does not by itself make its kernel interface non-null.
++	 * Permit the missing entitlement accelerator only when the immutable
++	 * code-signing configuration records the explicit hard bypass. */
++	if (__improbable(amfi == NULL)) {
++		code_signing_config_t config = 0;
++		static _Atomic bool reported_missing_amfi;
++		code_signing_configuration(NULL, &config);
++		if ((config & (CS_CONFIG_ENFORCEMENT_DISABLED |
++		    CS_CONFIG_GET_OUT_OF_MY_WAY)) ==
++		    (CS_CONFIG_ENFORCEMENT_DISABLED | CS_CONFIG_GET_OUT_OF_MY_WAY)) {
++			if (!atomic_exchange_explicit(&reported_missing_amfi, true, memory_order_relaxed)) {
++				printf("PONG DEVELOPMENT: AMFI interface absent; skip entitlement acceleration under hard bypass\n");
++			}
++			return 0;
++		}
++		return ENXIO;
++	}
++#endif
++
+ 	ret = amfi->OSEntitlements.adjustContextWithoutMonitor(
+ 		cs_blob->csb_entitlements,
+ 		cs_blob);
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -525,7 +525,9 @@ csblob_invalidate_flags(struct cs_blob *csblob)
+ 	}
+ 
+ 	if (csblob->csb_entitlements != NULL) {
+-		amfi->OSEntitlements_invalidate(csblob->csb_entitlements);
++		if (amfi != NULL) {
++			amfi->OSEntitlements_invalidate(csblob->csb_entitlements);
++		}
+ 	}
+ 
+ 	printf("Invalidated flags, old %x new %x\n", current_flags, csblob->csb_flags);
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3321,7 +3321,7 @@ csops_internal(pid_t pid, unsigned int ops, user_addr_t uaddr, user_size_t usize
+ 		}
+ 
+ 		void* osent = csblob_os_entitlements_get(blob);
+-		if (!osent) {
++		if (!osent || amfi == NULL) {
+ 			goto out;
+ 		}
+ 		CS_GenericBlob* xmlblob = NULL;
+
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1552,7 +1552,10 @@
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL || value == NULL) {
+ 		return false;
+ 	}
++	if (amfi == NULL) {
++		return false;
++	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
+ 	kern_return_t ret = amfi->OSEntitlements.queryEntitlementStringWithProc(
+@@ -1583,7 +1586,10 @@
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return false;
+ 	}
++	if (amfi == NULL) {
++		return false;
++	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
+ 	kern_return_t ret = amfi->OSEntitlements.queryEntitlementBooleanWithProc(
+@@ -1616,7 +1622,10 @@
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return NULL;
+ 	}
++	if (amfi == NULL) {
++		return NULL;
++	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+ 
+ 	kern_return_t ret = amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc(

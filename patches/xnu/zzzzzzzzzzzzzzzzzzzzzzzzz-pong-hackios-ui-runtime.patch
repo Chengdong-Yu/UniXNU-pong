@@ -1,0 +1,142 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 380be32..3e4f4a3 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -3095,9 +3095,11 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ 	int error = 0;
+ 	struct persona *persona = NULL;
+ 
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL
+ 	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
+ 		return EPERM;
+ 	}
++#endif
+ 
+ 	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
+ 		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
+@@ -3107,11 +3109,15 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ 
+ 	persona = persona_lookup(px_persona->pspi_id);
+ 	if (!persona) {
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL
+ 		error = ESRCH;
+ 		goto out;
++#endif
+ 	}
+ 
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL
+ out:
++#endif
+ 	if (persona) {
+ 		persona_put(persona);
+ 	}
+@@ -3131,9 +3137,11 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+ 	 * the kauth with a different UID/GID combo
+ 	 */
+ 	persona = persona_lookup(px_persona->pspi_id);
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL
+ 	if (!persona) {
+ 		return ESRCH;
+ 	}
++#endif
+ 
+ 	cred = kauth_cred_proc_ref(p);
+ 
+@@ -3159,6 +3167,30 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+ 		    px_persona->pspi_gmuid);
+ 	}
+ 
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++	if (persona == NULL) {
++		/* HackiOS: honor requested credentials when this port has no persona
++		 * object. Update the child's credential, never the spawning thread's.
++		 * Match persona_proc_adopt's real-UID process accounting on exit. */
++		__block kauth_cred_t new_cred = cred;
++		__block uid_t old_ruid = KAUTH_UID_NONE;
++		uid_t new_ruid = kauth_cred_getruid(cred);
++		(void)proc_update_label(p, true, ^kauth_cred_t (kauth_cred_t cur_cred) {
++			old_ruid = kauth_cred_getruid(cur_cred);
++			if (new_cred != cur_cred) {
++				kauth_cred_ref(new_cred);
++				kauth_cred_unref(&cur_cred);
++			}
++			return new_cred;
++		});
++		kauth_cred_unref(&cred);
++		if (old_ruid != KAUTH_UID_NONE && old_ruid != new_ruid) {
++			(void)chgproccnt(new_ruid, 1);
++			(void)chgproccnt(old_ruid, -1);
++		}
++		return 0;
++	}
++#endif
+ 	ret = persona_proc_adopt(p, persona, cred);
+ 
+ 	kauth_cred_unref(&cred);
+diff --git a/bsd/kern/kern_mib.c b/bsd/kern/kern_mib.c
+index ec635f2..8e646f1 100644
+--- a/bsd/kern/kern_mib.c
++++ b/bsd/kern/kern_mib.c
+@@ -518,7 +518,7 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
+ 		 * Deprecated variables.  We still support these for
+ 		 * backwards compatibility purposes only.
+ 		 */
+-#if XNU_TARGET_OS_OSX && defined(__arm64__)
++#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(PONG)
+ 	/* The following two are kludged for backward
+ 	 * compatibility. Use hw.product/hw.target for something
+ 	 * consistent instead. */
+diff --git a/bsd/kern/sys_work_interval.c b/bsd/kern/sys_work_interval.c
+index 662bb00..69e04b8 100644
+--- a/bsd/kern/sys_work_interval.c
++++ b/bsd/kern/sys_work_interval.c
+@@ -283,6 +283,16 @@ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
+ 
+ 		break;
+ 
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	case 6:
++	case 7:
++	case 8:
++		/* HackiOS: CoreAudio performance-controller hints are optional on
++		 * this software platform. Normal render/scheduler validation remains. */
++		if (kern_work_interval_type_of_thread(current_thread()) == WORK_INTERVAL_TYPE_COREAUDIO)
++			return 0;
++		return ENOTSUP;
++#endif
+ 	default:
+ 		return ENOTSUP;
+ 	}
+diff --git a/osfmk/kern/work_interval.c b/osfmk/kern/work_interval.c
+index 95416ab..0912060 100644
+--- a/osfmk/kern/work_interval.c
++++ b/osfmk/kern/work_interval.c
+@@ -683,6 +683,15 @@ work_interval_get_priority(thread_t thread)
+ 	return priority;
+ }
+ 
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++uint32_t
++kern_work_interval_type_of_thread(thread_t thread)
++{
++	const struct work_interval *work_interval = thread->th_work_interval;
++	return work_interval ? work_interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK : WORK_INTERVAL_TYPE_LAST;
++}
++#endif
++
+ /*
+  * Switch to a policy driven by the work interval (if applicable).
+  */
+diff --git a/osfmk/kern/work_interval.h b/osfmk/kern/work_interval.h
+index 8b46efb..e161ca4 100644
+--- a/osfmk/kern/work_interval.h
++++ b/osfmk/kern/work_interval.h
+@@ -83,6 +83,8 @@ extern kern_return_t
+ kern_work_interval_notify(thread_t thread, struct kern_work_interval_args* kwi_args);
+ extern kern_return_t
+ kern_work_interval_set_name(mach_port_name_t port_name, char *name, size_t len);
++extern uint32_t
++kern_work_interval_type_of_thread(thread_t thread);
+ extern kern_return_t
+ kern_work_interval_set_workload_id(mach_port_name_t port_name,
+     struct kern_work_interval_workload_id_args *workload_id_args);

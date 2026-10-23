@@ -1,0 +1,20 @@
+--- a/osfmk/vm/vm_compressor.c
++++ b/osfmk/vm/vm_compressor.c
+@@ -1206,6 +1206,17 @@
+ 	if (vm_pageout_internal_start() != KERN_SUCCESS) {
+ 		panic("vm_compressor_init: Failed to start the internal pageout thread.");
+ 	}
++#if DEVELOPMENT || DEBUG
++	boolean_t pong_disable_swap = FALSE;
++	if (PE_parse_boot_argn("pong_disable_swap", &pong_disable_swap, sizeof(pong_disable_swap)) &&
++	    pong_disable_swap) {
++		/* Keep the in-memory compressor, but omit all swap backing-store workers. */
++		vm_config.swap_is_present = FALSE;
++		vm_config.swap_is_active = FALSE;
++		vm_config.freezer_swap_is_active = FALSE;
++		printf("PONG DEVELOPMENT: VM swap disabled by boot argument\n");
++	} else
++#endif
+ 	if (VM_CONFIG_SWAP_IS_PRESENT) {
+ 		vm_compressor_swap_init();
+ 	}

@@ -1,0 +1,86 @@
+diff --git a/bsd/kern/kern_minimac.c b/bsd/kern/kern_minimac.c
+index f707517..e04e51b 100644
+--- a/bsd/kern/kern_minimac.c
++++ b/bsd/kern/kern_minimac.c
+@@ -141,8 +141,11 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) miniamfi_handle;
+  * extension -- has had the path from containermanagerd and passes it in the environment as
+  * CFFIXED_USER_HOME, which is where Foundation takes the home directory from. So that is the
+  * answer: it is looked up among the strings exec left at the top of the stack of the process.
+- * A process without the variable has no container, and gets what every process got before:
+- * success and an untouched buffer.
++ * A process without the variable has no container. Report ENOENT and clear the
++ * output instead of claiming success with the caller's untouched stack bytes.
++ * In 20G81, syncdefaultsd uses a successful result as a UTF-8 path before
++ * constructing an NSURL; an undefined result aborts the daemon instead of
++ * taking its existing uncontainerized-store fallback.
+  */
+ #define SANDBOX_SYSCALL_CONTAINER_PATH  4
+ #define SANDBOX_CONTAINER_VARIABLE      "CFFIXED_USER_HOME="
+@@ -173,6 +176,17 @@ minisandbox_container_path(user_addr_t arg)
+ 	if (error) {
+ 		return error;
+ 	}
++	if (args.size == 0) {
++		return ENAMETOOLONG;
++	}
++	const char empty = 0;
++	error = copyout(&empty, args.buffer, sizeof(empty));
++	if (error) {
++		return error;
++	}
++	if (args.pid <= 0 || args.pid > INT_MAX) {
++		return ESRCH;
++	}
+ 	p = proc_find((int)args.pid);
+ 	if (p == PROC_NULL) {
+ 		return ESRCH;
+@@ -186,7 +200,11 @@ minisandbox_container_path(user_addr_t arg)
+ 	task = proc_task(p);
+ 	if (user_stack == 0 || argslen == 0 || task == TASK_NULL) {
+ 		proc_rele(p);
+-		return 0;
++		return ENOENT;
++	}
++	if (argslen > ARG_MAX || argslen > user_stack) {
++		proc_rele(p);
++		return EINVAL;
+ 	}
+ 	/* the same way as sysctl_procargsx(): the task keeps the map alive once the process is let go */
+ 	task_reference(task);
+@@ -194,9 +212,13 @@ minisandbox_container_path(user_addr_t arg)
+ 	map = get_task_map_reference(task);
+ 	task_deallocate(task);
+ 	if (map == VM_MAP_NULL) {
+-		return 0;
++		return ESRCH;
+ 	}
+ 	strings_size = vm_map_round_page(argslen, vm_map_page_mask(map));
++	if (strings_size > user_stack) {
++		vm_map_deallocate(map);
++		return EINVAL;
++	}
+ 	if (kmem_alloc(kernel_map, &strings, strings_size, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+ 		vm_map_deallocate(map);
+ 		return ENOMEM;
+@@ -210,16 +232,19 @@ minisandbox_container_path(user_addr_t arg)
+ 			vm_map_copy_discard(copy);
+ 		}
+ 		kmem_free(kernel_map, strings, strings_size);
+-		return 0;                       /* the process is on its way out, or has unmapped its own stack */
++		return EFAULT;                  /* the process is exiting or unmapped its argument strings */
+ 	}
+ 
+ 	end = (const char *)(strings + strings_size);
++	error = ENOENT;
+ 	for (s = end - argslen; s < end; s += len + 1) {
+ 		len = strnlen(s, end - s);
+ 		if (len > prefix_len && s + len < end && strncmp(s, SANDBOX_CONTAINER_VARIABLE, prefix_len) == 0) {
+ 			s += prefix_len;
+ 			len -= prefix_len;
+-			error = len < args.size ? copyout(s, args.buffer, len + 1) : ENAMETOOLONG;
++			/* Only the actual absolute container home is a successful answer. */
++			error = s[0] != '/' ? EINVAL :
++			    (len < args.size ? copyout(s, args.buffer, len + 1) : ENAMETOOLONG);
+ 			break;
+ 		}
+ 	}

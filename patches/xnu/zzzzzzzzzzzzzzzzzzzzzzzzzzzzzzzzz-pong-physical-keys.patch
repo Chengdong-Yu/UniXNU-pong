@@ -1,0 +1,309 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -387,6 +387,7 @@
+ bsd/kern/pong_userland.c			standard
+ bsd/dev/pong_input.c			standard
+ bsd/dev/pong_goodix.c			standard
++bsd/dev/pong_buttons.c			standard
+ bsd/kern/kern_event.c			standard
+ bsd/kern/kern_control.c			optional networking
+ bsd/kern/kern_exec.c			standard
+--- a/bsd/dev/pong_input.c
++++ b/bsd/dev/pong_input.c
+@@ -1,5 +1,5 @@
+ /* Blocking touch queue, adapted from HackiOS redwood_input.c (APSL 2.0).
+- * Only the real Goodix driver publishes samples. No GPU/loader dependency. */
++ * Real Goodix and PMIC producers have separate queues and prerequisite gates. */
+ #include <pexpert/arm64/board_config.h>
+ #if defined(PONG)
+ #include <kern/clock.h>
+@@ -17,52 +17,64 @@
+ #define QUEUE_SIZE 512
+ static LCK_GRP_DECLARE(touch_group,"pong-touch");
+ static LCK_MTX_DECLARE(touch_lock,&touch_group);
+-static struct pong_touch samples[QUEUE_SIZE];
+-static uint32_t head,tail;
+-static bool opened;
++static LCK_MTX_DECLARE(node_lock,&touch_group);
++struct input_queue {
++    struct pong_touch samples[QUEUE_SIZE];
++    uint32_t head,tail;
++    bool opened,ready;
++};
++static struct input_queue queues[2];
++static int input_major=-1;
+ 
+ void
+ pong_touch_post(uint32_t type,uint32_t finger,uint32_t x,uint32_t y)
+ {
+-    if (type<PONG_TOUCH_DOWN || type>PONG_TOUCH_UP || finger>=10) return;
++    if (type<PONG_TOUCH_DOWN || type>PONG_BUTTON_UP ||
++        finger>=(type>=PONG_BUTTON_DOWN?3u:10u)) return;
++    struct input_queue *q=&queues[type>=PONG_BUTTON_DOWN];
+     lck_mtx_lock(&touch_lock);
+-    if (tail-head==QUEUE_SIZE) head++;
+-    samples[tail++%QUEUE_SIZE]=(struct pong_touch){mach_absolute_time(),type,finger,
++    if (q->tail-q->head==QUEUE_SIZE) q->head++;
++    q->samples[q->tail++%QUEUE_SIZE]=(struct pong_touch){mach_absolute_time(),type,finger,
+         x>65535?65535:x,y>65535?65535:y};
+     lck_mtx_unlock(&touch_lock);
+-    wakeup(samples);
++    wakeup(q);
+ }
+ 
+ static int
+-touch_open(__unused dev_t dev,int flags,__unused int kind,__unused struct proc *p)
++touch_open(dev_t dev,int flags,__unused int kind,__unused struct proc *p)
+ {
+     if (flags&FWRITE) return EACCES;
++    if (minor(dev)>1) return ENXIO;
++    struct input_queue *q=&queues[minor(dev)];
+     lck_mtx_lock(&touch_lock);
+-    int error=opened?EBUSY:0;
+-    if (!error) {opened=true;head=tail;}
++    int error=q->opened?EBUSY:0;
++    if (!error) {q->opened=true;q->head=q->tail;}
+     lck_mtx_unlock(&touch_lock);
+     return error;
+ }
+ 
+ static int
+-touch_close(__unused dev_t dev,__unused int flags,__unused int kind,__unused struct proc *p)
++touch_close(dev_t dev,__unused int flags,__unused int kind,__unused struct proc *p)
+ {
+-    lck_mtx_lock(&touch_lock);opened=false;lck_mtx_unlock(&touch_lock);return 0;
++    if (minor(dev)>1) return ENXIO;
++    lck_mtx_lock(&touch_lock);queues[minor(dev)].opened=false;lck_mtx_unlock(&touch_lock);return 0;
+ }
+ 
+ static int
+-touch_read(__unused dev_t dev,struct uio *uio,int flags)
++touch_read(dev_t dev,struct uio *uio,int flags)
+ {
++    if (minor(dev)>1) return ENXIO;
++    struct input_queue *q=&queues[minor(dev)];
+     if (uio_resid(uio)<(user_ssize_t)sizeof(struct pong_touch)) return EINVAL;
+     int error=0;
+     lck_mtx_lock(&touch_lock);
+-    while (head==tail) {
++    while (q->head==q->tail) {
+         if (flags&IO_NDELAY) {error=EWOULDBLOCK;break;}
+-        error=msleep(samples,&touch_lock,PZERO|PCATCH,"pong-touch",NULL);
++        error=msleep(q,&touch_lock,PZERO|PCATCH,"pong-input",NULL);
+         if (error) break;
+     }
+     if (!error) {
+-        struct pong_touch sample=samples[head++%QUEUE_SIZE];
++        struct pong_touch sample=q->samples[q->head++%QUEUE_SIZE];
+         lck_mtx_unlock(&touch_lock);
+         return uiomove((caddr_t)&sample,sizeof(sample),uio);
+     }
+@@ -75,14 +87,21 @@
+     .d_mmap=eno_mmap,.d_strategy=eno_strat,.d_type=0,
+ };
+ 
+-bool
+-pong_touch_device_ready(void)
++static bool
++input_ready(unsigned kind,const char *name)
+ {
+-    int major=cdevsw_add(-1,&touch_cdevsw);
+-    if (major<0) return false;
+-    if (!devfs_make_node(makedev(major,0),DEVFS_CHAR,UID_ROOT,GID_WHEEL,0444,"pong-touch")) {
+-        cdevsw_remove(major,&touch_cdevsw);return false;
++    bool result=false;
++    lck_mtx_lock(&node_lock);
++    if (queues[kind].ready) {result=true;goto out;}
++    if (input_major<0) input_major=cdevsw_add(-1,&touch_cdevsw);
++    if (input_major<0) goto out;
++    if (devfs_make_node(makedev(input_major,kind),DEVFS_CHAR,UID_ROOT,GID_WHEEL,0444,"%s",name)) {
++        queues[kind].ready=true;result=true;
+     }
+-    return true;
++out:
++    lck_mtx_unlock(&node_lock);return result;
+ }
++
++bool pong_touch_device_ready(void) {return input_ready(0,"pong-touch");}
++bool pong_buttons_device_ready(void) {return input_ready(1,"pong-buttons");}
+ #endif
+--- /dev/null
++++ b/bsd/dev/pong_buttons.c
+@@ -0,0 +1,143 @@
++/* Pong SM8475 PMIC keys. Read-only peripheral access, adapted from HackiOS
++ * redwood_buttons.c (APSL 2.0) and NothingOSS spmi-pmic-arb.c register layouts.
++ * No PMIC configuration/reset/supply writes and no display/GPU dependency. */
++#include <pexpert/arm64/board_config.h>
++#if defined(PONG)
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <libkern/libkern.h>
++#include <pexpert/device_tree.h>
++#include <pexpert/pexpert.h>
++#include <sys/pong_input.h>
++#include <sys/systm.h>
++extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++static vm_offset_t core,cnfg,observer;
++static bool v7;
++static uint32_t channels;
++struct peripheral {uint16_t ppid,channel;bool found;};
++static struct peripheral pon={.ppid=0x013},pin={.ppid=0x18d};
++struct key {bool usable,live,last,down;uint32_t code;};
++static struct key keys[3]={{.code=PONG_BUTTON_POWER},{.code=PONG_BUTTON_VOLUME_UP},
++    {.code=PONG_BUTTON_VOLUME_DOWN}};
++static uint32_t rd(vm_offset_t a) {return *(volatile uint32_t *)a;}
++static void wr(vm_offset_t a,uint32_t v) {*(volatile uint32_t *)a=v;__asm__ volatile("dsb sy":::"memory");}
++
++static bool property(DTEntry e,const char *name,void *out,unsigned size)
++{
++    void *p=NULL;unsigned n=0;
++    if (SecureDTGetProperty(e,name,&p,&n)!=kSuccess || n!=size) return false;
++    memcpy(out,p,size);return true;
++}
++
++static bool configuration(void)
++{
++    DTEntry e;uint64_t c=0,n=0,o=0;uint32_t ee=~0u,a=0,b=0;
++    if (SecureDTLookupEntry(NULL,"/arm-io/pong-buttons",&e)!=kSuccess ||
++        !property(e,"core-base",&c,8) || !property(e,"cnfg-base",&n,8) ||
++        !property(e,"observer-base",&o,8) || !property(e,"ee",&ee,4) ||
++        !property(e,"pon-ppid",&a,4) || !property(e,"volume-up-ppid",&b,4) ||
++        c!=0xc400000 || n!=0xc42d000 || o!=0xc440000 || ee!=0 || a!=pon.ppid || b!=pin.ppid)
++        return false;
++    core=ml_io_map(c,0x3000);cnfg=ml_io_map(n,0x4000);observer=ml_io_map(o,0x80000);
++    return core && cnfg && observer;
++}
++
++static void find_channel(struct peripheral *p)
++{
++    for (uint32_t i=0;i<channels;i++) {
++        uint32_t map=rd(core+(v7?0x2000:0x900)+4*i);
++        if (!map || ((map>>8)&0xfff)!=p->ppid) continue;
++        unsigned owner=rd(cnfg+(v7?0:0x700)+4*i)&7;
++        if (!p->found || owner==0) {p->found=true;p->channel=(uint16_t)i;}
++    }
++}
++
++static bool read_registers(const struct peripheral *p,uint8_t reg,uint8_t *out,unsigned count)
++{
++    if (!p->found || !count || count>8) return false;
++    vm_offset_t ch=observer+(v7?0x20UL:0x80UL)*p->channel;
++    uint64_t limit=0;clock_interval_to_deadline(2000,NSEC_PER_USEC,&limit);
++    /* Extended-read-long observer command; this never writes a PMIC register. */
++    wr(ch,(1u<<27)|((uint32_t)reg<<4)|(count-1));
++    uint32_t status;
++    do {status=rd(ch+8);} while (!(status&1) && mach_absolute_time()<limit);
++    if ((status&0xf)!=1) return false;
++    uint32_t data[2]={rd(ch+0x18),count>4?rd(ch+0x1c):0};
++    for (unsigned i=0;i<count;i++) out[i]=(uint8_t)(data[i/4]>>(8*(i%4)));
++    return true;
++}
++
++static void look(struct key *k,bool down)
++{
++    bool steady=k->last==down;k->last=down;
++    if (!k->usable || !steady) return;
++    if (!k->live) {if (!down) k->live=true;return;}
++    if (k->down==down) return;
++    k->down=down;
++    pong_touch_post(down?PONG_BUTTON_DOWN:PONG_BUTTON_UP,k->code,0,0);
++    printf("Pong keys: %u %s\n",k->code,down?"down":"up");
++}
++
++static void keys_thread(__unused void *arg,__unused wait_result_t result)
++{
++    if (!configuration()) {printf("Pong keys: missing/incompatible DT; SKIP\n");goto out;}
++    uint32_t version=rd(core);
++    if (version<0x50000000 || version>=0x80000000) {
++        printf("Pong keys: unsupported arbiter version %x; SKIP\n",version);goto out;
++    }
++    v7=version>=0x70000000;channels=rd(core+4)&0x7ff;
++    if (!channels || channels>(v7?1024u:512u)) {
++        printf("Pong keys: invalid channel count %u; SKIP\n",channels);goto out;
++    }
++    find_channel(&pon);find_channel(&pin);
++    uint8_t id[2],state=0,c[8];
++    if (read_registers(&pon,4,id,2) && id[0]==1 && id[1]==9 &&
++        read_registers(&pon,0x10,&state,1)) {
++        keys[0].usable=keys[2].usable=true;
++        keys[0].last=(state&0x80)!=0;keys[2].last=(state&0x40)!=0;
++    }
++    if (read_registers(&pin,4,id,2) && id[0]==0x10 && id[1]>=0x10 && id[1]<=0x13 &&
++        read_registers(&pin,0x40,c,8) && (c[0]&3)==0 && (c[2]&7)<4 && (c[6]&0x80) &&
++        read_registers(&pin,0x10,&state,1)) {
++        keys[1].usable=true;keys[1].last=(state&1)==0;
++    }
++    if (!(keys[0].usable || keys[1].usable) || !pong_buttons_device_ready()) {
++        printf("Pong keys: no verified input peripheral; SKIP\n");goto out;
++    }
++    for (unsigned i=0;i<3;i++) keys[i].live=keys[i].usable && !keys[i].last;
++    printf("Pong keys: arbiter v%u channels=%u PON=%u GPIO6=%u; power=%u up=%u down=%u\n",
++        v7?7:5,channels,pon.channel,pin.channel,keys[0].usable,keys[1].usable,keys[2].usable);
++    unsigned failures=0;
++    for (;;) {
++        bool good=true;
++        if (keys[0].usable) {
++            if (read_registers(&pon,0x10,&state,1)) {
++                look(&keys[0],(state&0x80)!=0);look(&keys[2],(state&0x40)!=0);
++            } else good=false;
++        }
++        if (keys[1].usable) {
++            if (read_registers(&pin,0x10,&state,1)) look(&keys[1],(state&1)==0);
++            else good=false;
++        }
++        failures=good?0:failures+1;
++        if (failures>=8) {
++            for (unsigned i=0;i<3;i++) if (keys[i].down)
++                pong_touch_post(PONG_BUTTON_UP,keys[i].code,0,0);
++            printf("Pong keys: repeated observer read failure; stop optional polling\n");break;
++        }
++        uint64_t deadline;clock_interval_to_deadline(16,NSEC_PER_MSEC,&deadline);
++        assert_wait_deadline((event_t)keys,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);
++    }
++out:
++    thread_terminate(current_thread());
++}
++
++void pong_buttons_init(void)
++{
++    uint32_t enabled=0;thread_t t;
++    if (!PE_parse_boot_argn("pong_buttons",&enabled,sizeof(enabled)) || !enabled) return;
++    if (kernel_thread_start(keys_thread,NULL,&t)==KERN_SUCCESS) thread_deallocate(t);
++}
++#endif
+--- a/bsd/sys/pong_input.h
++++ b/bsd/sys/pong_input.h
+@@ -5,6 +5,11 @@
+ #define PONG_TOUCH_DOWN 1
+ #define PONG_TOUCH_MOVE 2
+ #define PONG_TOUCH_UP 3
++#define PONG_BUTTON_DOWN 4
++#define PONG_BUTTON_UP 5
++#define PONG_BUTTON_POWER 0
++#define PONG_BUTTON_VOLUME_UP 1
++#define PONG_BUTTON_VOLUME_DOWN 2
+ struct pong_touch {
+     uint64_t time;
+     uint32_t type, finger, x, y;
+@@ -12,6 +17,8 @@
+ #ifdef KERNEL
+ void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t);
+ bool pong_touch_device_ready(void);
++bool pong_buttons_device_ready(void);
+ void pong_goodix_init(void);
++void pong_buttons_init(void);
+ #endif
+ #endif
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1150,6 +1150,8 @@
+ #if defined(PONG)
+ 	extern void pong_goodix_init(void);
+ 	pong_goodix_init();
++		extern void pong_buttons_init(void);
++		pong_buttons_init();
+ #endif
+ #endif /* DEVFS */
+ 

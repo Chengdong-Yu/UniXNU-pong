@@ -1,0 +1,55 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2621,6 +2621,21 @@
+ 	}
+ 	return ret;
+ }
++
++#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
++/* Adapted from HackiOS: expose service output redirected to /dev/null.
++ * This only changes posix_spawn file actions, never PID 1's exec descriptors. */
++static TUNABLE(uint32_t, exec_applog, "applog", 0);
++
++static const char *
++exec_applog_path(int fd, const char *path)
++{
++	if (exec_applog && (fd == 1 || fd == 2) && strcmp(path, "/dev/null") == 0) {
++		return "/dev/console";
++	}
++	return path;
++}
++#endif
+ 
+ /*
+  * exec_handle_file_actions
+@@ -2691,7 +2706,11 @@
+ 			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
+ 
+ 			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
++#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
++			    CAST_USER_ADDR_T(exec_applog_path(psfa->psfaa_filedes, psfa->psfaa_openargs.psfao_path)),
++#else
+ 			    CAST_USER_ADDR_T(psfa->psfaa_openargs.psfao_path),
++#endif
+ 			    imgp->ip_vfs_context);
+ 
+ 			error = open1(imgp->ip_vfs_context, ndp,
+@@ -6618,7 +6637,18 @@
+ 	}
+ 
+ 	/* Update the process' identity version and set the security token */
++#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
++	/* HackiOS: launchd keeps the audit token from before xpcproxy execs its
++	 * service. Keep that identity version through the proxy handoff so
++	 * RunningBoard's entitlement queries still refer to the running process.
++	 * xpcproxy_idversion=1 restores the original exec behavior. */
++	static TUNABLE(uint32_t, xpcproxy_idversion, "xpcproxy_idversion", 0);
++	if (xpcproxy_idversion || strncmp(p->p_comm, "xpcproxy", sizeof(p->p_comm)) != 0) {
++		proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++	}
++#else
+ 	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++#endif
+ 	task_set_uniqueid(task);
+ 	set_security_token_task_internal(p, task);
+ 

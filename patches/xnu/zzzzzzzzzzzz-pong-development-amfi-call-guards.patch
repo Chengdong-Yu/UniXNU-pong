@@ -1,0 +1,122 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1553,7 +1553,7 @@
+ 	if (task == kernel_task || entitlement == NULL || value == NULL) {
+ 		return false;
+ 	}
+-	if (amfi == NULL) {
++	if (amfi == NULL || amfi->OSEntitlements.queryEntitlementStringWithProc == NULL) {
+ 		return false;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+@@ -1587,7 +1587,7 @@
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return false;
+ 	}
+-	if (amfi == NULL) {
++	if (amfi == NULL || amfi->OSEntitlements.queryEntitlementBooleanWithProc == NULL) {
+ 		return false;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+@@ -1623,7 +1623,7 @@
+ 	if (task == kernel_task || entitlement == NULL) {
+ 		return NULL;
+ 	}
+-	if (amfi == NULL) {
++	if (amfi == NULL || amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc == NULL) {
+ 		return NULL;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -1500,6 +1500,9 @@
+ 
+ 	/* Validate input arguments */
+ 	if (task == kernel_task || entitlement == NULL) {
++		return NULL;
++	}
++	if (amfi == NULL || amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc == NULL) {
+ 		return NULL;
+ 	}
+ 	proc_t proc = (proc_t)get_bsdtask_info(task);
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -3890,7 +3890,9 @@
+ 		blob->csb_native4k_hash_count = 0;
+ 	}
+ 	if (blob->csb_entitlements != NULL) {
+-		if (amfi != NULL) amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++		if (amfi != NULL && amfi->OSEntitlements_invalidate != NULL) {
++			amfi->OSEntitlements_invalidate(blob->csb_entitlements);
++		}
+ 		osobject_release(blob->csb_entitlements);
+ 		blob->csb_entitlements = NULL;
+ 	}
+@@ -4356,7 +4358,8 @@
+ 	 * enforcement does not by itself make its kernel interface non-null.
+ 	 * Permit the missing entitlement accelerator only when the immutable
+ 	 * code-signing configuration records the explicit hard bypass. */
+-	if (__improbable(amfi == NULL)) {
++	if (__improbable(amfi == NULL ||
++	    amfi->OSEntitlements.adjustContextWithoutMonitor == NULL)) {
+ 		code_signing_config_t config = 0;
+ 		static _Atomic bool reported_missing_amfi;
+ 		code_signing_configuration(NULL, &config);
+@@ -4372,6 +4375,9 @@
+ 	}
+ #endif
+ 
++	if (amfi == NULL || amfi->OSEntitlements.adjustContextWithoutMonitor == NULL) {
++		return ENXIO;
++	}
+ 	ret = amfi->OSEntitlements.adjustContextWithoutMonitor(
+ 		cs_blob->csb_entitlements,
+ 		cs_blob);
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -525,10 +525,9 @@
+ 		csblob->csb_flags = updated_flags;
+ 	}
+ 
+-	if (csblob->csb_entitlements != NULL) {
+-		if (amfi != NULL) {
+-			amfi->OSEntitlements_invalidate(csblob->csb_entitlements);
+-		}
++	if (csblob->csb_entitlements != NULL && amfi != NULL &&
++	    amfi->OSEntitlements_invalidate != NULL) {
++		amfi->OSEntitlements_invalidate(csblob->csb_entitlements);
+ 	}
+ 
+ 	printf("Invalidated flags, old %x new %x\n", current_flags, csblob->csb_flags);
+@@ -753,8 +752,8 @@
+ 	if (!csblob->csb_entitlements) {
+ 		return NULL;
+ 	}
+-	if (!amfi) {
+-		panic("CoreEntitlements: missing AMFI bridge\n");
++	if (!amfi || amfi->OSEntitlements_asdict == NULL) {
++		return NULL;
+ 	}
+ 	return amfi->OSEntitlements_asdict(csblob->csb_entitlements);
+ }
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3321,7 +3321,7 @@
+ 		}
+ 
+ 		void* osent = csblob_os_entitlements_get(blob);
+-		if (!osent || amfi == NULL) {
++		if (!osent || amfi == NULL || amfi->OSEntitlements_get_xml == NULL) {
+ 			goto out;
+ 		}
+ 		CS_GenericBlob* xmlblob = NULL;
+@@ -3357,7 +3357,8 @@
+ 
+ 		error = csblob_get_der_entitlements(blob, (const CS_GenericBlob **)&start, &length);
+ 		if (error || start == NULL) {
+-			if (amfi && csblob_os_entitlements_get(blob)) {
++			if (amfi && amfi->OSEntitlements_get_transmuted != NULL &&
++		    csblob_os_entitlements_get(blob)) {
+ 				void* osent = csblob_os_entitlements_get(blob);
+ 
+ 				const CS_GenericBlob* transmuted = NULL;

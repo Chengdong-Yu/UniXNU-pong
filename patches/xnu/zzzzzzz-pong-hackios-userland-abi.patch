@@ -1,0 +1,886 @@
+--- /dev/null
++++ b/libkern/amfi/miniamfi.c
+@@ -0,0 +1,272 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++/*
++ * Stand-in for the AppleMobileFileIntegrity kext interface.
++ *
++ * The kernel reaches AMFI through a table of function pointers that the kext
++ * registers at load time. That kext is closed, so this file registers a table
++ * of its own. No trust cache contains anything, and there is no signature
++ * policy behind it; a process holds the entitlements that the signature of
++ * its program lists (miniamfi_entitlements.cpp), and a program without a
++ * signature holds none.
++ *
++ * The CoreEntitlements part of the table is left empty; only the PPL build of
++ * the pmap reaches into it.
++ */
++
++#include <kern/startup.h>
++#include <pexpert/pexpert.h>
++#include <kern/kern_types.h>
++#include <libkern/libkern.h>
++#include <libkern/amfi/amfi.h>
++
++static void
++mini_OSEntitlements_invalidate(__unused void *osentitlements)
++{
++}
++
++static void *
++mini_OSEntitlements_asdict(__unused void *osentitlements)
++{
++	return NULL;
++}
++
++static bool
++mini_OSEntitlements_get_transmuted(__unused void *osentitlements, const CS_GenericBlob **blob)
++{
++	*blob = NULL;
++	return false;
++}
++
++static bool
++mini_OSEntitlements_get_xml(__unused void *osentitlements, CS_GenericBlob **blob)
++{
++	*blob = NULL;
++	return false;
++}
++
++static bool
++mini_get_legacy_profile_exemptions(const uint8_t **profile, size_t *profileLength)
++{
++	*profile = NULL;
++	*profileLength = 0;
++	return false;
++}
++
++static bool
++mini_get_udid(const uint8_t **udid, size_t *udidLength)
++{
++	*udid = NULL;
++	*udidLength = 0;
++	return false;
++}
++
++static void *
++mini_query_context_to_object(__unused CEQueryContext_t ctx)
++{
++	return NULL;
++}
++
++/* OSEntitlements */
++
++static kern_return_t
++mini_adjustContextWithMonitor(__unused void *os_entitlements, __unused const CEQueryContext_t ce_ctx,
++    __unused const void *monitor_sig_obj, __unused const char *identity, __unused const uint32_t code_signing_flags)
++{
++	return KERN_SUCCESS;
++}
++
++static kern_return_t
++mini_adjustContextWithoutMonitor(__unused void *os_entitlements, __unused struct cs_blob *code_signing_blob)
++{
++	return KERN_SUCCESS;
++}
++
++static kern_return_t
++mini_queryEntitlementBoolean(__unused const void *os_entitlements, __unused const char *entitlement_name)
++{
++	return KERN_NOT_FOUND;
++}
++
++/* Queries about a process are answered from the entitlements in its code signature: miniamfi_entitlements.cpp */
++extern kern_return_t miniamfi_entitlement_boolean(struct proc *proc, const char *name);
++extern kern_return_t miniamfi_entitlement_string(struct proc *proc, const char *name, const char *value);
++extern kern_return_t miniamfi_entitlement_object(struct proc *proc, const char *name, void **object);
++
++static kern_return_t
++mini_queryEntitlementBooleanWithProc(const proc_t proc, const char *entitlement_name)
++{
++	return miniamfi_entitlement_boolean(proc, entitlement_name);
++}
++
++static kern_return_t
++mini_queryEntitlementString(__unused const void *os_entitlements, __unused const char *entitlement_name,
++    __unused const char *entitlement_value)
++{
++	return KERN_NOT_FOUND;
++}
++
++static kern_return_t
++mini_queryEntitlementStringWithProc(const proc_t proc, const char *entitlement_name, const char *entitlement_value)
++{
++	return miniamfi_entitlement_string(proc, entitlement_name, entitlement_value);
++}
++
++static kern_return_t
++mini_copyEntitlementAsOSObject(__unused const void *os_entitlements, __unused const char *entitlement_name,
++    void **entitlement_object)
++{
++	*entitlement_object = NULL;
++	return KERN_NOT_FOUND;
++}
++
++static kern_return_t
++mini_copyEntitlementAsOSObjectWithProc(const proc_t proc, const char *entitlement_name, void **entitlement_object)
++{
++	return miniamfi_entitlement_object(proc, entitlement_name, entitlement_object);
++}
++
++/* libTrustCache: there are no trust caches, so nothing loads and nothing is found */
++
++static TCReturn_t
++mini_tc_loadModule(__unused TrustCacheRuntime_t *runtime, __unused const TCType_t type, __unused TrustCache_t *trustCache,
++    __unused const uintptr_t dataAddr, __unused const size_t dataSize)
++{
++	return buildTCRet(kTCComponentLoadModule, kTCReturnUnsupported, 0);
++}
++
++static TCReturn_t
++mini_tc_load(__unused TrustCacheRuntime_t *runtime, __unused TCType_t type, __unused TrustCache_t *trustCache,
++    __unused const uintptr_t payloadAddr, __unused const size_t payloadSize,
++    __unused const uintptr_t manifestAddr, __unused const size_t manifestSize)
++{
++	return buildTCRet(kTCComponentLoad, kTCReturnUnsupported, 0);
++}
++
++static TCReturn_t
++mini_tc_query(__unused const TrustCacheRuntime_t *runtime, __unused TCQueryType_t queryType,
++    __unused const uint8_t CDHash[kTCEntryHashSize], __unused TrustCacheQueryToken_t *queryToken)
++{
++	return buildTCRet(kTCComponentQuery, kTCReturnNotFound, 0);
++}
++
++static TCReturn_t
++mini_tc_getCapabilities(__unused const TrustCache_t *trustCache, TCCapabilities_t *capabilities)
++{
++	*capabilities = 0;
++	return buildTCRet(kTCComponentModuleCapabilities, kTCReturnSuccess, 0);
++}
++
++static TCReturn_t
++mini_tc_queryGetTCType(__unused const TrustCacheQueryToken_t *queryToken, __unused TCType_t *typeRet)
++{
++	return buildTCRet(kTCComponentQueryTCType, kTCReturnInvalidArguments, 0);
++}
++
++static TCReturn_t
++mini_tc_queryGetCapabilities(__unused const TrustCacheQueryToken_t *queryToken, __unused TCCapabilities_t *capabilities)
++{
++	return buildTCRet(kTCComponentModuleCapabilities, kTCReturnInvalidArguments, 0);
++}
++
++static TCReturn_t
++mini_tc_queryGetHashType(__unused const TrustCacheQueryToken_t *queryToken, __unused uint8_t *hashTypeRet)
++{
++	return buildTCRet(kTCComponentQueryHashType, kTCReturnInvalidArguments, 0);
++}
++
++static TCReturn_t
++mini_tc_queryGetFlags(__unused const TrustCacheQueryToken_t *queryToken, __unused uint64_t *flagsRet)
++{
++	return buildTCRet(kTCComponentQueryFlags, kTCReturnInvalidArguments, 0);
++}
++
++static TCReturn_t
++mini_tc_queryGetConstraintCategory(__unused const TrustCacheQueryToken_t *queryToken, __unused uint8_t *constraintCategoryRet)
++{
++	return buildTCRet(kTCComponentQueryConstraintCategory, kTCReturnInvalidArguments, 0);
++}
++
++static TCReturn_t
++mini_tc_constructInvalid(__unused TrustCache_t *trustCache, __unused const uint8_t *moduleAddr, __unused size_t moduleSize)
++{
++	return buildTCRet(kTCComponentConstructInvalid, kTCReturnUnsupported, 0);
++}
++
++static TCReturn_t
++mini_tc_checkRuntimeForUUID(__unused const TrustCacheRuntime_t *runtime, __unused const uint8_t checkUUID[kUUIDSize],
++    __unused const TrustCache_t **trustCacheRet)
++{
++	return buildTCRet(kTCComponentCheckRuntimeForUUID, kTCReturnNotFound, 0);
++}
++
++static TCReturn_t
++mini_tc_extractModule(__unused TrustCache_t *trustCache, __unused const uint8_t *dataAddr, __unused size_t dataSize)
++{
++	return buildTCRet(kTCComponentExtractModule, kTCReturnUnsupported, 0);
++}
++
++static TCReturn_t
++mini_tc_getModule(__unused const TrustCache_t *trustCache, __unused const uint8_t **moduleAddrRet, __unused size_t *moduleSizeRet)
++{
++	return buildTCRet(kTCComponentGetModule, kTCReturnUnsupported, 0);
++}
++
++static TCReturn_t
++mini_tc_getUUID(__unused const TrustCache_t *trustCache, __unused uint8_t returnUUID[kUUIDSize])
++{
++	return buildTCRet(kTCComponentGetUUID, kTCReturnUnsupported, 0);
++}
++
++static const amfi_t miniamfi = {
++	.OSEntitlements_invalidate = mini_OSEntitlements_invalidate,
++	.OSEntitlements_asdict = mini_OSEntitlements_asdict,
++	.OSEntitlements_get_transmuted = mini_OSEntitlements_get_transmuted,
++	.OSEntitlements_get_xml = mini_OSEntitlements_get_xml,
++	.get_legacy_profile_exemptions = mini_get_legacy_profile_exemptions,
++	.get_udid = mini_get_udid,
++	.query_context_to_object = mini_query_context_to_object,
++
++	.TrustCache = {
++		.version = TRUST_CACHE_INTERFACE_VERSION,
++		.loadModule = mini_tc_loadModule,
++		.load = mini_tc_load,
++		.query = mini_tc_query,
++		.getCapabilities = mini_tc_getCapabilities,
++		.queryGetTCType = mini_tc_queryGetTCType,
++		.queryGetCapabilities = mini_tc_queryGetCapabilities,
++		.queryGetHashType = mini_tc_queryGetHashType,
++		.queryGetFlags = mini_tc_queryGetFlags,
++		.queryGetConstraintCategory = mini_tc_queryGetConstraintCategory,
++		.constructInvalid = mini_tc_constructInvalid,
++		.checkRuntimeForUUID = mini_tc_checkRuntimeForUUID,
++		.extractModule = mini_tc_extractModule,
++		.getModule = mini_tc_getModule,
++		.getUUID = mini_tc_getUUID,
++	},
++
++	.OSEntitlements = {
++		.version = OSENTITLEMENTS_INTERFACE_VERSION,
++		.adjustContextWithMonitor = mini_adjustContextWithMonitor,
++		.adjustContextWithoutMonitor = mini_adjustContextWithoutMonitor,
++		.queryEntitlementBoolean = mini_queryEntitlementBoolean,
++		.queryEntitlementBooleanWithProc = mini_queryEntitlementBooleanWithProc,
++		.queryEntitlementString = mini_queryEntitlementString,
++		.queryEntitlementStringWithProc = mini_queryEntitlementStringWithProc,
++		.copyEntitlementAsOSObject = mini_copyEntitlementAsOSObject,
++		.copyEntitlementAsOSObjectWithProc = mini_copyEntitlementAsOSObjectWithProc,
++	},
++};
++
++__startup_func
++static void
++miniamfi_init(void)
++{
++	uint32_t enabled = 0;
++	if (amfi != NULL || !PE_parse_boot_argn("amfi_get_out_of_my_way", &enabled, sizeof(enabled)) || !enabled) return;
++	amfi_interface_register(&miniamfi);
++	printf("Pong userland: HackiOS development AMFI interface registered\n");
++}
++STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, miniamfi_init);
++
++#endif
+--- /dev/null
++++ b/libkern/amfi/miniamfi_entitlements.cpp
+@@ -0,0 +1,127 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++/*
++ * Entitlement queries for the AMFI stand-in (see miniamfi.c).
++ *
++ * The kernel asks AMFI whether a process holds an entitlement: a key in the
++ * property list that is part of the program's code signature. The real kext
++ * answers from its own validated copy. Here the list embedded in the
++ * signature of the running program is read directly; nothing vouches for it,
++ * in keeping with a kernel that checks no signatures at all. A program
++ * without a signature has no entitlements.
++ */
++
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSBoolean.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/c++/OSUnserialize.h>
++#include <kern/cs_blobs.h>
++#include <mach/kern_return.h>
++#include <kern/kalloc.h>
++#include <string.h>
++
++extern "C" {
++struct proc;
++int cs_entitlements_blob_get(struct proc *p, void **out_start, size_t *out_length);
++
++kern_return_t miniamfi_entitlement_boolean(struct proc *proc, const char *name);
++kern_return_t miniamfi_entitlement_string(struct proc *proc, const char *name, const char *value);
++kern_return_t miniamfi_entitlement_object(struct proc *proc, const char *name, void **object);
++}
++
++/* The entitlements of a process as a dictionary, or NULL; the caller releases it. */
++static OSDictionary *
++copy_entitlements(struct proc *proc)
++{
++	void *start = NULL;
++	size_t length = 0, text_length;
++	OSObject *parsed;
++	OSDictionary *dict;
++	char *text;
++
++	if (proc == NULL || cs_entitlements_blob_get(proc, &start, &length) != 0 || start == NULL ||
++	    length <= sizeof(CS_GenericBlob)) {
++		return NULL;
++	}
++	/*
++	 * The blob is a header followed by the text of an XML property list.
++	 * The parser wants that text terminated, which in the blob it is not.
++	 */
++	text_length = length - sizeof(CS_GenericBlob);
++	text = (char *)kalloc_data(text_length + 1, Z_WAITOK);
++	if (text == NULL) {
++		return NULL;
++	}
++	memcpy(text, ((const CS_GenericBlob *)start)->data, text_length);
++	text[text_length] = '\0';
++	parsed = OSUnserializeXML(text, NULL);
++	kfree_data(text, text_length + 1);
++
++	dict = OSDynamicCast(OSDictionary, parsed);
++	if (dict == NULL && parsed != NULL) {
++		parsed->release();
++	}
++	return dict;
++}
++
++kern_return_t
++miniamfi_entitlement_boolean(struct proc *proc, const char *name)
++{
++	OSDictionary *entitlements = copy_entitlements(proc);
++	kern_return_t result = KERN_NOT_FOUND;
++
++	if (entitlements != NULL) {
++		if (entitlements->getObject(name) == kOSBooleanTrue) {
++			result = KERN_SUCCESS;
++		}
++		entitlements->release();
++	}
++	return result;
++}
++
++/* True if the entitlement is that string, or an array that contains it. */
++kern_return_t
++miniamfi_entitlement_string(struct proc *proc, const char *name, const char *value)
++{
++	OSDictionary *entitlements = copy_entitlements(proc);
++	kern_return_t result = KERN_NOT_FOUND;
++
++	if (entitlements != NULL) {
++		OSObject *object = entitlements->getObject(name);
++		OSString *string = OSDynamicCast(OSString, object);
++		OSArray *array = OSDynamicCast(OSArray, object);
++
++		if (string != NULL && string->isEqualTo(value)) {
++			result = KERN_SUCCESS;
++		}
++		for (unsigned int i = 0; array != NULL && i < array->getCount(); i++) {
++			string = OSDynamicCast(OSString, array->getObject(i));
++			if (string != NULL && string->isEqualTo(value)) {
++				result = KERN_SUCCESS;
++			}
++		}
++		entitlements->release();
++	}
++	return result;
++}
++
++/* The value itself, retained, as IOKit wants it. */
++kern_return_t
++miniamfi_entitlement_object(struct proc *proc, const char *name, void **object)
++{
++	OSDictionary *entitlements = copy_entitlements(proc);
++	OSObject *value = NULL;
++
++	if (entitlements != NULL) {
++		value = entitlements->getObject(name);
++		if (value != NULL) {
++			value->retain();
++		}
++		entitlements->release();
++	}
++	*object = value;
++	return value != NULL ? KERN_SUCCESS : KERN_NOT_FOUND;
++}
++
++#endif
+--- /dev/null
++++ b/bsd/kern/kern_minimac.c
+@@ -0,0 +1,376 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++/*
++ * Stand-ins for the two closed security policies user space cannot do
++ * without: AMFI and the Sandbox. On a device they are kexts that register
++ * MAC policies of those names; system software talks to them through
++ * __mac_syscall() and relies on what they decide.
++ *
++ * Neither stand-in is a security mechanism. This kernel runs whatever it is
++ * given (see libkern/amfi/miniamfi.c); these only give the answers the iOS
++ * user space needs in order to run at all:
++ *
++ *   AMFI     The binaries of the operating system carry ad hoc signatures
++ *            (no certificate chain); on a device AMFI finds their hashes
++ *            in the trust cache and flags them as platform binaries.
++ *            launchd panics if a system daemon is not one. There is no
++ *            trust cache here, so every ad hoc signed binary is taken for
++ *            a platform binary. Unsigned programs (our own) are not.
++ *
++ *   Sandbox  Every query (may this process look up that service?) is
++ *            answered "allowed", and every request to apply a profile
++ *            succeeds without applying anything. The one question with
++ *            an answer of its own is which container a process is in.
++ */
++
++#include <sys/param.h>
++#include <pexpert/pexpert.h>
++#include <sys/systm.h>
++#include <sys/kernel.h>
++#include <sys/codesign.h>
++#include <sys/errno.h>
++#include <sys/kpi_socket.h>
++#include <sys/priv.h>
++#include <sys/proc_internal.h>
++#include <sys/ubc_internal.h>
++#include <sys/vnode_internal.h>
++#include <libkern/libkern.h>
++#include <kern/startup.h>
++#include <kern/task.h>
++#include <mach/vm_param.h>
++#include <vm/vm_kern.h>
++#include <vm/vm_map.h>
++#include <security/mac_framework.h>
++#include <security/mac_policy.h>
++
++void minimac_policy_init(void);
++
++static int
++miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label *label, __unused cpu_type_t cpu_type,
++    struct cs_blob *cs_blob, unsigned int *cs_flags, __unused unsigned int *signer_type, __unused int flags,
++    __unused unsigned int platform, __unused char **fatal_failure_desc, __unused size_t *fatal_failure_desc_len)
++{
++	if (cs_blob == NULL) {
++		return 0;
++	}
++	/*
++	 * Accepting a signature is what marks the process as signed; the
++	 * kernel consults the signature of a process only when that is set.
++	 */
++	*cs_flags |= CS_SIGNED;
++	if (*cs_flags & CS_ADHOC) {
++		*cs_flags |= CS_PLATFORM_BINARY;
++	}
++	return 0;
++}
++
++/*
++ * dyld asks AMFI what it may do for the process it is starting (request 0x5a, "check dyld
++ * policy"): the argument is { flags in, pointer to flags out }. Everything is allowed --
++ * @paths, the DYLD_* variables, inserted libraries and interposing -- which is what lets
++ * our own library be loaded into stock daemons (DYLD_INSERT_LIBRARIES).
++ */
++#define AMFI_SYSCALL_CHECK_DYLD_POLICY  0x5a
++#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0xffULL
++
++/*
++ * Request 0x60, "query boot-arg state" (amfi_interface_query_bootarg_state() in libamfi): the
++ * argument points to 64 bits of flags, one for each boot-arg that switches a part of AMFI off
++ * (amfi_get_out_of_my_way and its kin). ExtensionKit asks, and unless one of the bits 0x86 is set
++ * it wants the signature of the system's table of extension points
++ * (/System/Library/xpc/extensions.plist.sig) verified by AMFI's IOKit service. There is no such
++ * service here ("Unable to find AMFI"); the table is then not read and LaunchServices knows no
++ * extension point: every application extension is refused when the applications are registered
++ * ("does not correspond to a known extension point"), pkd cannot make a record for any extension
++ * point, and Shortcuts dies on a nil one. Nothing is enforced by this kernel, so that is what it
++ * says. (Which of the three bits stands for which boot-arg is not known; ExtensionKit takes any
++ * of them.)
++ */
++#define AMFI_SYSCALL_QUERY_BOOTARG_STATE 0x60
++#define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
++
++static int
++miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
++{
++	struct {
++		uint64_t input_flags;
++		user_addr_t output_flags;
++	} args;
++	uint64_t flags = AMFI_DYLD_OUTPUT_ALLOW_ALL;
++	uint64_t state = AMFI_BOOTARG_STATE_NOT_ENFORCING;
++	int error;
++
++	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
++		return copyout(&state, arg, sizeof(state));
++	}
++	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
++		return ENOPOLICY;               /* what user space got before there was a handler */
++	}
++	error = copyin(arg, &args, sizeof(args));
++	if (error == 0) {
++		error = copyout(&flags, args.output_flags, sizeof(flags));
++	}
++	return error;
++}
++
++static const struct mac_policy_ops miniamfi_ops = {
++	.mpo_vnode_check_signature = miniamfi_vnode_check_signature,
++	.mpo_policy_syscall = miniamfi_policy_syscall,
++};
++
++SECURITY_READ_ONLY_LATE(static struct mac_policy_conf) miniamfi_conf = {
++	.mpc_name = "AMFI",
++	.mpc_fullname = "Apple Mobile File Integrity (stand-in)",
++	.mpc_ops = &miniamfi_ops,
++};
++SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) miniamfi_handle;
++
++/*
++ * Request 4, "container path of a process": sandbox_container_path_for_pid() and
++ * sandbox_container_path_for_audit_token() of libsystem_sandbox. The argument is
++ * { pid, version of the pid, buffer, its size, whether the version is to be compared }.
++ *
++ * On a device the Sandbox learns the container when the program is executed (it asks
++ * containermanagerd) and confines the process to it. Nothing is confined here, but the question
++ * is still asked and the answer matters: an application extension hosted by PlugInKit does not
++ * run without a container. It gives the buffer a "?" to start with and wants a longer string
++ * back, else "plugin has invalid sandbox or container" (-[PKService checkEnvironment:]) -- the
++ * end of every Intents extension while this request "succeeded" without writing anything.
++ *
++ * Whoever starts a program that lives in a container -- RunningBoard an application, pkd an
++ * extension -- has had the path from containermanagerd and passes it in the environment as
++ * CFFIXED_USER_HOME, which is where Foundation takes the home directory from. So that is the
++ * answer: it is looked up among the strings exec left at the top of the stack of the process.
++ * A process without the variable has no container, and gets what every process got before:
++ * success and an untouched buffer.
++ */
++#define SANDBOX_SYSCALL_CONTAINER_PATH  4
++#define SANDBOX_CONTAINER_VARIABLE      "CFFIXED_USER_HOME="
++
++static int
++minisandbox_container_path(user_addr_t arg)
++{
++	struct {
++		int64_t     pid;
++		uint64_t    pidversion;
++		user_addr_t buffer;
++		user_size_t size;
++		uint64_t    check_pidversion;
++	} args;
++	const size_t prefix_len = sizeof(SANDBOX_CONTAINER_VARIABLE) - 1;
++	proc_t p;
++	task_t task;
++	vm_map_t map;
++	vm_map_copy_t copy = NULL;
++	vm_offset_t strings = 0;
++	vm_size_t strings_size;
++	user_addr_t user_stack;
++	size_t argslen, len;
++	const char *s, *end;
++	int error;
++
++	error = copyin(arg, &args, sizeof(args));
++	if (error) {
++		return error;
++	}
++	p = proc_find((int)args.pid);
++	if (p == PROC_NULL) {
++		return ESRCH;
++	}
++	if (args.check_pidversion && (uint64_t)proc_pidversion(p) != args.pidversion) {
++		proc_rele(p);
++		return ESRCH;
++	}
++	user_stack = p->user_stack;
++	argslen = p->p_argslen;
++	task = proc_task(p);
++	if (user_stack == 0 || argslen == 0 || task == TASK_NULL) {
++		proc_rele(p);
++		return 0;
++	}
++	/* the same way as sysctl_procargsx(): the task keeps the map alive once the process is let go */
++	task_reference(task);
++	proc_rele(p);
++	map = get_task_map_reference(task);
++	task_deallocate(task);
++	if (map == VM_MAP_NULL) {
++		return 0;
++	}
++	strings_size = vm_map_round_page(argslen, vm_map_page_mask(map));
++	if (kmem_alloc(kernel_map, &strings, strings_size, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
++		vm_map_deallocate(map);
++		return ENOMEM;
++	}
++	if (vm_map_copyin(map, (vm_map_address_t)(user_stack - strings_size), strings_size, FALSE, &copy) != KERN_SUCCESS) {
++		copy = NULL;
++	}
++	vm_map_deallocate(map);
++	if (copy == NULL || vm_map_copy_overwrite(kernel_map, strings, copy, strings_size, FALSE) != KERN_SUCCESS) {
++		if (copy != NULL) {
++			vm_map_copy_discard(copy);
++		}
++		kmem_free(kernel_map, strings, strings_size);
++		return 0;                       /* the process is on its way out, or has unmapped its own stack */
++	}
++
++	end = (const char *)(strings + strings_size);
++	for (s = end - argslen; s < end; s += len + 1) {
++		len = strnlen(s, end - s);
++		if (len > prefix_len && s + len < end && strncmp(s, SANDBOX_CONTAINER_VARIABLE, prefix_len) == 0) {
++			s += prefix_len;
++			len -= prefix_len;
++			error = len < args.size ? copyout(s, args.buffer, len + 1) : ENAMETOOLONG;
++			break;
++		}
++	}
++	kmem_free(kernel_map, strings, strings_size);
++	return error;
++}
++
++/* Which request numbers have been seen: one log line each, to learn what user space asks for. */
++static uint64_t minisandbox_seen;
++
++static int
++minisandbox_policy_syscall(struct proc *p, int call, user_addr_t arg)
++{
++	if (call >= 0 && call < 64 && (minisandbox_seen & (1ULL << call)) == 0) {
++		minisandbox_seen |= 1ULL << call;
++		printf("minisandbox: request %d (first seen from %s[%d]): %s\n", call, p->p_comm, proc_getpid(p),
++		    call == SANDBOX_SYSCALL_CONTAINER_PATH ? "answered" : "allowed");
++	}
++	if (call == SANDBOX_SYSCALL_CONTAINER_PATH) {
++		return minisandbox_container_path(arg);
++	}
++	return 0;
++}
++
++/*
++ * Privileges for processes that are not root. On a device the sandbox hands them out by
++ * entitlement: a privilege is granted to a process whose code signature has the entitlement
++ * that goes with it. The table is the same pairing: the names are the entitlements iOS's own
++ * programs carry for them (dasd "vm-pressure-level", symptomsd and aggregated
++ * com.apple.private.network.statistics, mediaserverd and mDNSResponder
++ * com.apple.private.network.socket-delegate -- without which NECP said "does not hold the
++ * necessary entitlement to delegate network traffic" -- and so on).
++ *
++ * That NECP line is worth knowing for what it is NOT: it costs nothing. The macro that prints it
++ * (bsd/net/necp.c, NECP_VERIFY_DELEGATION_ENTITLEMENT) only breaks out of the parameter it was
++ * reading, so the delegation is dropped and the policy is matched against the caller itself; no
++ * error is returned and no connection is refused. A session where trustd prints it four hundred
++ * times is a session where trustd's own connections all go through. A stock iPhone prints it too.
++ * It is noise, not a wall -- do not go looking for a daemon's missing network behind it.
++ *
++ *   PRIV_WORK_INTERVAL    is granted to every process, entitlement or not: telling the scheduler
++ *                         about the work of drawing a frame. UIKit does it as soon as anything
++ *                         scrolls, and takes a refusal for a programming error ("Failed to create
++ *                         work interval"): SpringBoard died of it on the first swipe between
++ *                         pages of the home screen.
++ *
++ * Whatever is refused is said once, to learn what there is. Boot-arg privs=0: only
++ * PRIV_WORK_INTERVAL, as before.
++ */
++extern kern_return_t miniamfi_entitlement_boolean(struct proc *proc, const char *name);
++
++static const struct {
++	int priv;
++	const char *entitlement;
++} minisandbox_privileges[] = {
++	{ PRIV_PROC_UUID_POLICY, "com.apple.private.kernel.uuid-policy" },
++	{ PRIV_GLOBAL_PROC_INFO, "com.apple.private.kernel.global-proc-info" },
++	{ PRIV_SYSTEM_OVERRIDE, "com.apple.private.kernel.system-override" },
++	{ PRIV_HW_DEBUG_DATA, "com.apple.private.kernel.hw-debug-data" },
++	{ PRIV_SELECTIVE_FORCED_IDLE, "com.apple.private.kernel.selective-forced-idle" },
++	{ PRIV_DARKBOOT, "com.apple.private.kernel.darkboot" },
++	{ PRIV_AUDIO_LATENCY, "com.apple.private.kernel.audio_latency" },
++	{ PRIV_KTRACE_BACKGROUND, "com.apple.private.kernel.ktrace-background" },
++	{ PRIV_SETPRIORITY_DARWIN_ROLE, "com.apple.private.kernel.setpriority-darwin-role" },
++	{ PRIV_PACKAGE_EXTENSIONS, "com.apple.private.kernel.set-package-extensions" },
++	{ PRIV_TRIM_ACTIVE_FILE, "com.apple.private.apfs.trim-active-file" },
++	{ PRIV_PROC_CPUMON_OVERRIDE, "com.apple.private.kernel.override-cpumon" },
++	{ PRIV_VM_PRESSURE, "vm-pressure-level" },
++	{ PRIV_VM_JETSAM, "com.apple.private.kernel.jetsam" },
++	{ PRIV_NET_PRIVILEGED_TRAFFIC_CLASS, "com.apple.private.network.privileged-traffic-class" },
++	{ PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, "com.apple.private.network.socket-delegate" },
++	{ PRIV_NET_INTERFACE_CONTROL, "com.apple.private.network.interface-control" },
++	{ PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, "com.apple.private.network.statistics" },
++	{ PRIV_NET_PRIVILEGED_NECP_POLICIES, "com.apple.private.necp.policies" },
++	{ PRIV_NET_RESTRICTED_AWDL, "com.apple.private.network.awdl.restricted" },
++	{ PRIV_NET_QOSMARKING_POLICY_OVERRIDE, "com.apple.private.network.qos-marking-policy-override" },
++	{ PRIV_NET_RESTRICTED_MULTIPATH_EXTENDED, "com.apple.developer.networking.multipath_extended" },
++	{ PRIV_NET_RESTRICTED_ROUTE_NC_READ, "com.apple.developer.networking.route_nc_read" },
++	{ PRIV_NET_VALIDATED_RESOLVER, "com.apple.private.validated-resolver" },
++	{ PRIV_NET_CUSTOM_PROTOCOL, "com.apple.developer.networking.custom-protocol" },
++	{ PRIV_NET_PRIVILEGED_NECP_DROP_ALL_BYPASS, "com.apple.private.necp.drop_all_bypass" },
++	{ PRIV_NET_PRIVILEGED_IPSEC_WAKE_PACKET, "com.apple.private.network.ipsec-wake-packet" },
++	{ PRIV_NETINET_RESERVEDPORT, "com.apple.private.network.reserved-port" },
++	{ PRIV_NETINET_TCP_KA_OFFLOAD, "com.apple.developer.networking.tcp_ka_offload" },
++	{ PRIV_SKYWALK_REGISTER_USER_PIPE, "com.apple.private.skywalk.register-user-pipe" },
++	{ PRIV_SKYWALK_REGISTER_KERNEL_PIPE, "com.apple.private.skywalk.register-kernel-pipe" },
++	{ PRIV_SKYWALK_REGISTER_NET_IF, "com.apple.private.skywalk.register-net-if" },
++	{ PRIV_SKYWALK_REGISTER_FLOW_SWITCH, "com.apple.private.skywalk.register-flow-switch" },
++	{ PRIV_SKYWALK_OBSERVE_ALL, "com.apple.private.skywalk.observe-all" },
++	{ PRIV_SKYWALK_OBSERVE_STATS, "com.apple.private.skywalk.observe-stats" },
++	{ PRIV_VFS_OPEN_BY_ID, "com.apple.private.vfs.open-by-id" },
++	{ PRIV_VFS_MOVE_DATA_EXTENTS, "com.apple.private.vfs.move-data-extents" },
++	{ PRIV_VFS_SNAPSHOT, "com.apple.private.vfs.snapshot" },
++	{ PRIV_VFS_DATALESS_RESOLVER, "com.apple.private.vfs.dataless-resolver" },
++	{ PRIV_VFS_SETSIZE, "com.apple.private.vfs.setsize" },
++};
++static TUNABLE(uint32_t, minisandbox_by_entitlement, "privs", 1);
++
++static int
++minisandbox_priv_grant(kauth_cred_t cred, int priv)
++{
++	static int seen[32];
++	static unsigned seen_count;
++	proc_t proc = current_proc();
++
++	if (priv == PRIV_WORK_INTERVAL) {
++		return 0;
++	}
++	/* (the entitlements are the current process's: only for a question about its own credential) */
++	for (unsigned i = 0; minisandbox_by_entitlement && cred == kauth_cred_get() &&
++	    i < sizeof(minisandbox_privileges) / sizeof(minisandbox_privileges[0]); i++) {
++		if (minisandbox_privileges[i].priv == priv) {
++			if (miniamfi_entitlement_boolean(proc, minisandbox_privileges[i].entitlement) == KERN_SUCCESS) {
++				return 0;
++			}
++			break;
++		}
++	}
++	for (unsigned i = 0; i < seen_count; i++) {
++		if (seen[i] == priv) {
++			return EPERM;
++		}
++	}
++	if (seen_count < sizeof(seen) / sizeof(seen[0])) {
++		seen[seen_count++] = priv;
++		printf("minisandbox: privilege %d refused to %s[%d] (first time)\n", priv, proc->p_comm,
++		    proc_getpid(proc));
++	}
++	return EPERM;
++}
++
++static const struct mac_policy_ops minisandbox_ops = {
++	.mpo_policy_syscall = minisandbox_policy_syscall,
++	.mpo_priv_grant = minisandbox_priv_grant,
++};
++
++SECURITY_READ_ONLY_LATE(static struct mac_policy_conf) minisandbox_conf = {
++	.mpc_name = "Sandbox",
++	.mpc_fullname = "Seatbelt sandbox policy (stand-in)",
++	.mpc_ops = &minisandbox_ops,
++};
++SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) minisandbox_handle;
++
++/* Called from kernel_bootstrap_thread() once the MAC framework is up. */
++void
++minimac_policy_init(void)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("amfi_get_out_of_my_way", &enabled, sizeof(enabled)) || !enabled) return;
++	mac_policy_register(&miniamfi_conf, &miniamfi_handle, NULL);
++	mac_policy_register(&minisandbox_conf, &minisandbox_handle, NULL);
++}
++
++#endif
+--- /dev/null
++++ b/bsd/kern/pong_userland.c
+@@ -0,0 +1,24 @@
++#include <pexpert/arm64/board_config.h>
++/* Pong / 20G81 static-init progress, recorded by the existing kernel console. */
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/proc.h>
++#include <sys/sysctl.h>
++#include <sys/errno.h>
++
++static int
++pong_boot_log SYSCTL_HANDLER_ARGS
++{
++    char message[256] = {0};
++    if (req->newptr == USER_ADDR_NULL || req->newlen == 0) return EINVAL;
++    if (proc_pid(req->p) != 1) return EPERM;
++    int error = sysctl_handle_string(oidp, message, sizeof(message), req);
++    if (error) return error;
++    printf("Pong init: %s\n", message);
++    return 0;
++}
++SYSCTL_PROC(_kern, OID_AUTO, pong_boot_log,
++    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_LOCKED,
++    0, 0, pong_boot_log, "A", "PID 1 boot milestones");
++#endif
+--- a/libkern/conf/files
++++ b/libkern/conf/files
+@@ -109,6 +109,8 @@
+ libkern/img4/interface.c 		standard
+ 
+ libkern/amfi/amfi.c 		standard
++libkern/amfi/miniamfi.c		standard
++libkern/amfi/miniamfi_entitlements.cpp	standard
+ 
+ libkern/stack_protector.c       standard
+ libkern/ptrauth_utils.c         standard
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -383,6 +383,8 @@
+ bsd/kern/kern_symfile.c			standard
+ bsd/kern/kern_descrip.c			standard
+ bsd/kern/kern_guarded.c			standard
++bsd/kern/kern_minimac.c			optional config_macf
++bsd/kern/pong_userland.c			standard
+ bsd/kern/kern_event.c			standard
+ bsd/kern/kern_control.c			optional networking
+ bsd/kern/kern_exec.c			standard
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -721,6 +721,10 @@
+ 	kernel_bootstrap_log("vnguard_policy_init");
+ 	vnguard_policy_init();
+ #endif
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++	extern void minimac_policy_init(void);
++	minimac_policy_init();
++#endif
+ #endif
+ 
+ #if CONFIG_DTRACE
+--- a/bsd/dev/arm/km.c
++++ b/bsd/dev/arm/km.c
+@@ -204,6 +204,13 @@
+ 		 */
+ 		error = EINVAL;
+ 		break;
++
++#if defined(PONG)
++	case TIOCSCTTY:
++		/* Shared boot console must survive a daemon/session leader exiting. */
++		error = ENOTTY;
++		break;
++#endif
+ 
+ 	/* Bodge in the CLOCAL flag as the km device is always local */
+ 	case TIOCSETA_32:
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7308,6 +7308,21 @@
+ 	}
+ #endif
+ 
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++	/* The optional helper resides on the genuine pre-mounted scratch Data,
++	 * like HackiOS's separate init image. No OS/userdata rewrite is needed. */
++	char pong_init_path[128];
++	if (PE_parse_boot_argn("pong_init_path", pong_init_path, sizeof(pong_init_path))) {
++		if (strcmp(pong_init_path, "/private/var/pong/init") != 0)
++			panic("Unsupported Pong init path");
++		printf("Pong init: loading helper %s\n", pong_init_path);
++		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, pong_init_path, init_envp);
++		printf("Pong init: helper exec result=%d\n", error);
++		if (error) panic("Pong init helper exec failed, errno %d", error);
++		return;
++	}
++#endif
++
+ 	error = ENOENT;
+ 	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
+ 		printf("load_init_program: attempting to load %s\n", init_programs[i]);

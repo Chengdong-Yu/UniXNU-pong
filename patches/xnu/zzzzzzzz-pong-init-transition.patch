@@ -1,0 +1,94 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -61,6 +61,10 @@
+ #include <vm/vm_kern.h>
+ 
+ #include <sys/errno.h>
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++#include <kern/task.h>
++extern int proc_pid(struct proc *);
++#endif
+ #include <sys/kdebug.h>
+ #include <kperf/kperf.h>
+ 
+@@ -260,6 +264,9 @@
+ static arm_saved_state64_t *original_faulting_state = NULL;
+ 
+ TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++static TUNABLE(bool, pong_init_trace, "pong_init_trace", false);
++#endif
+ 
+ extern vm_offset_t static_memory_end;
+ 
+@@ -628,6 +635,23 @@
+ 	}
+ #endif
+ 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	/* Bounded PID 1 records: no stack walks, user copies, registry or MMIO. */
++	static unsigned pong_init_faults, pong_init_svcs;
++	struct proc *pong_proc = get_bsdtask_info(get_threadtask(thread));
++	bool pong_record = false;
++	if (pong_init_trace && is_user && pong_proc && proc_pid(pong_proc) == 1) {
++		unsigned *count = class == ESR_EC_SVC_64 ? &pong_init_svcs : &pong_init_faults;
++		if (*count < 8) { ++*count; pong_record = true; }
++	}
++	if (pong_record) {
++		printf("Pong init: user exception enter class=%x esr=%x far=%llx pc=%llx sp=%llx x16=%llx\n",
++		    class, esr, (unsigned long long)far,
++		    (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_sp(state),
++		    (unsigned long long)get_saved_state_reg(state, 16));
++	}
++#endif
+ 
+ 	/*
+ 	 * Use KERNEL_DEBUG_CONSTANT_IST here to avoid producing tracepoints
+@@ -699,10 +723,20 @@
+ 		}
+ 
+ 		handle_svc(state);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		    class, (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_reg(state, 0));
++#endif
+ 		break;
+ 
+ 	case ESR_EC_DABORT_EL0:
+ 		handle_abort(state, esr, far, inspect_data_abort, handle_user_abort, expected_fault_handler);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		    class, (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_reg(state, 0));
++#endif
+ 		break;
+ 
+ 	case ESR_EC_MSR_TRAP:
+@@ -724,6 +758,11 @@
+ 
+ 	case ESR_EC_IABORT_EL0:
+ 		handle_abort(state, esr, far, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		    class, (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_reg(state, 0));
++#endif
+ 		break;
+ 
+ 	case ESR_EC_IABORT_EL1:
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1272,6 +1272,11 @@
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
+ 	load_init_program(p);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	uint32_t trace_init = 0;
++	if (PE_parse_boot_argn("pong_init_trace", &trace_init, sizeof(trace_init)) && trace_init)
++		printf("Pong init: bsdinit_task completed; returning through AST\n");
++#endif
+ 	lock_trace = 1;
+ }
+ 

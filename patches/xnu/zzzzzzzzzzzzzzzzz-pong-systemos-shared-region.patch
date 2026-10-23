@@ -1,0 +1,92 @@
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2271,7 +2271,59 @@
+ 	return authorized;
+ }
+ #endif
++
++#if defined(PONG) && defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT && !CONFIG_CSR
++#if !DEVELOPMENT && !DEBUG
++#error The Pong SystemOS shared-region binding is development-only
++#endif
++extern volatile int native_owner_cache_status;
++extern volatile int native_owner_cache_authorized;
++extern volatile int native_owner_cache_root_recheck;
++extern volatile int native_owner_cache_readonly;
++extern volatile uintptr_t native_owner_cache_current_root;
++extern volatile dev_t native_owner_cache_selected_device;
++extern volatile dev_t native_owner_cache_mounted_device;
++
++/* HackiOS accepts a Cryptex volume mounted below Preboot. Pong mounts the
++ * UUID-selected SystemOS volume directly at /private/preboot, so validate
++ * that exact mount/device/directory relationship instead of its parent. */
++static boolean_t
++pong_owner_shared_cache_mount(vnode_t process_root, vnode_t file)
++{
++	const char *directory = "/private/preboot/System/Library/Caches/com.apple.dyld";
++	vnode_t expected_parent = NULLVP;
++	vnode_t device_vnode = NULLVP;
++	boolean_t authorized = FALSE;
++	dev_t actual = NODEV;
+ 
++	if (process_root != rootvnode || !file || vnode_vtype(file) != VREG ||
++	    native_owner_cache_status != 0 || !native_owner_cache_authorized ||
++	    !native_owner_cache_root_recheck || !native_owner_cache_readonly ||
++	    native_owner_cache_current_root != (uintptr_t)rootvnode ||
++	    native_owner_cache_selected_device == NODEV ||
++	    native_owner_cache_selected_device != native_owner_cache_mounted_device) {
++		return FALSE;
++	}
++	mount_t root_mount = vnode_mount(process_root);
++	mount_t cache_mount = vnode_mount(file);
++	if (!root_mount || !cache_mount || root_mount == cache_mount ||
++	    !(vfs_flags(root_mount) & MNT_RDONLY) || !(vfs_flags(cache_mount) & MNT_RDONLY) ||
++	    strcmp(vfs_statfs(root_mount)->f_fstypename, "apfs") ||
++	    strcmp(vfs_statfs(cache_mount)->f_fstypename, "apfs")) return FALSE;
++	device_vnode = vfs_devvp(cache_mount);
++	if (device_vnode) {
++		actual = vnode_specrdev(device_vnode);
++		vnode_put(device_vnode);
++	}
++	if (actual != native_owner_cache_selected_device ||
++	    vnode_lookup(directory, 0, &expected_parent, vfs_context_current())) return FALSE;
++	authorized = vnode_vtype(expected_parent) == VDIR &&
++	    vnode_mount(expected_parent) == cache_mount && vnode_parent(file) == expected_parent;
++	vnode_put(expected_parent);
++	return authorized;
++}
++#endif
++
+ /*
+  * Setup part of _shared_region_map_and_slide().
+  * It had to be broken out of _shared_region_map_and_slide() to
+@@ -2606,6 +2658,9 @@
+ 		assert(rdir_vp != NULL);
+ #if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+ 		boolean_t owner_carrier = FALSE;
++#endif
++#if defined(PONG) && defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++		boolean_t pong_owner_cache = FALSE;
+ #endif
+ 		if (srfmp->vp->v_mount != rdir_vp->v_mount) {
+ #if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+@@ -2614,6 +2669,9 @@
+ 			vnode_t preboot_vp = NULL;
+ #if XNU_TARGET_OS_OSX
+ #define PREBOOT_CRYPTEX_PATH "/System/Volumes/Preboot/Cryptexes"
++#elif defined(PONG) && defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++			pong_owner_cache = pong_owner_shared_cache_mount(rdir_vp, srfmp->vp);
++#define PREBOOT_CRYPTEX_PATH "/private/preboot/Cryptexes"
+ #else
+ #define PREBOOT_CRYPTEX_PATH "/private/preboot/Cryptexes"
+ #endif
+@@ -2622,6 +2680,9 @@
+ #if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+ 			    && !owner_carrier
+ #endif
++#if defined(PONG) && defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++			    && !pong_owner_cache
++#endif
+ 			    ) {
+ 				SHARED_REGION_TRACE_ERROR(
+ 					("shared_region: %p [%d(%s)] map(%p:'%s'): "

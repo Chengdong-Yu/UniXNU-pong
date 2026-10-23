@@ -1,0 +1,74 @@
+--- a/iokit/Kernel/MiniIOSurface.cpp
++++ b/iokit/Kernel/MiniIOSurface.cpp
+@@ -12,6 +12,7 @@
+ #include <pexpert/arm64/board_config.h>
+ #if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOPlatformExpert.h>
+ #include <pexpert/pexpert.h>
+ #include <IOKit/IOLocks.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -524,6 +525,12 @@
+ 			}
+ 			p->width = dictNumber(pd, "IOSurfacePlaneWidth", width);
+ 			p->height = dictNumber(pd, "IOSurfacePlaneHeight", height);
++			uint32_t pbpe = dictNumber(pd, "IOSurfacePlaneBytesPerElement", bpe ? bpe : 1);
++			if (p->width > MINISURF_MAX_DIMENSION || p->height > MINISURF_MAX_DIMENSION ||
++			    pbpe == 0 || pbpe > 65535) {
++				s->release();
++				return NULL;
++			}
+ 			p->bytesPerElement = (uint16_t) dictNumber(pd, "IOSurfacePlaneBytesPerElement", bpe ? bpe : 1);
+ 			p->elementWidth = (uint8_t) pew;
+ 			p->elementHeight = (uint8_t) peh;
+@@ -533,7 +540,17 @@
+ 			}
+ 			p->size = dictNumber(pd, "IOSurfacePlaneSize", 0);
+ 			if (p->size == 0) {
+-				p->size = p->bytesPerRow * ((p->height + peh - 1) / peh);
++				uint64_t planeSize = (uint64_t)p->bytesPerRow * ((p->height + peh - 1) / peh);
++				if (planeSize > MINISURF_MAX_ALLOC) {
++					s->release();
++					return NULL;
++				}
++				p->size = (uint32_t)planeSize;
++			}
++			if (p->bytesPerRow < (uint64_t)((p->width + pew - 1) / pew) * pbpe ||
++			    p->size < (uint64_t)p->bytesPerRow * ((p->height + peh - 1) / peh)) {
++				s->release();
++				return NULL;
+ 			}
+ 			p->offset = dictNumber(pd, "IOSurfacePlaneOffset", dictNumber(pd, "IOSurfacePlaneBase", (uint32_t) needed));
+ 			p->extendedPixels[0] = dictNumber(pd, "IOSurfacePlaneExtendedPixelsOnLeft", 0);
+@@ -568,12 +585,20 @@
+ 	if (bpe == 0) {
+ 		bpe = planeCount ? s->planes[0].bytesPerElement : defaultBytesPerElement(format);
+ 	}
++	if (bpe == 0 || bpe > 65535) {
++		s->release();
++		return NULL;
++	}
+ 	bpr = dictNumber(props, "IOSurfaceBytesPerRow", 0);
+ 	if (bpr == 0) {
+ 		bpr = planeCount ? s->planes[0].bytesPerRow
+ 		    : alignUp((uint64_t) ((width + ew - 1) / ew) * bpe, MINISURF_ROW_ALIGN);
+ 	}
+ 	if (planeCount == 0) {
++		if (bpr < (uint64_t)((width + ew - 1) / ew) * bpe) {
++			s->release();
++			return NULL;
++		}
+ 		needed = (uint64_t) bpr * ((height + eh - 1) / eh);
+ 		/* the one implicit plane, for the per-plane getters */
+ 		s->planes[0].width = width;
+@@ -607,6 +632,10 @@
+ 	} else {
+ 		/* (the memory is as big as its owner says, and not a byte of ours is added to it) */
+ 		alloc = dictNumber(props, "IOSurfaceAllocSize", (uint32_t) needed);
++		if (alloc < needed || wrapped->unsigned64BitValue() > ~0ULL - alloc) {
++			s->release();
++			return NULL;
++		}
+ 	}
+ 
+ 	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped ? 0 : alloc));

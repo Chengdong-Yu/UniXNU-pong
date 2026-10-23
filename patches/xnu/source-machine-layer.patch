@@ -1,0 +1,72 @@
+diff --git a/config/MASTER b/config/MASTER
+index 07147cb..0ff6de8 100644
+--- a/config/MASTER
++++ b/config/MASTER
+@@ -321,6 +321,8 @@ options   CONFIG_EMBEDDED			# <config_embedded>
+ # Compile XNU with PPL support.
+ options   CONFIG_PMAP_PPL			# <config_pmap_ppl>
+ 
++options   CONFIG_APPLE_AMCC			# <apple_amcc>
++
+ options   NOS_ARM_ASM			# <nos_arm_asm>
+ options   NOS_ARM_PMAP			# <nos_arm_pmap>
+ 
+@@ -611,8 +613,6 @@ options		CONFIG_DTRACE		#		    # <config_dtrace>
+ options		LOCK_STATS		#		    # <lock_stats>
+ 
+ # kernel performance tracing
+-options     KPERF                  # <kperf>
+-options     KPC                    # <kpc>
+ 
+ 
+ options     CONFIG_PERVASIVE_CPI    # <config_pervasive_cpi>
+diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
+index 1ed75ee..122da24 100644
+--- a/config/MASTER.arm64.bcm2837
++++ b/config/MASTER.arm64.bcm2837
+@@ -16,7 +16,7 @@
+ #  Standard Apple OS Configurations:
+ #  -------- ----- -- ---------------
+ #
+-#  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
++#  KERNEL_BASE =    [ arm64 config_pmap_ppl nos_arm_asm nos_arm_pmap xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
+ #  KERNEL_RELEASE = [ KERNEL_BASE ]
+ #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
+ #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
+@@ -48,10 +48,10 @@
+ #  LIBKERN_RELEASE =[ LIBKERN_BASE ]
+ #  LIBKERN_DEV =    [ LIBKERN_BASE iotracking ]
+ #  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
+-#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf kpc ]
++#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf ]
+ #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
+-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
+-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
++#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
++#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
+ #  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
+ #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
+ #  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
+diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
+index c40d57b..dce959a 100644
+--- a/osfmk/conf/files.arm64
++++ b/osfmk/conf/files.arm64
+@@ -25,8 +25,8 @@ osfmk/arm64/WKdmCompress_4k.s	standard
+ osfmk/arm64/WKdmData.s		standard
+ osfmk/arm64/lz4_decode_arm64.s  standard
+ osfmk/arm64/lz4_encode_arm64.s  standard
+-osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl
+-osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm
++osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl apple_amcc
++osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm apple_amcc
+ osfmk/arm64/bcopy.s standard
+ osfmk/arm64/bzero.s standard
+ osfmk/arm/caches.c		standard
+@@ -91,7 +91,6 @@ osfmk/OPTIONS/hi_res_clock	optional hi_res_clock
+ 
+ # Kernel performance monitoring
+ osfmk/arm64/perfmon_arm64.c optional config_perfmon
+-osfmk/arm64/kpc.c		optional kpc nos_arm_asm
+ osfmk/arm64/monotonic_arm64.c optional monotonic
+ 
+ osfmk/arm64/platform_tests.c			optional config_xnupost

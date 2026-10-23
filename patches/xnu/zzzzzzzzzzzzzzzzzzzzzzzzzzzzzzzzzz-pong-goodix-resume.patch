@@ -1,0 +1,24 @@
+--- a/bsd/dev/pong_goodix.c
++++ b/bsd/dev/pong_goodix.c
+@@ -878,6 +878,21 @@
+         printf("Pong touch: Goodix initialization failed; normal UI boot continues\n");
+         thread_terminate(current_thread());return;
+     }
++    /* A readable firmware identity does not mean the controller is scanning:
++     * Android/REC may leave it in sleep or gesture mode. Pong's vendor
++     * brl_resume() resets this already identified Berlin controller. Resume
++     * before publishing input, and require the real firmware/report ABI again.
++     * No firmware upload or fabricated contacts are used. */
++    touch_reset();
++    if (!goodix_probe(true)) {
++        printf("Pong touch: controller did not resume after reset; SKIP\n");
++        thread_terminate(current_thread());return;
++    }
++    const uint8_t clear=0;
++    if (!goodix_write(touch_address,&clear,1)) {
++        printf("Pong touch: cannot acknowledge resumed report; SKIP\n");
++        thread_terminate(current_thread());return;
++    }
+     if (!pong_touch_device_ready()) {thread_terminate(current_thread());return;}
+     printf("Pong touch: Berlin-D ready, SPI 0x%llx GPIO reset=%u irq=%u, axes %ux%u\n",
+         se_phys,PIN_RESET,PIN_INT,max_x,max_y);

@@ -1,0 +1,49 @@
+--- a/bsd/kern/pong_userland.c
++++ b/bsd/kern/pong_userland.c
+@@ -1,6 +1,8 @@
+ #include <pexpert/arm64/board_config.h>
+ /* Pong / 20G81 static-init progress, recorded by the existing kernel console. */
+-#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++/* Retired: boot progress uses the existing console; do not register a
++ * private sysctl solely to let PID 1 print its first message. */
++#if defined(PONG_INIT_SYSCTL_LOG) && PONG_INIT_SYSCTL_LOG
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1703,6 +1703,15 @@
+ 	}
+ 
+ 	mach_kauth_cred_thread_update();
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	static unsigned pong_credential_notes;
++	struct proc *pong_cred_proc = pong_init_trace ? get_bsdtask_info(get_threadtask(thread)) : NULL;
++	if (pong_cred_proc && proc_pid(pong_cred_proc) == 1 &&
++	    pong_credential_notes < 8 && ml_get_interrupts_enabled()) {
++		++pong_credential_notes;
++		printf("Pong init: syscall credentials ready code=%d\n", trap_no);
++	}
++#endif
+ 
+ 	if (trap_no < 0) {
+ 		switch (trap_no) {
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -178,6 +178,16 @@
+ #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
+ 
+ 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	static unsigned pong_dispatch_notes;
++	uint32_t trace_init = 0;
++	if (pid == 1 && pong_dispatch_notes < 8 &&
++	    PE_parse_boot_argn("pong_init_trace", &trace_init, sizeof(trace_init)) &&
++	    trace_init && ml_get_interrupts_enabled()) {
++		++pong_dispatch_notes;
++		printf("Pong init: unix syscall dispatch code=%u\n", code);
++	}
++#endif
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+ 

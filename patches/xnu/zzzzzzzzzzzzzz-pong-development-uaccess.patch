@@ -1,0 +1,94 @@
+--- a/pexpert/pexpert/arm64/PONG.h
++++ b/pexpert/pexpert/arm64/PONG.h
+@@ -17,7 +17,16 @@
+ 
+ /* SM8475 sets PSTATE.PAN on exception entry; copyio must lift it around
+  * user memory access, unlike the original BCM2837/A53 target. */
+-#if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN
++/* Development-only compatibility mode: use the generic no-PAN uaccess
++ * implementation and preserve PAN=0 across exception entry. All three
++ * pieces (copyio, initial PSTATE and SCTLR.SPAN) must agree. */
++#if defined(XNU_PONG_LEGACY_UACCESS) && XNU_PONG_LEGACY_UACCESS && \
++    (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++#define PONG_LEGACY_UACCESS 1
++#else
++#define PONG_LEGACY_UACCESS 0
++#endif
++#if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN && !PONG_LEGACY_UACCESS
+ #define __ARM_PAN_AVAILABLE__ 1
+ #endif
+ 
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -647,12 +647,18 @@
+ #define SCTLR_JOP_KEYS_DEFAULT  0
+ #endif
+ 
++#if defined(PONG_LEGACY_UACCESS) && PONG_LEGACY_UACCESS
++#define SCTLR_PONG_UACCESS_DEFAULT SCTLR_PAN_UNCHANGED
++#else
++#define SCTLR_PONG_UACCESS_DEFAULT 0
++#endif
++
+ #define SCTLR_EL1_DEFAULT \
+ 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
+ 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED |                    \
+ 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
+ 	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
+-	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT)
++	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT | SCTLR_PONG_UACCESS_DEFAULT)
+ 
+ /*
+  * Coprocessor Access Control Register (CPACR)
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -526,6 +526,16 @@
+ #if __ARM_PAN_AVAILABLE__
+ 	__builtin_arm_wsr("pan", 1);
+ #endif  /* __ARM_PAN_AVAILABLE__ */
++#if defined(PONG_LEGACY_UACCESS) && PONG_LEGACY_UACCESS
++	/* SM8475 supports PAN even when the generic copyio implementation does
++	 * not use it. Keep exception entry from silently re-enabling it. The
++	 * default SCTLR also carries SPAN so later CPU setup stays consistent. */
++	uint64_t pong_sctlr = __builtin_arm_rsr64("SCTLR_EL1");
++	__builtin_arm_wsr64("SCTLR_EL1", pong_sctlr | SCTLR_PAN_UNCHANGED);
++	__asm__ volatile("isb" ::: "memory");
++	__builtin_arm_wsr("pan", 0);
++	__asm__ volatile("isb" ::: "memory");
++#endif
+ 
+ 	arm_vm_init(xmaxmem, args);
+ 
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1585,6 +1585,18 @@
+ 		panic_with_thread_kernel_state("Unexpected abort while on interrupt stack.", state);
+ 	}
+ 
++#if defined(PONG)
++	/* PAN is a permission restriction on the current instruction, not a
++	 * missing page. A successful pmap ref/mod update cannot fix it. Retrying
++	 * the same access can loop forever; use copyio's real EFAULT recovery. */
++	if (recover && is_permission_fault(fault_code) &&
++	    !VM_KERNEL_ADDRESS(fault_addr) &&
++	    (get_saved_state_cpsr(state) & PSR64_PAN)) {
++		handle_kernel_abort_recover(state, esr, fault_addr, thread);
++		return;
++	}
++#endif
++
+ 	if (is_vm_fault(fault_code)) {
+ 		kern_return_t result = KERN_FAILURE;
+ 		vm_map_t      map;
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7315,6 +7315,9 @@
+ 	if (PE_parse_boot_argn("pong_init_path", pong_init_path, sizeof(pong_init_path))) {
+ 		if (strcmp(pong_init_path, "/private/var/pong/init") != 0)
+ 			panic("Unsupported Pong init path");
++#if defined(PONG_LEGACY_UACCESS) && PONG_LEGACY_UACCESS
++		printf("Pong uaccess: development no-PAN mode; SCTLR.SPAN preserved\n");
++#endif
+ 		printf("Pong init: loading helper %s\n", pong_init_path);
+ 		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, pong_init_path, init_envp);
+ 		printf("Pong init: helper exec result=%d\n", error);

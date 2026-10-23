@@ -1,0 +1,24 @@
+# Apple restore components are fetched locally by scripts; never commit them.
+/apple/
+/out/
+/build/
+*.ipsw
+*.dmg
+*.cdr
+*.img
+*.bin
+*.fw
+*.mdt
+*.b01
+*.b02
+*.im4p
+*.im4m
+*.trustcache
+*.ramdisk
+*.lzfse
+*.partial
+*.dSYM/
+*.o
+*.a
+__pycache__/
+*.py[cod]

@@ -1,0 +1,29 @@
+diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -918,7 +918,11 @@ consdebug_putc(char c)
+ 
+ 	debug_putc(c);
+ 
+-	if (!console_is_serial() && !disable_serial_output) {
++	if (!console_is_serial() && !disable_serial_output
++#if defined(ARM64_BOARD_CONFIG_PONG)
++	    && PE_kputc != console_write_unbuffered
++#endif
++	    ) {
+ 		PE_kputc(c);
+ 	}
+ }
+@@ -932,7 +936,11 @@ consdebug_putc_unbuffered(char c)
+ 
+ 	debug_putc(c);
+ 
+-	if (!console_is_serial() && !disable_serial_output) {
++	if (!console_is_serial() && !disable_serial_output
++#if defined(ARM64_BOARD_CONFIG_PONG)
++	    && PE_kputc != console_write_unbuffered
++#endif
++	    ) {
+ 		PE_kputc(c);
+ 	}
+ }

@@ -1,0 +1,8 @@
+# Fetch at build time from the iOS 16.6.1 / 20G81 iPad7,1 restore URL in board.toml.
+# These Apple files are not stored in this repository.
+KernelCache
+DeviceTree
+StaticTrustCache
+Cryptex1,SystemTrustCache
+Cryptex1
+OS

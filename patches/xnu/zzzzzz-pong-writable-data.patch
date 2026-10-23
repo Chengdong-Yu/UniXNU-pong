@@ -1,0 +1,50 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6996,8 +6996,11 @@
+ 
+ #if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+ #if !defined(XNU_OWNER_BOOT_MANIFEST) || !XNU_OWNER_BOOT_MANIFEST
+-#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL || !defined(XNU_PONG_APFS_DEBUG) || !XNU_PONG_APFS_DEBUG || !defined(XNU_OWNER_CACHE_MOUNT) || !XNU_OWNER_CACHE_MOUNT || !defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS
+-#error Unauthenticated scratch Data is limited to the read-only Pong development SystemOS union path
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL || !defined(XNU_PONG_APFS_DEBUG) || !XNU_PONG_APFS_DEBUG || !defined(XNU_OWNER_CACHE_MOUNT) || !XNU_OWNER_CACHE_MOUNT || !defined(XNU_NATIVE_RAM_BLOCK) || !XNU_NATIVE_RAM_BLOCK
++#error Scratch Data requires the Pong development NativeRamBlock and SystemOS mount path
++#endif
++#if (!defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS) && (!defined(XNU_OWNER_CRYPTEX_FILES) || !XNU_OWNER_CRYPTEX_FILES)
++#error Scratch Data requires mounted SystemOS via union or Cryptex files
+ #endif
+ #endif
+ #if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+@@ -7019,6 +7022,12 @@
+ static int
+ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ {
++	/* Writable Data is selected only after the existing OS/SystemOS handoff. */
++	if (native_owner_cache_status != 0 || !native_owner_cache_authorized ||
++	    !native_owner_cache_root_recheck) {
++		native_owner_data_status = ENXIO;
++		return ENXIO;
++	}
+ 	printf("PONG APFS: scratch Data prepare enter uuid=%s\n", XNU_OWNER_DATA_VOLUME_UUID);
+ 	uint64_t base = 0, size = 0;
+ 	dev_t device = NODEV;
+@@ -7070,6 +7079,10 @@
+ 	error = vnode_lookup("/private/var", 0, &data_root, vfs_context_current());
+ 	if (error) goto done;
+ 	mount_t data_mount = vnode_mount(data_root);
++	if (!data_mount || data_mount == vnode_mount(rootvnode)) {
++		error = ENXIO;
++		goto done;
++	}
+ 	vnode_t device_node = vfs_devvp(data_mount);
+ 	dev_t actual = device_node ? vnode_specrdev(device_node) : NODEV;
+ 	if (device_node) vnode_put(device_node);
+@@ -7244,6 +7257,9 @@
+ 	int data_error = native_owner_data_prepare(p, (user_addr_t)scratch_addr);
+ 	if (data_error) printf("PONG DEVELOPMENT: scratch Data mount SKIP error=%d stage=%d\n",
+ 	    data_error, native_owner_data_stage);
++	else printf("PONG APFS: scratch Data mount PASS path=/private/var device=%s rw=%d bytes=%llu\n",
++	    native_owner_data_device_path, !native_owner_data_readonly,
++	    (unsigned long long)native_owner_data_seed_size);
+ #endif
+ 	}
+ #if CONFIG_MEMORYSTATUS

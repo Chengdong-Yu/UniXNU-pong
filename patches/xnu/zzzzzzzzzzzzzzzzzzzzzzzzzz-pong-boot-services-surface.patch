@@ -1,0 +1,76 @@
+diff --git a/iokit/Kernel/MiniIOSurface.cpp b/iokit/Kernel/MiniIOSurface.cpp
+index 0c57704..8b6307f 100644
+--- a/iokit/Kernel/MiniIOSurface.cpp
++++ b/iokit/Kernel/MiniIOSurface.cpp
+@@ -924,6 +924,7 @@ class IOSurfaceRootUserClient : public IOUserClient
+ 
+ 	IOReturn methodInit(IOExternalMethodArguments * args);
+ 	IOReturn methodCreate(IOExternalMethodArguments * args);
++	IOReturn methodWrapClientImage(IOExternalMethodArguments * args);
+ 	IOReturn methodLookup(IOExternalMethodArguments * args);
+ 	IOReturn methodLookupFromPort(IOExternalMethodArguments * args);
+ 	IOReturn methodCreatePort(IOExternalMethodArguments * args);
+@@ -1276,6 +1277,54 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
+ 	return ret;
+ }
+ 
++/* 20G81 IOSurfaceClientWrapClientImage sends this 32-byte layout. Use the
++ * same validated, pinned client-memory surface as IOSurfaceCreate(Address),
++ * with its actual pixels shared across tasks; no GPU binding is involved. */
++IOReturn
++IOSurfaceRootUserClient::methodWrapClientImage(IOExternalMethodArguments *args)
++{
++	struct {
++		uint64_t address;
++		uint32_t width, height, format, bytesPerElement, bytesPerRow, allocSize;
++	} image;
++	static_assert(sizeof(image) == 32, "20G81 wrapped image request");
++	if (!args->structureInput || args->structureInputSize != sizeof(image))
++		return kIOReturnBadArgument;
++	memcpy(&image, args->structureInput, sizeof(image));
++	if (!image.address || !image.width || !image.height ||
++	    image.width > MINISURF_MAX_DIMENSION || image.height > MINISURF_MAX_DIMENSION ||
++	    !image.bytesPerElement || image.bytesPerElement > 16 ||
++	    image.bytesPerRow < (uint64_t)image.width * image.bytesPerElement ||
++	    image.allocSize < (uint64_t)image.bytesPerRow * image.height ||
++	    image.allocSize > MINISURF_MAX_ALLOC || image.address > ~0ULL - image.allocSize)
++		return kIOReturnBadArgument;
++	OSDictionary *props = OSDictionary::withCapacity(7);
++	if (!props) return kIOReturnNoMemory;
++	const struct { const char *key; uint64_t value; } values[] = {
++		{"IOSurfaceAddress", image.address}, {"IOSurfaceWidth", image.width},
++		{"IOSurfaceHeight", image.height}, {"IOSurfacePixelFormat", image.format},
++		{"IOSurfaceBytesPerElement", image.bytesPerElement},
++		{"IOSurfaceBytesPerRow", image.bytesPerRow}, {"IOSurfaceAllocSize", image.allocSize}
++	};
++	for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
++		OSNumber *value = OSNumber::withNumber(values[i].value, 64);
++		bool added = value && props->setObject(values[i].key, value);
++		OSSafeReleaseNULL(value);
++		if (!added) { props->release(); return kIOReturnNoMemory; }
++	}
++	IOReturn ret;
++	MiniIOSurface *surface = surfaceCreate(props, &ret);
++	props->release();
++	if (!surface) return ret;
++	IOLockLock(gSurfaceLock);
++	struct minisurf_client_ref *ref = addRef(surface);
++	ret = ref ? returnSurface(ref, false, args) : kIOReturnNoMemory;
++	if (ref && ret != kIOReturnSuccess) dropRef(ref);
++	surfaceUnhold(surface);
++	IOLockUnlock(gSurfaceLock);
++	return ret;
++}
++
+ IOReturn
+ IOSurfaceRootUserClient::methodLookup(IOExternalMethodArguments * args)
+ {
+@@ -1621,6 +1670,8 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		return methodInit(args);
+ 	case kSurfaceMethodCreate:
+ 		return methodCreate(args);
++	case kSurfaceMethodWrapClientImage:
++		return methodWrapClientImage(args);
+ 	case kSurfaceMethodLookup:
+ 		return methodLookup(args);
+ 	case kSurfaceMethodLookupFromPort:

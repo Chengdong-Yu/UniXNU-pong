@@ -1,0 +1,12 @@
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -60,7 +60,7 @@ MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+-MACHINE_FLAGS_ARM64_PONG = -DARM64_BOARD_CONFIG_PONG -mstrict-align
++MACHINE_FLAGS_ARM64_PONG = -DARM64_BOARD_CONFIG_PONG -mstrict-align -Xclang -target-feature -Xclang +pan
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+ 
+ 

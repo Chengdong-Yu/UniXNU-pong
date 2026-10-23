@@ -1,0 +1,507 @@
+--- a/iokit/Kernel/IOCPU.cpp
++++ b/iokit/Kernel/IOCPU.cpp
+@@ -684,6 +684,9 @@
+ 
+ 	IOUnlock(vector->interruptLock);
+ 
++#if !defined(PONG)
++	// Pong installs all vectors before PSCI CPU_ON. Waiting here for every
++	// CPU's local interrupt installation would prevent the first CPU_ON.
+ 	IOTakeLock(vectors[0].interruptLock);
+ 	if (enabledCPUs != numCPUs) {
+ 		assert_wait(this, THREAD_UNINT);
+@@ -692,6 +695,7 @@
+ 	} else {
+ 		IOUnlock(vectors[0].interruptLock);
+ 	}
++#endif
+ 
+ 	return kIOReturnSuccess;
+ }
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -90,7 +90,7 @@
+ #ifdef ARM64_BOARD_CONFIG_PONG
+ #include <pexpert/arm64/PONG.h>
+ #define MAX_L2_CLINE                   6
+-#define MAX_CPUS                       1
++#define MAX_CPUS                       8
+ #define MAX_CPU_CLUSTERS               1
+ #define CORE_NCTRS                     8 /* Unused placeholder: KPC disabled */
+ #endif /* ARM64_BOARD_CONFIG_PONG */
+--- a/pexpert/pexpert/arm64/PONG.h
++++ b/pexpert/pexpert/arm64/PONG.h
+@@ -2,9 +2,9 @@
+ #ifndef _PEXPERT_ARM64_PONG_H
+ #define _PEXPERT_ARM64_PONG_H
+ 
+-// Nothing Phone (2), SM8475. First boot uses only the boot CPU and generic
+-// ARMv8 registers. The GIC/timer provider is separate from this build profile.
++// Nothing Phone (2), SM8475: firmware PSCI and the native GICv3 CPU provider.
+ #define PONG 1
++#define GENERIC_PSCI_SMP 1
+ #define NO_MONITOR 1
+ #define NO_ECORE 1
+ #define ARM_ARCH_TIMER 1
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -915,7 +915,7 @@
+ 	ml_cpu_begin_state_transition(processor->cpu_id);
+ 	ml_broadcast_cpu_event(CPU_BOOT_REQUESTED, processor->cpu_id);
+ 	result = cpu_start(processor->cpu_id);
+-#if defined (__arm__) || defined (__arm64__)
++#if (defined (__arm__) || defined (__arm64__)) && !defined(GENERIC_PSCI_SMP)
+ 	assert(result == KERN_SUCCESS);
+ #else
+ 	if (result != KERN_SUCCESS) {
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -702,6 +702,11 @@
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+ 
++#if defined(GENERIC_PSCI_SMP)
++	extern void psci_smp_cpu_reached(uint32_t);
++	psci_smp_cpu_reached(2); /* PSCI_SMP_CPU_IN_KERNEL */
++#endif
++
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs();
+ #endif
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -680,7 +680,7 @@
+ void
+ cpu_machine_init(void)
+ {
+-	static boolean_t started = FALSE;
++	boolean_t started;
+ 	cpu_data_t      *cpu_data_ptr;
+ 
+ 	cpu_data_ptr = getCpuDatap();
+--- a/osfmk/conf/files
++++ b/osfmk/conf/files
+@@ -361,3 +361,5 @@
+ 
+ osfmk/prng/prng_random.c	standard
+ osfmk/prng/entropy.c   standard
++
++osfmk/arm64/psci_smp.c standard
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -568,7 +568,7 @@
+ #endif /* MONOTONIC */
+ 
+ 	if (wfi) {
+-#if !defined(APPLE_ARM64_ARCH_FAMILY)
++#if !defined(APPLE_ARM64_ARCH_FAMILY) && !defined(GENERIC_PSCI_SMP)
+ 		platform_cache_idle_enter();
+ #endif
+ 
+@@ -943,7 +943,11 @@
+ 			break;
+ 		}
+ #endif
++#if defined(GENERIC_PSCI_SMP)
++		return PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
++#else
+ 		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
++#endif
+ 	}
+ 
+ 	return KERN_SUCCESS;
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -128,6 +128,18 @@
+ 	.globl EXT(reset_vector)
+ LEXT(reset_vector)
+ 	// Preserve x0 for start_first_cpu, if called
++#if defined(GENERIC_PSCI_SMP)
++	// PSCI enters with MMU/caches off. Install vectors before any optional
++	// debug-register access; retain Pong's independent boot-console vectors.
++	msr		DAIFSet, #(DAIFSC_ALL)
++	adrp	x0, EXT(LowSecondaryExceptionVectorBase)@page
++	add		x0, x0, EXT(LowSecondaryExceptionVectorBase)@pageoff
++	msr		VBAR_EL1, x0
++	isb
++	MOV64	x0, 0x30D00800
++	msr		SCTLR_EL1, x0
++	isb
++#else
+ 	// Unlock the core for debugging
+ 	msr		OSLAR_EL1, xzr
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+@@ -138,6 +150,7 @@
+ 	add     x0, x0, EXT(LowExceptionVectorBase)@pageoff
+ 	msr     VBAR_EL1, x0
+ #endif
++#endif /* GENERIC_PSCI_SMP */
+ 
+ 
+ 
+@@ -145,7 +158,7 @@
+ 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
+ 	add		x19, x19, EXT(ResetHandlerData)@pageoff
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+-#if HAS_CLUSTER
++#if HAS_CLUSTER || defined(GENERIC_PSCI_SMP)
+ 	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
+ #else
+ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+@@ -269,6 +282,92 @@
+ 	b		.
+ 	.align	7
+ 	b		.
++#if defined(GENERIC_PSCI_SMP)
++/*
++ * PSCI exception capture for a core other than the boot processor, from its first
++ * instruction (reset_vector) until common_start gives it the kernel's
++ * vectors. The boot loader is not this core's to return to; it leaves a note
++ * of what happened where the processor that is waiting for it looks
++ * (psci_smp_start_cpu()) and switches itself off again.
++ *
++ * VBAR holds a physical address here too, so the note is addressed
++ * physically; the store goes straight to memory when the MMU is still off,
++ * and is sent there when it is not.
++ */
++	.align	11
++	.globl EXT(LowSecondaryExceptionVectorBase)
++LEXT(LowSecondaryExceptionVectorBase)
++	/* EL1 SP 0 */
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	/* EL1 SP1 */
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	/* EL0 64 */
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	/* EL0 32 */
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++	.align	7
++	b		Lsecondary_early_exception
++
++	.align	3
++Lsecondary_early_exception:
++	// struct psci_smp_start_fault: { valid, MPIDR, ESR, ELR, FAR, LR, SP }
++	adrp	x9, EXT(psci_smp_start_fault)@page
++	add		x9, x9, EXT(psci_smp_start_fault)@pageoff
++	mrs		x10, MPIDR_EL1
++	str		x10, [x9, #8]
++	mrs		x10, ESR_EL1
++	str		x10, [x9, #16]
++	mrs		x10, ELR_EL1
++	str		x10, [x9, #24]
++	mrs		x10, FAR_EL1
++	str		x10, [x9, #32]
++	str		lr, [x9, #40]
++	mov		x10, sp
++	str		x10, [x9, #48]
++	mov		x10, #1
++	str		x10, [x9]
++	dc		cvac, x9
++	dsb		sy
++	// PSCI CPU_OFF, by the firmware's calling convention (psci_smp_hvc)
++	adrp	x9, EXT(psci_smp_hvc)@page
++	add		x9, x9, EXT(psci_smp_hvc)@pageoff
++	ldr		w9, [x9]
++	mov		x0, #0x0002
++	movk	x0, #0x8400, lsl #16
++	cbnz	w9, 1f
++	smc		#0
++	b		2f
++1:
++	hvc		#0
++2:
++	wfi											// it does not return; if it does, stay here
++	b		2b
++#endif /* defined(GENERIC_PSCI_SMP) */
+ 	.align 12, 0
+ 
+ #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -0,0 +1,232 @@
++/*
++ * More than one processor on generic (non-Apple) ARMv8 boards.
++ *
++ * On Apple hardware the other cores are powered up by closed drivers. Here
++ * the firmware does it, through the standard power interface of ARM systems
++ * (PSCI): CPU_ON starts a core at an address of the caller's choice, CPU_OFF
++ * stops the calling core for good. The address we give is the kernel's own
++ * reset vector (LowResetVectorBase in start.s), so that a new core takes the
++ * path Apple's cores take: it finds its cpu data by its MPIDR, turns the MMU
++ * on and comes out in arm_init_cpu(). The calls are made with SMC or, under
++ * a hypervisor that implements them itself, with HVC; the boot loader says
++ * which (/chosen/psci-method).
++ *
++ * The platform expert (iokit/Kernel/GenericARMPE.cpp) registers the cores of
++ * the device tree and starts them here, one after the other. Signals between
++ * processors are interrupts of the GIC (gic_v3_irq.c).
++ *
++ * A new core begins with its MMU and caches off, and what it reads then it
++ * reads from memory. On real hardware that is not the same as what the
++ * running processors see: under Qualcomm's hypervisor (the phone this was
++ * written for) a line that is dirty in another core's cache is simply not
++ * there yet. QEMU has no cache and shows none of this. So before CPU_ON
++ * everything that core will read before its MMU is on is written back to
++ * memory (psci_smp_start_cpu()), and what it writes in that state is read
++ * only after throwing away the reader's cached copy.
++ *
++ * The other half is the way out. The kernel ends by returning to the boot
++ * loader (loader_return.c), and the loader gets back only what it started:
++ * one core, the boot processor's. psci_smp_stop_others() makes every other
++ * core switch itself off first, wherever it is.
++ */
++#include <mach/mach_types.h>
++#include <kern/clock.h>
++#include <kern/cpu_number.h>
++#include <kern/debug.h>
++#include <kern/kalloc.h>
++#include <kern/misc_protos.h>
++#include <libkern/kernel_mach_header.h>
++#include <machine/atomic.h>
++#include <arm/caches_internal.h>
++#include <arm/cpu_data_internal.h>
++#include <arm/cpu_internal.h>
++#include <arm/machine_routines.h>
++#include <arm64/proc_reg.h>
++#include <arm64/psci_smp.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <pexpert/arm64/board_config.h>
++#include <vm/pmap.h>
++
++#if defined(GENERIC_PSCI_SMP)
++
++#define PSCI_CPU_OFF            0x84000002u
++#define PSCI_CPU_ON             0xC4000003u
++#define PSCI_AFFINITY_INFO      0xC4000004u
++#define PSCI_AFFINITY_OFF       1
++
++#define PSCI_SMP_START_SECONDS  5       /* how long a started core is waited for */
++#define PSCI_SMP_STOP_SECONDS   3       /* ... and the cores that were told to stop */
++
++extern unsigned long gVirtBase, gPhysBase;
++
++/* The firmware is called with HVC, not SMC. (start.s reads this too, at its physical address.) */
++uint32_t psci_smp_hvc;
++
++/*
++ * Left by a core that took an exception between its first instruction and the kernel's vectors
++ * (Lsecondary_early_exception in start.s). That core writes it with its cache off; it has a
++ * cache line to itself so that looking at memory does not disturb anything else.
++ */
++struct psci_smp_start_fault {
++	uint64_t valid, mpidr, esr, elr, far, lr, sp, unused;
++} psci_smp_start_fault __attribute__((aligned(64)));
++_Static_assert(sizeof(struct psci_smp_start_fault) == 64, "one cache line");
++
++static uint32_t psci_smp_cpu_stage[MAX_CPUS];   /* PSCI_SMP_CPU_*, by cpu number */
++static uint32_t psci_smp_started;               /* a bit per core that CPU_ON was granted for */
++
++static int64_t
++psci_call(uint64_t function, uint64_t arg1, uint64_t arg2, uint64_t arg3)
++{
++	register uint64_t x0 __asm__("x0") = function;
++	register uint64_t x1 __asm__("x1") = arg1;
++	register uint64_t x2 __asm__("x2") = arg2;
++	register uint64_t x3 __asm__("x3") = arg3;
++
++	if (psci_smp_hvc) {
++		__asm__ volatile ("hvc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
++                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	} else {
++		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
++                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	}
++	return (int64_t)x0;
++}
++
++static const char *
++psci_error(int64_t status)
++{
++	static const char *const names[] = {
++		"success", "not supported", "invalid parameters", "denied", "already on", "on pending",
++		"internal failure", "not present", "disabled", "invalid address",
++	};
++
++	return (status <= 0 && status > -(int64_t)(sizeof(names) / sizeof(names[0]))) ? names[-status] : "?";
++}
++
++void
++psci_smp_init(void)
++{
++	DTEntry chosen;
++	void const *prop;
++	unsigned int size;
++
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++	    SecureDTGetProperty(chosen, "psci-method", &prop, &size) == kSuccess &&
++	    size >= 3 && strncmp((const char *)prop, "hvc", 3) == 0) {
++		psci_smp_hvc = 1;
++	}
++}
++
++/* A processor other than the boot processor says how far it has come. */
++void
++psci_smp_cpu_reached(uint32_t stage)
++{
++	os_atomic_store(&psci_smp_cpu_stage[cpu_number()], stage, release);
++}
++
++/* ... all the way: from GenericARMCPU::initCPU(), where the scheduler takes it. */
++void
++psci_smp_cpu_running(void)
++{
++	psci_smp_cpu_reached(PSCI_SMP_CPU_RUNNING);
++}
++
++static void
++psci_smp_clean_segment(const char *name)
++{
++	unsigned long size = 0;
++	vm_offset_t start = (vm_offset_t)getsegdatafromheader(&_mh_execute_header, name, &size);
++
++	if (start != 0 && size != 0) {
++		CleanPoC_DcacheRegion(start, size);
++	}
++}
++
++/*
++ * Start a registered processor: the platform's half of cpu_start(). Waits until the core has
++ * joined the scheduler, and says what became of it if it has not: on a phone the log is all
++ * there is to go by.
++ */
++kern_return_t
++psci_smp_start_cpu(int cpu)
++{
++	cpu_data_t *cdp = cpu_datap(cpu);
++	uint32_t phys_id = cdp->cpu_phys_id, stage;
++	uint64_t entry = ml_static_vtop((vm_offset_t)&LowResetVectorBase);
++	uint64_t now, deadline;
++	int64_t status;
++
++	/*
++	 * What that core reads with its MMU off: the code and the page tables of start.s, and what
++	 * the reset vector finds its way by (ResetHandlerData, CpuDataEntries, the boot arguments,
++	 * cpu_ttep, psci_smp_hvc ...), all of it in the kernel's own segments; and the cpu data of
++	 * every processor, which the reset vector goes through looking for its own.
++	 * Clean, not flush: the processors that are running keep using all of it.
++	 */
++	psci_smp_start_fault.valid = 0;
++	psci_smp_clean_segment("__TEXT");
++	psci_smp_clean_segment("__DATA_CONST");
++	psci_smp_clean_segment("__TEXT_EXEC");
++	psci_smp_clean_segment("__DATA");
++	psci_smp_clean_segment("__BOOTDATA");
++	for (int other = 0; other <= ml_get_max_cpu_number(); other++) {
++		if (cpu_datap(other) != NULL) {
++			CleanPoC_DcacheRegion((vm_offset_t)cpu_datap(other), sizeof(cpu_data_t));
++		}
++	}
++	__builtin_arm_dsb(DSB_SY);
++
++	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
++	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
++	if (status != 0) {
++		os_atomic_store(&psci_smp_cpu_stage[cpu], 0, release);
++		printf("psci: cpu %d (MPIDR 0x%x) was not started: the firmware answers %lld (%s)\n",
++		    cpu, phys_id, status, psci_error(status));
++		return KERN_FAILURE;
++	}
++	os_atomic_or(&psci_smp_started, 1u << cpu, relaxed);
++
++	clock_interval_to_deadline(PSCI_SMP_START_SECONDS, NSEC_PER_SEC, &deadline);
++	do {
++		stage = os_atomic_load(&psci_smp_cpu_stage[cpu], acquire);
++		if (stage >= PSCI_SMP_CPU_RUNNING) {
++			return KERN_SUCCESS;
++		}
++		/* memory, not this processor's copy of it */
++		FlushPoC_DcacheRegion((vm_offset_t)&psci_smp_start_fault, sizeof(psci_smp_start_fault));
++		if (psci_smp_start_fault.valid != 0) {
++			break;
++		}
++		delay_for_interval(1, NSEC_PER_MSEC);
++		now = mach_absolute_time();
++	} while (now < deadline);
++
++	if (psci_smp_start_fault.valid != 0) {
++		struct psci_smp_start_fault *f = &psci_smp_start_fault;
++		uint64_t to_virtual = gVirtBase - gPhysBase;
++
++		printf("psci: cpu %d (MPIDR 0x%llx) took an exception on its way in and has switched itself off: "
++		    "ESR 0x%llx ELR 0x%llx FAR 0x%llx LR 0x%llx SP 0x%llx (ELR and LR as kernel addresses: 0x%llx 0x%llx)\n",
++		    cpu, f->mpidr, f->esr, f->elr, f->far, f->lr, f->sp, f->elr + to_virtual, f->lr + to_virtual);
++		os_atomic_andnot(&psci_smp_started, 1u << cpu, relaxed);        /* nothing of it is left to stop */
++	} else {
++		printf("psci: cpu %d (MPIDR 0x%x) was started %d seconds ago and has not joined: %s\n",
++		    cpu, phys_id, PSCI_SMP_START_SECONDS,
++		    stage >= PSCI_SMP_CPU_IN_KERNEL ? "it got as far as arm_init_cpu()" : "no sign of it since the firmware took the request");
++	}
++	return KERN_FAILURE;
++}
++
++/* Called after IOCPU has disabled its local GIC interface and virtual timer. */
++void
++psci_smp_cpu_off(void)
++{
++    __builtin_arm_wsr("DAIFSet", DAIFSC_ALL);
++    os_atomic_store(&psci_smp_cpu_stage[cpu_number()], PSCI_SMP_CPU_OFF, release);
++    __builtin_arm_dsb(DSB_SY);
++    (void)psci_call(PSCI_CPU_OFF, 0, 0, 0);
++    panic("PSCI: CPU_OFF returned on cpu %d", cpu_number());
++}
++#endif /* GENERIC_PSCI_SMP */
+--- a/osfmk/arm64/psci_smp.h
++++ b/osfmk/arm64/psci_smp.h
+@@ -0,0 +1,26 @@
++/*
++ * More than one processor on generic (non-Apple) ARMv8 boards: see psci_smp.c.
++ */
++#ifndef _ARM64_PSCI_SMP_H_
++#define _ARM64_PSCI_SMP_H_
++
++#include <mach/mach_types.h>
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* How far a processor other than the boot processor has come (psci_smp_cpu_reached()). */
++#define PSCI_SMP_CPU_ASKED      1       /* the firmware has agreed to start it */
++#define PSCI_SMP_CPU_IN_KERNEL  2       /* it runs C code on the kernel's page tables (arm_init_cpu()) */
++#define PSCI_SMP_CPU_RUNNING    3       /* it has joined the scheduler (psci_smp_cpu_running()) */
++#define PSCI_SMP_CPU_OFF        4       /* it has switched itself off, or is about to */
++
++extern void             psci_smp_init(void);
++extern kern_return_t    psci_smp_start_cpu(int cpu);
++extern void             psci_smp_cpu_reached(uint32_t stage);
++extern void             psci_smp_cpu_running(void);
++extern void             psci_smp_cpu_off(void) __dead2;
++
++__END_DECLS
++
++#endif /* _ARM64_PSCI_SMP_H_ */

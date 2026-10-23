@@ -1,0 +1,59 @@
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+index 6f7692a..7c90fe0 100644
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -1075,6 +1075,13 @@ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32
+ 	IOLockLock(fLock);
+ 	old = fPorts[type];
+ 	fPorts[type] = port;
++	/* Either registration order is valid. A callback installed before its
++	 * port must not lose the refresh clock when the first timer fires. */
++	if (type == kFBNotifyVSync && port != NULL && fCallbacks[type] != 0 &&
++	    !fVSyncRunning && !fClosed) {
++		fVSyncRunning = true;
++		armVSync();
++	}
+ 	IOLockUnlock(fLock);
+ 	if (old != NULL) {
+ 		releaseNotificationPort(old);
+@@ -1133,7 +1140,10 @@ IOMobileFramebufferUserClient::vsync(void)
+ 	}
+ 	IOLockUnlock(fLock);
+ 	if (send) {
+-		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
++		IOReturn result = sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
++		if (fVSyncCount <= 2) {
++			IOLog("MiniIOMobileFramebuffer: refresh notification %llu result=%x\n", fVSyncCount, result);
++		}
+ 	}
+ }
+ 
+@@ -1255,7 +1265,8 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		IOLockLock(fLock);
+ 		fCallbacks[in[2]] = in[0];
+ 		fRefcons[in[2]] = in[1];
+-		if (in[2] == kFBNotifyVSync && in[0] != 0 && !fVSyncRunning && !fClosed) {
++		if (in[2] == kFBNotifyVSync && in[0] != 0 && fPorts[in[2]] != NULL &&
++		    !fVSyncRunning && !fClosed) {
+ 			fVSyncRunning = true;
+ 			armVSync();
+ 		}
+@@ -1273,11 +1284,16 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		return kIOReturnSuccess;
+ 
+ 	case kFBMethodGetBlock:                         /* in: which block; out: its bytes */
+-		if (args->structureOutput == NULL) {
++		if (args->scalarInputCount < 1 || args->structureOutput == NULL) {
+ 			return kIOReturnBadArgument;
+ 		}
++		/* Only the actual current mode exists here. In 20G81, accepting
++		 * block 0x4d advertises gamut-remap hardware even if its data are
++		 * all zero. Leave unsupported color/other blocks unavailable. */
++		if (in[0] != 0x40) return kIOReturnUnsupported;
++		if (args->structureOutputSize < 12) return kIOReturnBadArgument;
+ 		bzero(args->structureOutput, args->structureOutputSize);
+-		if (args->scalarInputCount >= 1 && in[0] == 0x40 && args->structureOutputSize >= 12) {
++		{
+ 			/* the current mode: its colour and timing identifiers */
+ 			uint32_t ids[2] = { kFBColorID, kFBTimingID };
+ 

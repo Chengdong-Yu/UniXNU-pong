@@ -1,0 +1,13 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7220,5 +7220,9 @@
+ 	mach_vm_size_t map_page_size = vm_map_page_size(map);
+ 
+-	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
++	kern_return_t scratch_result = mach_vm_allocate_kernel(map, &scratch_addr,
++	    map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
++	if (scratch_result != KERN_SUCCESS) {
++		panic("load_init_program: scratch allocation failed: %d", scratch_result);
++	}
+ 	user_addr_t init_envp = USER_ADDR_NULL;
+ 	uint32_t skip_owner_apfs_mounts = 0;

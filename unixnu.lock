@@ -1,0 +1,13 @@
+# Resolved git sources, written by "unixnu fetch". Local sources are never recorded.
+
+[source."AvailabilityVersions"]
+commit = "f3b52ca75ee842a8ac593bd7b03f9f4768c15755"
+
+[source."libdispatch"]
+commit = "ca80d30399cf4854d3b970076f83dde4a6e74e78"
+
+[source."libplatform"]
+commit = "1b2b22f2e37384af2c562bd95d5e93ce2e192451"
+
+[source."xnu"]
+commit = "1b191cb58250d0705d8a51287127505aa4bc0789"

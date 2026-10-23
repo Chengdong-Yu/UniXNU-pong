@@ -1,0 +1,12 @@
+--- a/makedefs/MakeInc.kernel
++++ b/makedefs/MakeInc.kernel
+@@ -143,6 +143,9 @@
+ 	$(_v)$(LIBTOOL) -static -csD -filelist link.filelist -o $@
+ 	$(_v)$(LN) $(call function_convert_build_config_to_objdir,$(CURRENT_BUILD_CONFIG))/lib$(KERNEL_FILE_NAME).a $(OBJROOT)/lib$(KERNEL_FILE_NAME).a
+ endif
++
++# Darwin 22 source archives participate in incremental relinking.
++$(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(XNU_EXTERNAL_KERNEL_ARCHIVES)
+ 
+ $(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist)) lastkerneldataconst.o lastkernelconstructor.o nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion $(LDFILES_KERNEL_ONLY) .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
+ 	$(_v)${MAKE} -f $(firstword $(MAKEFILE_LIST)) version.o

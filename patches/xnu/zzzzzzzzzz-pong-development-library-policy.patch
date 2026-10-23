@@ -1,0 +1,27 @@
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -184,9 +184,21 @@
+ 
+ 	PE_parse_boot_argn("cs_debug", &cs_debug, sizeof(cs_debug));
+ 
+-#if !CONFIG_ENFORCE_LIBRARY_VALIDATION
+-	PE_parse_boot_argn("cs_library_val_enable", &cs_library_val_enable,
+-	    sizeof(cs_library_val_enable));
++#if !CONFIG_ENFORCE_LIBRARY_VALIDATION || (defined(PONG) && (DEVELOPMENT || DEBUG))
++	/* Pong development boots may explicitly disable library validation even
++	 * when the embedded platform selects it as the compiled default. */
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	if (PE_i_can_has_debugger(NULL)) {
++#endif
++		PE_parse_boot_argn("cs_library_val_enable", &cs_library_val_enable,
++		    sizeof(cs_library_val_enable));
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	}
++#endif
++#endif
++#if defined(PONG)
++	printf("PONG DEVELOPMENT: cs system=%d process=%d library=%d\n",
++	    cs_system_enforcement_enable, cs_process_enforcement_enable, cs_library_val_enable);
+ #endif
+ #endif /* !SECURE_KERNEL */
+ }

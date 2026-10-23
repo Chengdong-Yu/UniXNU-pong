@@ -1,0 +1,198 @@
+--- /dev/null
++++ b/config/MASTER.arm64.pong
+@@ -0,0 +1,97 @@
++# Pong single-core console bring-up; derived from the qualified iOS 16 baseline.
++#
++# Mach Operating System
++# Copyright (c) 1986 Carnegie-Mellon University
++# Copyright 2001-2018 Apple Inc.
++#
++# All rights reserved.  The CMU software License Agreement
++# specifies the terms and conditions for use and redistribution.
++#
++######################################################################
++#
++#  Master Apple configuration file (see the master machine independent
++#  configuration file for a description of the file format).
++#
++######################################################################
++#
++#  Standard Apple OS Configurations:
++#  -------- ----- -- ---------------
++#
++#  KERNEL_BASE =    [ arm64 config_pmap_ppl nos_arm_asm nos_arm_pmap xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
++#  KERNEL_RELEASE = [ KERNEL_BASE ]
++#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
++#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
++#  BSD_BASE =       [ mach_bsd psynch config_proc_uuid_policy config_personas ]
++#  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
++#  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
++#  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
++#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs]
++#  FILESYS_RELEASE= [ FILESYS_BASE ]
++#  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
++#  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
++#  NFS_DEV =        [ nfsserver ]
++#  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
++#  SKYWALK_RELEASE = [ SKYWALK_BASE ]
++#  SKYWALK_DEV =    [ SKYWALK_BASE ]
++#  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
++#  NETWORKING =     [ inet bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake ]
++#  NETWORKING_RELEASE = [ NETWORKING ]
++#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
++#  NETWORKING_DEBUG = [ NETWORKING_DEV ]
++#  VPN =            [ ipsec flow_divert necp content_filter ]
++#  PF =             [ pf ]
++#  MULTIPATH =      [ multipath mptcp ]
++#  IOKIT_BASE =     [ iokit iokitcpp no_kextd no_kernel_hid config_sleep ]
++#  IOKIT_RELEASE =  [ IOKIT_BASE ]
++#  IOKIT_DEV =      [ IOKIT_BASE iokitstats iotracking ]
++#  IOKIT_DEBUG =    [ IOKIT_BASE iokitstats iotracking]
++#  LIBKERN_BASE =   [ libkerncpp config_blocks config_kec_fips zlib crypto_sha2 ]
++#  LIBKERN_RELEASE =[ LIBKERN_BASE ]
++#  LIBKERN_DEV =    [ LIBKERN_BASE iotracking ]
++#  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
++#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf ]
++#  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
++#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
++#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
++#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
++#  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
++#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
++#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
++#  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_taskwatch ]
++#  SCHED_RELEASE =  [ SCHED_BASE ]
++#  SCHED_DEV =      [ SCHED_BASE ]
++#  SCHED_DEBUG =    [ SCHED_BASE config_sched_grrr config_sched_proto ]
++#  VM_BASE =        [ vm_pressure_events jetsam freeze memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap ]
++#  VM_RELEASE =     [ VM_BASE ]
++#  VM_DEV =         [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
++#  VM_DEBUG =       [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
++#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi]
++#  SECURITY_BASE =     [ config_macf kernel_integrity config_secure_bsd_root ]
++#  SECURITY_RELEASE = [ SECURITY_BASE ]
++#  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
++#  SECURITY_DEBUG =   [ SECURITY_BASE config_setuid config_kas_info ]
++#  BASE =           [ MULTIPATH PF VPN ]
++#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
++#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
++#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
++#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
++#
++######################################################################
++#
++machine		"arm64"						# <arm64>
++
++makeoptions	OSFMK_MACHINE = "arm64"				# <mach>
++
++options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
++options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
++options		ALTERNATE_DEBUGGER	# <alternate_debugger>
++
++options   CONFIG_VNODES=1024		# <xsmall>
++
++options   CONFIG_FREEZE_SUSPENDED_MIN=4		# <xsmall>
++
++options	  CONFIG_MACH_APPROXIMATE_TIME
++
++options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
++options   CONFIG_UBSAN_MINIMAL		# <ubsan_minimal>
++options   CONFIG_KERNEL_TBI	# <kernel_tbi>
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -29,7 +29,7 @@
+ else ifneq ($(findstring _host,$(RC_ProjectName)),)
+ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else
+-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE
++SUPPORTED_ARM64_MACHINE_CONFIGS = PONG BCM2837 T6000 T8101 T8103 VMAPPLE
+ 
+ endif
+ 
+@@ -60,6 +60,7 @@
+ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
++MACHINE_FLAGS_ARM64_PONG = -DARM64_BOARD_CONFIG_PONG -mstrict-align
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+ 
+ 
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -204,6 +204,10 @@
+ 
+ /* D-Cache, 160KB for Firestorm, 8-way. 64KB for Icestorm, 6-way. */
+ #define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
++
++#elif defined (PONG) /* SM8475: 64-byte I/D cache lines */
++#define MMU_I_CLINE 6
++#define MMU_CLINE   6
+ 
+ #elif defined (BCM2837) /* Raspberry Pi 3 */
+ 
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -734,7 +734,7 @@
+ 	csm_initialize_provisioning_profiles();
+ #endif
+ 
+-#if !defined(BCM2837) || (defined(XNU_NATIVE_TRUST_CACHE) && XNU_NATIVE_TRUST_CACHE)
++#if (!defined(BCM2837) && !defined(PONG)) || (defined(XNU_NATIVE_TRUST_CACHE) && XNU_NATIVE_TRUST_CACHE)
+ 	kernel_bootstrap_log("trust_cache_init");
+ 
+ 	/* Initialize the runtime for the trust cache interface */
+--- /dev/null
++++ b/pexpert/pexpert/arm64/PONG.h
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#ifndef _PEXPERT_ARM64_PONG_H
++#define _PEXPERT_ARM64_PONG_H
++
++// Nothing Phone (2), SM8475. First boot uses only the boot CPU and generic
++// ARMv8 registers. The GIC/timer provider is separate from this build profile.
++#define PONG 1
++#define NO_MONITOR 1
++#define NO_ECORE 1
++#define ARM_ARCH_TIMER 1
++#define __ARM_ARCH__ 8
++#define __ARM_VMSA__ 8
++#define __ARM_VFP__ 4
++#define __ARM_COHERENT_CACHE__ 1
++#define __ARM_DEBUG__ 7
++#define __ARM64_PMAP_SUBPAGE_L1__ 1
++
++/* SM8475 sets PSTATE.PAN on exception entry; copyio must lift it around
++ * user memory access, unlike the original BCM2837/A53 target. */
++#if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN
++#define __ARM_PAN_AVAILABLE__ 1
++#endif
++
++// No PI3_UART, BCM2837 GPIO/timer routing, or fixed Raspberry Pi panic buffer.
++#endif
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -87,6 +87,14 @@
+ 
+ 
+ 
++#ifdef ARM64_BOARD_CONFIG_PONG
++#include <pexpert/arm64/PONG.h>
++#define MAX_L2_CLINE                   6
++#define MAX_CPUS                       1
++#define MAX_CPU_CLUSTERS               1
++#define CORE_NCTRS                     8 /* Unused placeholder: KPC disabled */
++#endif /* ARM64_BOARD_CONFIG_PONG */
++
+ #ifdef ARM64_BOARD_CONFIG_BCM2837
+ #include <pexpert/arm64/BCM2837.h>
+ 
+--- a/pexpert/pexpert/arm64/Makefile
++++ b/pexpert/pexpert/arm64/Makefile
+@@ -17,6 +17,7 @@
+ 	boot.h \
+ 	H13.h \
+ 	VMAPPLE.h \
++	PONG.h \
+ 	BCM2837.h
+ 
+ 

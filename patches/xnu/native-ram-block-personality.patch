@@ -1,0 +1,16 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -65,3 +65,12 @@
+     "   }"
+ #endif
++#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
++    "   ,{"
++    "     'IOClass'         = NativeRamBlock;"
++    "     'IOMatchCategory' = NativeRamBlock;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOResourceMatch' = IOBSD;"
++    "     'IOProbeScore'    = 1000:32;"
++    "   }"
++#endif
+     ")";

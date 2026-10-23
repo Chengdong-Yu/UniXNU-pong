@@ -1,0 +1,32 @@
+# Pong now targets Darwin 22 / iOS 16. These override the main repository feeds.
+[[source]]
+name = "xnu"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/xnu.git"
+ref = "xnu-8796.141.3"
+commit = "1b191cb58250d0705d8a51287127505aa4bc0789"
+darwin = "22.6.0"
+version = "8796.141.3"
+driverkit_tag = "xnu-8796.101.5"
+trustcache_tag = "xnu-8796.101.5"
+
+[[source]]
+name = "libplatform"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libplatform.git"
+ref = "libplatform-292.100.1"
+commit = "1b2b22f2e37384af2c562bd95d5e93ce2e192451"
+
+[[source]]
+name = "libdispatch"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libdispatch.git"
+ref = "libdispatch-1325.120.2"
+commit = "ca80d30399cf4854d3b970076f83dde4a6e74e78"
+
+[[source]]
+name = "AvailabilityVersions"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
+ref = "AvailabilityVersions-121"
+commit = "f3b52ca75ee842a8ac593bd7b03f9f4768c15755"

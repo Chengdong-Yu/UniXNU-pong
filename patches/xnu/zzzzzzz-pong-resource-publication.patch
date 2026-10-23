@@ -1,0 +1,27 @@
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -1583,6 +1583,11 @@
+ 	gIOSystemStateNotificationService = IOSystemStateNotification::initialize();
+ 	gIOSystemStateNotificationService->attachToParent(platform, gIOServicePlane);
+ 	gIOSystemStateNotificationService->registerService();
++#if defined(PONG)
++	// Publish any values queued before platform attachment.
++	gIOResources->registerService();
++#endif
++
+ 
+ 	static const char * keys[kCpuNumDelayTypes] = {
+ 		kIOPlatformMaxBusDelay,
+@@ -4905,6 +4910,12 @@
+ 	}
+ 
+ 	gIOResources->setProperty( key, value);
++#if defined(PONG)
++	// IOMapper may publish before IOPlatformExpert::setPlatform attaches
++	// IOResources. Keep the value; publish the service once it has a parent.
++	if (!gIOResources->inPlane(gIOServicePlane)) { return; }
++#endif
++
+ 
+ 	if (IORecursiveLockHaveLock( gNotificationLock)) {
+ 		return;

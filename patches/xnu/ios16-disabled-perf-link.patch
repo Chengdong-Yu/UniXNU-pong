@@ -1,0 +1,116 @@
+diff --git a/bsd/kern/kern_ktrace.c b/bsd/kern/kern_ktrace.c
+index 9f521f6..c6d04f3 100644
+--- a/bsd/kern/kern_ktrace.c
++++ b/bsd/kern/kern_ktrace.c
+@@ -208,7 +208,9 @@ ktrace_reset_internal(uint32_t reset_mask)
+ 	}
+ 
+ 	if (reset_mask & KTRACE_KPERF) {
++	#if KPERF
+ 		kperf_reset();
++	#endif /* KPERF */
+ 	}
+ 	if (reset_mask & KTRACE_KDEBUG) {
+ 		kdebug_reset();
+@@ -366,7 +368,9 @@ ktrace_disable(ktrace_state_t state_to_match)
+ {
+ 	if (ktrace_state == state_to_match) {
+ 		kernel_debug_disable();
++	#if KPERF
+ 		kperf_disable_sampling();
++	#endif /* KPERF */
+ 	}
+ }
+ 
+@@ -391,7 +395,9 @@ ktrace_kernel_configure(uint32_t config_mask)
+ 
+ 	if (ktrace_state != KTRACE_STATE_OFF) {
+ 		if (ktrace_active_mask & config_mask & KTRACE_KPERF) {
++		#if KPERF
+ 			kperf_reset();
++		#endif /* KPERF */
+ 		}
+ 		if (ktrace_active_mask & config_mask & KTRACE_KDEBUG) {
+ 			kdebug_reset();
+@@ -503,7 +509,9 @@ ktrace_set_owning_proc(proc_t p)
+ 		} else {
+ 			if (ktrace_state == KTRACE_STATE_BG) {
+ 				if (ktrace_active_mask & KTRACE_KPERF) {
++				#if KPERF
+ 					kperf_reset();
++				#endif /* KPERF */
+ 				}
+ 				if (ktrace_active_mask & KTRACE_KDEBUG) {
+ 					kdebug_reset();
+diff --git a/osfmk/arm/pmap/pmap_misc.c b/osfmk/arm/pmap/pmap_misc.c
+index b820595..5aab004 100644
+--- a/osfmk/arm/pmap/pmap_misc.c
++++ b/osfmk/arm/pmap/pmap_misc.c
+@@ -27,6 +27,14 @@
+  */
+ #include <arm/pmap/pmap_internal.h>
+ 
++#if SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG)
++bool
++pmap_pending_preemption(void)
++{
++	return _pmap_pending_preemption_real();
++}
++#endif /* SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG) */
++
+ /**
+  * Placeholder for random pmap functionality that doesn't fit into any of the
+  * other files. This will contain things like the CPU copy windows, ASID
+diff --git a/osfmk/kern/kpc.h b/osfmk/kern/kpc.h
+index 8637608..49dfffa 100644
+--- a/osfmk/kern/kpc.h
++++ b/osfmk/kern/kpc.h
+@@ -151,6 +151,7 @@ extern int kpc_threads_counting;
+ extern void kpc_thread_ast_handler( thread_t thread );
+ 
+ #ifdef MACH_KERNEL_PRIVATE
++#if KPC
+ 
+ /* context switch callback for KPC */
+ 
+@@ -166,6 +167,13 @@ kpc_off_cpu(thread_t thread)
+ 		kpc_off_cpu_internal(thread);
+ 	}
+ }
++#else
++static inline void
++kpc_off_cpu(thread_t thread)
++{
++	(void)thread;
++}
++#endif /* KPC */
+ 
+ #endif /* defined(MACH_KERNEL_PRIVATE) */
+ 
+diff --git a/osfmk/kperf/kperf.h b/osfmk/kperf/kperf.h
+index 05903a4..079ef4d 100644
+--- a/osfmk/kperf/kperf.h
++++ b/osfmk/kperf/kperf.h
+@@ -142,6 +142,7 @@ kperf_make_runnable(thread_t thread, int interrupt)
+ 	}
+ }
+ 
++#if KPERF
+ static inline void
+ kperf_running_setup(processor_t processor, uint64_t now)
+ {
+@@ -150,6 +151,14 @@ kperf_running_setup(processor_t processor, uint64_t now)
+ 		kptimer_running_setup(processor, now);
+ 	}
+ }
++#else
++static inline void
++kperf_running_setup(processor_t processor, uint64_t now)
++{
++	(void)processor;
++	(void)now;
++}
++#endif /* KPERF */
+ 
+ /*
+  * Should only be called by platform code at the end of each interrupt.

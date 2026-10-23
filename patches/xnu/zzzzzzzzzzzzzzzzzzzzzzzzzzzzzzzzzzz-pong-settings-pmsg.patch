@@ -1,0 +1,143 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 1161432..7a618b1 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -78,6 +78,7 @@
+ 
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/sysctl.h>
+ #include <sys/ioctl.h>
+ #include <sys/proc_internal.h>
+ #include <sys/proc.h>
+@@ -138,6 +139,38 @@
+ 
+ #include <pexpert/pexpert.h>
+ 
++#if defined(PONG)
++extern void pong_ramoops_diagnostic_write(const char *, int);
++
++/* A write-only, small diagnostic endpoint for the Settings adapter. No
++ * process can read kernel memory or choose a physical address through it.
++ * Resolve its MIB once in userspace before installing fatal signal handlers.
++ */
++static int
++pong_diagnostic_sysctl SYSCTL_HANDLER_ARGS
++{
++	char text[1024], line[1152];
++	proc_t process = current_proc();
++	if (!process) return EPERM;
++	bool settings = strcmp(process->p_comm, "Preferences") == 0;
++	bool renderer = strcmp(process->p_comm, "backboardd") == 0 ||
++	    strcmp(process->p_comm, "SpringBoard") == 0;
++	if (!settings && !renderer) return EPERM;
++	if (!req->newptr || !req->newlen || req->newlen >= sizeof(text)) return EINVAL;
++	int error = SYSCTL_IN(req, text, req->newlen);
++	if (error) return error;
++	text[req->newlen] = 0;
++	int length = snprintf(line, sizeof(line), "%s[%d]: %s\n",
++	    settings ? "PONG SETTINGS" : "PONG GPU", proc_getpid(process), text);
++	if (length > 0) pong_ramoops_diagnostic_write(line,
++	    length < (int)sizeof(line) ? length : (int)sizeof(line)-1);
++	return 0;
++}
++SYSCTL_PROC(_kern, OID_AUTO, pong_diagnostic,
++    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, pong_diagnostic_sysctl, "A", "Pong Settings and renderer failure record");
++#endif
++
+ #include <kdp/kdp_dyld.h>
+ 
+ #if SYSV_SHM
+@@ -1845,6 +1878,20 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ 	int kr = 0;
+ 	int create_corpse = FALSE;
+ 
++#if defined(PONG)
++	if (strcmp(p->p_comm, "Preferences") == 0) {
++		char line[768];
++		os_reason_t reason = p->p_exit_reason;
++		const char *description = reason ? exit_reason_get_string_desc(reason) : NULL;
++		int length = snprintf(line, sizeof(line),
++		    "PONG SETTINGS EXIT pid=%d signal=%d status=%d namespace=%u code=0x%llx description=%.512s\n",
++		    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv), reason ? reason->osr_namespace : 0,
++		    reason ? reason->osr_code : 0ULL, description ? description : "none");
++		if (length > 0) pong_ramoops_diagnostic_write(line,
++		    length < (int)sizeof(line) ? length : (int)sizeof(line)-1);
++	}
++#endif
++
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);
+ 	}
+diff --git a/osfmk/arm64/pong_ramoops_console.h b/osfmk/arm64/pong_ramoops_console.h
+index a1e902d..d3ff8ea 100644
+--- a/osfmk/arm64/pong_ramoops_console.h
++++ b/osfmk/arm64/pong_ramoops_console.h
+@@ -6,6 +6,7 @@
+ 
+ #define PONG_RAMOOPS_PHYS_BASE 0x85200000ULL
+ #define PONG_RAMOOPS_CONSOLE_BYTES 0x00200000U
++#define PONG_RAMOOPS_RESERVED_BYTES 0x00400000U
+ #define PONG_RAMOOPS_HEADER_BYTES 12U
+ #define PONG_RAMOOPS_MAGIC 0x43474244U
+ #define PONG_RAMOOPS_DATA_BYTES (PONG_RAMOOPS_CONSOLE_BYTES - PONG_RAMOOPS_HEADER_BYTES)
+@@ -20,6 +21,41 @@ static vm_offset_t pong_ramoops_base;
+ static uint32_t pong_ramoops_start;
+ static uint32_t pong_ramoops_size;
+ static volatile uint32_t pong_ramoops_busy;
++static volatile uint32_t pong_diagnostic_busy;
++static uint32_t pong_diagnostic_size;
++
++/* The second 2 MiB is Pong DT's pmsg zone. Keep a separate bounded record
++ * there so launchd's console traffic cannot evict application failure data.
++ * Linux exposes the previous raw bytes as pmsg-ramoops-0 on the next boot.
++ * This is a persistent_ram buffer, not an Android logcat record stream.
++ * No storage, allocation, registry access or MMIO outside the DT reserve.
++ */
++void pong_ramoops_diagnostic_write(const char *, int);
++void
++pong_ramoops_diagnostic_write(const char *text, int length)
++{
++	if (!text || length <= 0 || length > 2048 || !pong_ramoops_base ||
++	    __atomic_exchange_n(&pong_diagnostic_busy, 1, __ATOMIC_ACQUIRE)) return;
++	vm_offset_t base = pong_ramoops_base + PONG_RAMOOPS_CONSOLE_BYTES;
++	struct pong_ramoops_header *header = (struct pong_ramoops_header *)(uintptr_t)base;
++	volatile uint8_t *data = (volatile uint8_t *)(uintptr_t)(base + PONG_RAMOOPS_HEADER_BYTES);
++	/* Append until full; preserve the first failures rather than overwrite them. */
++	uint32_t count = (uint32_t)length;
++	if (count > PONG_RAMOOPS_DATA_BYTES - pong_diagnostic_size)
++		count = PONG_RAMOOPS_DATA_BYTES - pong_diagnostic_size;
++	if (count) {
++		for (uint32_t i = 0; i < count; i++) data[pong_diagnostic_size + i] = (uint8_t)text[i];
++		CleanPoC_DcacheRegion_Force(base + PONG_RAMOOPS_HEADER_BYTES + pong_diagnostic_size, count);
++		__asm__ volatile("dsb sy" ::: "memory");
++		pong_diagnostic_size += count;
++		header->start = pong_diagnostic_size;
++		header->size = pong_diagnostic_size;
++		header->sig = PONG_RAMOOPS_MAGIC;
++		CleanPoC_DcacheRegion_Force(base, PONG_RAMOOPS_HEADER_BYTES);
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++	__atomic_store_n(&pong_diagnostic_busy, 0, __ATOMIC_RELEASE);
++}
+ 
+ void pong_ramoops_console_write(const char *, int);
+ void
+@@ -87,7 +123,7 @@ pong_ramoops_console_init(void)
+ 		return 1;
+ 	}
+ 	vm_offset_t mapped = ml_io_map_wcomb(PONG_RAMOOPS_PHYS_BASE,
+-	    PONG_RAMOOPS_CONSOLE_BYTES);
++	    PONG_RAMOOPS_RESERVED_BYTES);
+ 	if (!mapped) {
+ 		return 0;
+ 	}
+@@ -107,5 +143,7 @@ pong_ramoops_console_init(void)
+ 	pong_ramoops_start = 0;
+ 	pong_ramoops_size = 0;
+ 	pong_ramoops_base = mapped;
++	static const char ready[] = "PONG DIAGNOSTIC v92: isolated pmsg recorder ready\n";
++	pong_ramoops_diagnostic_write(ready, (int)sizeof(ready)-1);
+ 	return 1;
+ }

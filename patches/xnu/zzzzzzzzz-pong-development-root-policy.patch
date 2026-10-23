@@ -1,0 +1,37 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1069,7 +1069,21 @@
+ 				native_owner_root_checkpoint(autherr, owner, device);
+ 			}
+ #endif
+-			if (autherr && !owner_authorized) {
++			int pong_development_root = 0;
++#if defined(PONG) && (DEVELOPMENT || DEBUG) && !SECURE_KERNEL
++			/* Explicit development policy for this port's unsealed restore image.
++			 * Keep the APFS auth result visible; never report it as authenticated.
++			 * This opt-in cannot authorize a writable root or a release kernel. */
++			PE_parse_boot_argn("pong_allow_unauthenticated_root", &pong_development_root,
++			    sizeof(pong_development_root));
++			pong_development_root = pong_development_root == 1 &&
++			    PE_i_can_has_debugger(NULL) &&
++			    (vfs_flags(vnode_mount(rootvnode)) & MNT_RDONLY);
++			if (autherr && pong_development_root) {
++				printf("PONG DEVELOPMENT: allow unsealed read-only root; APFS rootauth error=%d\n", autherr);
++			}
++#endif
++			if (autherr && !owner_authorized && !pong_development_root) {
+ 				panic("rootvp not authenticated after mounting");
+ 			}
+ #if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -169,6 +169,9 @@
+ 	if (disable_cs_enforcement && PE_i_can_has_debugger(NULL) != 0) {
+ 		cs_system_enforcement_enable = 0;
+ 		cs_process_enforcement_enable = 0;
++#if defined(PONG)
++		printf("PONG DEVELOPMENT: code-signing enforcement disabled by boot argument\n");
++#endif
+ 	} else {
+ 		int panic = 0;
+ 		PE_parse_boot_argn("cs_enforcement_panic", &panic, sizeof(panic));

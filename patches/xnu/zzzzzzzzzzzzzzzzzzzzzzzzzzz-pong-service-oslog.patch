@@ -1,0 +1,53 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 3e4f4a3..43c8489 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2626,6 +2626,28 @@ done:
+ /* Adapted from HackiOS: expose service output redirected to /dev/null.
+  * This only changes posix_spawn file actions, never PID 1's exec descriptors. */
+ static TUNABLE(uint32_t, exec_applog, "applog", 0);
++static TUNABLE_STR(exec_applog_name, 128, "applog_name", "");
++
++/* HackiOS's selected-program os_log route also covers services started by
++ * xpcproxy rather than our launchd plists. Leave all other environments alone;
++ * applog=2 is the explicit, expensive all-program mode. */
++static bool
++exec_applog_oslog(struct image_params *imgp)
++{
++	const char *p = exec_applog_name;
++	if (exec_applog >= 2) return true;
++	if (!exec_applog || !*p || imgp->ip_ndp == NULL) return false;
++	const char *name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	if (name == NULL) return false;
++	while (*p) {
++		const char *word = p;
++		while (*p && *p != ',') p++;
++		size_t length = (size_t)(p - word);
++		if (length && strncmp(name, word, length) == 0) return true;
++		if (*p) p++;
++	}
++	return false;
++}
+ 
+ static const char *
+ exec_applog_path(int fd, const char *path)
+@@ -5870,6 +5892,19 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_argspace -= new_ptr_size;
+ 		imgp->ip_envc++;
+ 	}
++#endif
++	/* Account for the extra string and pointer exactly as for caller envv. */
++#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
++	if (exec_applog_oslog(imgp)) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T("OS_ACTIVITY_DT_MODE=YES"), UIO_SYSSPACE, TRUE);
++		if (error) goto bad;
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++	}
+ #endif
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;

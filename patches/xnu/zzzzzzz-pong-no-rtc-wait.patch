@@ -1,0 +1,18 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -83,10 +83,13 @@
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
+-// RTC is not present on this target
+-#ifndef BCM2837
++// These bring-up targets have no RTC provider. Use XNU's calendar fallback
++// instead of waiting for a service that no linked driver can publish.
++#if !defined(BCM2837) && !defined(PONG)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
++#elif defined(PONG)
++	IOLog("PONG: no DT RTC provider; initialize calendar fallback\n");
+ #endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(

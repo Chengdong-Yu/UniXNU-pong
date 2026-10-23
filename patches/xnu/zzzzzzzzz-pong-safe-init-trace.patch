@@ -1,0 +1,70 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -638,19 +638,14 @@
+ #if defined(PONG) && (DEVELOPMENT || DEBUG)
+ 	/* Bounded PID 1 records: no stack walks, user copies, registry or MMIO. */
+ 	static unsigned pong_init_faults, pong_init_svcs;
+-	struct proc *pong_proc = get_bsdtask_info(get_threadtask(thread));
++	struct proc *pong_proc = (pong_init_trace && is_user) ?
++	    get_bsdtask_info(get_threadtask(thread)) : NULL;
+ 	bool pong_record = false;
+ 	if (pong_init_trace && is_user && pong_proc && proc_pid(pong_proc) == 1) {
+ 		unsigned *count = class == ESR_EC_SVC_64 ? &pong_init_svcs : &pong_init_faults;
+ 		if (*count < 8) { ++*count; pong_record = true; }
+ 	}
+-	if (pong_record) {
+-		printf("Pong init: user exception enter class=%x esr=%x far=%llx pc=%llx sp=%llx x16=%llx\n",
+-		    class, esr, (unsigned long long)far,
+-		    (unsigned long long)get_saved_state_pc(state),
+-		    (unsigned long long)get_saved_state_sp(state),
+-		    (unsigned long long)get_saved_state_reg(state, 16));
+-	}
++
+ #endif
+ 
+ 	/*
+@@ -715,6 +710,17 @@
+ 	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
+ 		ml_set_interrupts_enabled(TRUE);
+ 	}
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++	/* Normal console I/O is allowed only after restoring the interrupt mask.
++	 * A diagnostic must never turn a recoverable user page fault into panic. */
++	if (pong_record && ml_get_interrupts_enabled()) {
++		printf("Pong init: user exception enter class=%x esr=%x far=%llx pc=%llx sp=%llx x16=%llx\n",
++		    class, esr, (unsigned long long)far,
++		    (unsigned long long)get_saved_state_pc(state),
++		    (unsigned long long)get_saved_state_sp(state),
++		    (unsigned long long)get_saved_state_reg(state, 16));
++	}
++#endif
+ 
+ 	switch (class) {
+ 	case ESR_EC_SVC_64:
+@@ -724,7 +730,7 @@
+ 
+ 		handle_svc(state);
+ #if defined(PONG) && (DEVELOPMENT || DEBUG)
+-		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		if (pong_record && ml_get_interrupts_enabled()) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
+ 		    class, (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_reg(state, 0));
+ #endif
+@@ -733,7 +739,7 @@
+ 	case ESR_EC_DABORT_EL0:
+ 		handle_abort(state, esr, far, inspect_data_abort, handle_user_abort, expected_fault_handler);
+ #if defined(PONG) && (DEVELOPMENT || DEBUG)
+-		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		if (pong_record && ml_get_interrupts_enabled()) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
+ 		    class, (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_reg(state, 0));
+ #endif
+@@ -759,7 +765,7 @@
+ 	case ESR_EC_IABORT_EL0:
+ 		handle_abort(state, esr, far, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
+ #if defined(PONG) && (DEVELOPMENT || DEBUG)
+-		if (pong_record) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
++		if (pong_record && ml_get_interrupts_enabled()) printf("Pong init: user exception handled class=%x pc=%llx x0=%llx\n",
+ 		    class, (unsigned long long)get_saved_state_pc(state),
+ 		    (unsigned long long)get_saved_state_reg(state, 0));
+ #endif

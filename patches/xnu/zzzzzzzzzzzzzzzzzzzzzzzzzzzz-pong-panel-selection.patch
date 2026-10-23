@@ -1,0 +1,39 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 43c8489..ac62cae 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2639,6 +2639,8 @@ exec_applog_oslog(struct image_params *imgp)
+ 	if (!exec_applog || !*p || imgp->ip_ndp == NULL) return false;
+ 	const char *name = imgp->ip_ndp->ni_cnd.cn_nameptr;
+ 	if (name == NULL) return false;
++	const char *base = strrchr(name, '/');
++	if (base != NULL) name = base + 1;
+ 	while (*p) {
+ 		const char *word = p;
+ 		while (*p && *p != ',') p++;
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+index 52662ab..6f7692a 100644
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -53,6 +53,7 @@ enum {
+ 	kFBMethodGetDisplaySize         = 8,
+ 	kFBMethodRequestPowerChange     = 12,
+ 	kFBMethodSwapSignal             = 20,
++	kFBMethodSetDisplayDevice       = 22,
+ 	kFBMethodGetDigitalOutState     = 25,
+ 	kFBMethodGetDotPitch            = 28,
+ 	kFBMethodGetDisplayArea         = 29,
+@@ -1193,6 +1194,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		if (args->scalarInputCount != 1) return kIOReturnBadArgument;
+ 		return in[0] == 0 ? kIOReturnSuccess : kIOReturnUnsupported;
+ 
++	case kFBMethodSetDisplayDevice:
++		/* 20G81 _kern_SetDisplayDevice sends one device index. This
++		 * service is permanently attached to the existing boot panel,
++		 * device zero. No external/alternate panel can be selected. */
++		if (args->scalarInputCount != 1) return kIOReturnBadArgument;
++		return in[0] == 0 ? kIOReturnSuccess : kIOReturnUnsupported;
++
+ 	case kFBMethodGetDisplayArea:
+ 		/* 20G81 expects an eight-byte CGFloat, not width/height integers.
+ 		 * No physical-area ABI is advertised by the boot framebuffer. Let
