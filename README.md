@@ -1,5 +1,7 @@
 # UniXNU-pong
 
+**简体中文** | [English](README_EN.md)
+
 Nothing Phone (2)（代号 **Pong**，高通 **SM8475**）的 UniXNU 设备支持仓库。这里包含设备配置、XNU 补丁、板级驱动、用户空间适配和构建脚本，目标系统为 **iOS 16.6.1（20G81）**。
 
 当前代码以已达到 iOS 主界面的设备状态为基准。屏幕显示和触摸可用；Adreno 730 的硬件加速与 Metal 接入仍未确认完成。
