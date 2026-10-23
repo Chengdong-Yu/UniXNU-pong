@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import struct
-import uuid
 
 DEVICE = Path(__file__).resolve().parents[1]
 MIB = 1 << 20
@@ -92,6 +91,7 @@ def main():
                      'block_bytes': 4096, 'capacity_bytes': USERDATA_BYTES},
         'windows': [{'name': name, 'offset': offset, 'bytes': size}
                     for name, offset, size, _ in layout],
+        # Report-only reference to the Pong userdata partition. Do not flash this path.
         'write_target': '/dev/block/sda13',
     }
     args.output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
