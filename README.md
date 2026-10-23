@@ -1,64 +1,61 @@
 # UniXNU-pong
 
-Device source for the Nothing Phone (2), codename **Pong**, Qualcomm **SM8475**, running the **iOS 16.6.1 / 20G81** userland. This repository follows the UniXNU device-repository layout: board config, kernel defconfig, device drivers, XNU patches, build scripts and the userdata builder.
+Nothing Phone (2)（代号 **Pong**，高通 **SM8475**）的 UniXNU 设备支持仓库。这里包含设备配置、XNU 补丁、板级驱动、用户空间适配和构建脚本，目标系统为 **iOS 16.6.1（20G81）**。
 
-The published kernel source is the **v98** source set. v99 is excluded because it panics on the device. The v98 build reached the iOS main interface; its Adreno 730 Metal path was not yet confirmed as accelerated.
+当前代码以已达到 iOS 主界面的设备状态为基准。屏幕显示和触摸可用；Adreno 730 的硬件加速与 Metal 接入仍未确认完成。
 
-- Firmware: [uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
-- UniXNU core: [UniXNU](https://github.com/UniXNU/UniXNU)
-- Device docs: [UniXNU documentation](https://unixnu.com)
+- 固件：[uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
+- UniXNU 核心：[UniXNU](https://github.com/UniXNU/UniXNU)
+- 文档：[UniXNU 文档](https://unixnu.com)
 
-## Build
+## 构建
 
-Clone the UniXNU core and this device repository as siblings. All Apple restore inputs are fetched to the local UniXNU output directory when needed; IPSW archives, extracted Apple files and generated userdata images are excluded from this repository.
+将 UniXNU 核心、设备仓库和 UEFI 仓库放在同一目录下，并初始化核心仓库的子模块：
 
 ```sh
 git clone --recurse-submodules https://github.com/UniXNU/UniXNU
 git clone https://github.com/Chengdong-Yu/UniXNU-pong
-cd UniXNU-pong
-./scripts/build-v98-kernel.sh
+git clone --recurse-submodules https://github.com/Chengdong-Yu/uefi-pong
 ```
 
-To fetch the matching 20G81 kernel, device tree, trust caches, OS and SystemOS (Cryptex1) without downloading a whole IPSW:
-
-```sh
-python3 scripts/fetch-ios16-assets.py
-```
-
-The fetcher reads the IPSW BuildManifest by HTTP range and writes only the board-selected component files to `../UniXNU/out/ipsw/20G81`. Existing complete files of the expected length are reused without rereading them. No IPSW archive or Apple restore file is committed. Additional Apple-only build inputs such as the system-volume authentication blob are passed to build scripts from locally fetched/extracted files.
-
-To build the Pong userdata root image from the fetched OS and SystemOS components:
-
-```sh
-python3 scripts/build-userdata.py
-```
-
-The userdata builder streams the input windows once and emits the v98 `SHNGROOT` metadata used by the Pong native UFS code. The format requires window/header digests; the script does not do a separate image verification or readback pass. Generated assets go under `out/`.
-
-After installing the matching iOS 16.6.1 components and build tools, the upstream device workflow can also be run from the UniXNU checkout:
+以下命令从 UniXNU 核心仓库目录运行：
 
 ```sh
 ./unixnu defconfig pong_defconfig -D ../UniXNU-pong
 ./unixnu fetch
+python3 ../UniXNU-pong/scripts/fetch-ios16-assets.py
 ./unixnu build kernel
 ./unixnu build package
 ./unixnu build firmware --uefi ../uefi-pong
 ```
 
-The board file selects iPad7,1 / J120 / 20G81 while the hardware-specific drivers and boot configuration use Pong SM8475 values. The repository contains no IPSW, Apple restore binaries, system-volume authentication blob or GPU firmware blobs. Restore inputs are obtained locally through the scripts; GPU firmware remains an explicit local input.
+组件获取脚本按 `board.toml` 中的 iOS 16.6.1 / 20G81 配置读取 IPSW 的 BuildManifest，并通过 HTTP Range 只提取内核、设备树、信任缓存、OS 和 SystemOS（Cryptex1）等构建输入。完整 IPSW 不会保存到仓库或作为必需的本地归档；提取的组件保存在 UniXNU 的 `out/ipsw/20G81` 目录。
 
-## Device support
+Pong 的 userdata 根镜像可在获取组件后单独生成：
 
-| Feature | State | Notes |
+```sh
+python3 ../UniXNU-pong/scripts/build-userdata.py
+```
+
+镜像写入本机的 `UniXNU-pong/out/`。构建器在单次拷贝中生成 SHNGROOT 格式要求的窗口和头部摘要字段，不执行额外的镜像校验或回读。Apple restore 文件、生成的 userdata 镜像、系统卷认证数据和 GPU 固件均不纳入仓库；需要的系统组件由脚本从本地获取的 restore 输入中提取，GPU 固件作为本机输入提供。
+
+设备身份配置选择 iPad7,1 / J120 / 20G81 restore 组件；板级驱动和启动配置对应 Nothing Phone (2) 的 Pong / SM8475 硬件。
+
+## 设备支持
+
+| 功能 | 状态 | 说明 |
 | --- | --- | --- |
-| iOS 16.6.1 boot | ⚠️ | v98 reaches the iOS main interface; v99 is excluded because it panics. |
-| Display and touch | ✅ | Working in the v98 device build. |
-| Physical buttons | ✅ | Pong key path retained in the v98 source. |
-| UFS / APFS root | ⚠️ | Native UFS publishes the OS and SystemOS windows; runtime acceleration is not implied. |
-| Writable Data | ⚠️ | The v98 userdata-root builder is included; generated image must be built locally. |
-| Adreno 730 GPU / Metal | ⚠️ | v98 GPU startup was not confirmed as accelerated. |
-| Wi-Fi, Bluetooth, camera, audio, sensors | ❌ | Not implemented in this source set. |
+| iOS 16.6.1 启动 | ✅ | 已进入 iOS 主界面 |
+| 屏幕显示 | ✅ | 系统界面可显示 |
+| 触摸 | ✅ | Pong 触摸路径可用 |
+| 实体按键 | ✅ | 保留 Pong 电源键和音量键路径 |
+| UFS / APFS | ⚠️ | 原生 UFS 和 APFS 启动路径已接通，部分挂载能力仍在完善 |
+| 可写 Data | ⚠️ | 提供本地 userdata 根镜像构建器；镜像需在本机生成 |
+| Adreno 730 / Metal | ⚠️ | 驱动和 Metal 适配源码已纳入，硬件加速尚未确认 |
+| Wi-Fi、蓝牙、相机、音频、传感器 | ❌ | 尚未完成设备适配 |
 
-## License
+✅ 可用，⚠️ 部分可用或尚未确认，❌ 尚不可用。
 
-Device-level files follow BSD-2-Clause-Patent. Imported components keep their original SPDX headers and licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+## 许可证
+
+设备级代码采用 BSD-2-Clause-Patent。导入组件保留各自的 SPDX 标记与原始许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
