@@ -33,7 +33,7 @@ patches = [
 packages = [
   "{uefi}",
   "{tree}/package",
-  "{tree}/drivers/DarwinBoot",
+  "{tree}/drivers/DarwinBoot22",
   "{edk2}",
   "{uefi}/Platforms/Nothing",
   "{uefi}/Common/Mu",

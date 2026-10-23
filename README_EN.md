@@ -12,11 +12,11 @@ The current source reflects the device state that reaches the iOS home screen. D
 
 ## Build
 
-Clone the UniXNU core, this device repository, and the UEFI repository as sibling directories. Initialize the core repository's submodules:
+Clone the UniXNU core, this device repository, and the UEFI repository as sibling directories. Cloning this repository requires `--recurse-submodules` so the NativeMetal submodule is included:
 
 ```sh
 git clone --recurse-submodules https://github.com/UniXNU/UniXNU
-git clone https://github.com/Chengdong-Yu/UniXNU-pong
+git clone --recurse-submodules https://github.com/Chengdong-Yu/UniXNU-pong
 git clone --recurse-submodules https://github.com/Chengdong-Yu/uefi-pong
 ```
 
@@ -31,7 +31,7 @@ python3 ../UniXNU-pong/scripts/fetch-ios16-assets.py
 ./unixnu build firmware --uefi ../uefi-pong
 ```
 
-The asset fetcher reads the IPSW BuildManifest according to the iOS 16.6.1 / 20G81 settings in `board.toml`, then uses HTTP Range requests to extract only the kernel, device tree, trust caches, OS, and SystemOS (Cryptex1) components needed for the build. It does not download a complete IPSW archive. Extracted components are saved under UniXNU's `out/ipsw/20G81` directory.
+The asset fetcher reads the IPSW BuildManifest according to the iOS 16.6.1 / 20G81 settings in `board.toml`, then uses HTTP Range requests to extract only the kernel, device tree, trust caches, OS, and SystemOS (Cryptex1) components needed for the build. Each member is checked against the ZIP CRC-32 in the IPSW central directory as it is written. It does not download a complete IPSW archive. Extracted components are saved under UniXNU's `out/ipsw/20G81` directory.
 
 After fetching the components, build the Pong userdata root image separately:
 
@@ -40,6 +40,8 @@ python3 ../UniXNU-pong/scripts/build-userdata.py
 ```
 
 The image is written locally under `UniXNU-pong/out/`. The builder generates the window and header digest fields required by the SHNGROOT format during a single streaming copy. It does not perform an extra image verification or readback pass. Apple restore files, generated userdata images, the system-volume authentication data, and GPU firmware are not included in this repository. Required system components are extracted from locally fetched restore inputs; GPU firmware is supplied as a local input.
+
+The generated JSON includes the report-only field `write_target` (`/dev/block/sda13`). It names the Pong userdata partition for reference and must not be flashed blindly.
 
 The restore identity selects iPad7,1 / J120 / 20G81 components, while the board drivers and boot configuration target Nothing Phone (2), Pong / SM8475 hardware.
 
