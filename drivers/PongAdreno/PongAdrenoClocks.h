@@ -32,8 +32,10 @@ typedef enum {PongClockSuccess,PongClockArgument,PongClockPrerequisite,
     PongClockBusy,PongClockIo,PongClockTimeout,PongClockPoisoned} PongClockStatus;
 /* Pong Cape GPUCC0x03d90000/0xa000, GCC0x00100000/0x1f4200 only.
  * Actual bounded CX GDSC and early GMU200MHz/HUB150MHz/XO configuration.
- * No GX power-up or PLL programming: startup uses already running GPLL0
- * parents. A successful enable retains all clocks/parent votes. It does not
+ * Configure stopped Cape LUCID_OLE GPU PLL0/1 using SM8475 probe values;
+ * retain running PLLs. Initial GMU/HUB clocks use already running GPLL0
+ * parents; the GMU owns subsequent GX rate changes and PLL enabling.
+ * A successful enable retains all clocks/parent votes. It does not
  * establish native SMMU ownership, secure firmware, CP execution or scanout.
  * Failure poisons state and retains resources; do not blindly undo votes
  * while a partially started master may still issue traffic.

@@ -228,6 +228,7 @@ prepare_boot_services(void)
         {"/private/var/pong/boot-jobs", "/pong/LaunchDaemons"},
         {"/private/var/pong/empty-hal", "/System/Library/Audio/Plug-Ins/HAL"},
         {"/private/var/pong/empty-hal", "/Library/Audio/Plug-Ins/HAL"},
+        {"/private/var/pong/MetalExtensions", "/System/Library/Extensions"},
         /* Keep a read-only path to stock assets before overlaying their
          * directory. The RAM view contains aliases, not copied pictures. */
         {"/Library/Wallpaper", "/private/var/pong/stock-wallpaper"},
@@ -246,7 +247,9 @@ prepare_boot_services(void)
             printf("Pong init: optional boot view SKIP %s (source/target unavailable)\n",views[i].target);
             continue;
         }
-        int result=mount("bindfs",views[i].target,MNT_RDONLY,(void *)views[i].source);
+        int flags=MNT_RDONLY;
+        if(strcmp(views[i].target,"/System/Library/Extensions")==0)flags|=MNT_UNION;
+        int result=mount("bindfs",views[i].target,flags,(void *)views[i].source);
         printf("Pong init: boot view %s -> %s result=%d errno=%d\n",
                views[i].source,views[i].target,result,result?errno:0);
     }
@@ -257,29 +260,13 @@ configure_ui_library(void)
 {
     const char *path="/private/var/pong/libpong-ui.dylib";
     const char *base="/private/var/pong/libpong-ui.dylib SpringBoard backboardd containermanagerd containermanagerd_system mediaserverd Preferences";
-    const char *metal="; /private/var/pong/PongAdrenoMetal.bundle/PongAdrenoMetal backboardd";
-    char conf[512],args[4096]={0};size_t length=sizeof(args);
-    memcpy(conf,base,strlen(base)+1);
     struct stat st;
     if (stat(path,&st)!=0 || (st.st_mode&S_IFMT)!=S_IFREG || st.st_uid!=0) {
         puts("Pong init: UI compatibility library absent; SKIP");return;
     }
-    if(sysctlbyname("kern.bootargs",args,&length,NULL,0)==0) {
-        args[sizeof(args)-1]=0;
-        for(char *p=args;*p;) {
-            while(*p==' ')p++;
-            if(strncmp(p,"pong_metal=1",12)==0 && (!p[12] || p[12]==' ')) {
-                if(stat("/private/var/pong/PongAdrenoMetal.bundle/PongAdrenoMetal",&st)==0 &&
-                   (st.st_mode&S_IFMT)==S_IFREG && st.st_uid==0 && !(st.st_mode&022)) {
-                    memcpy(conf+strlen(base),metal,strlen(metal)+1);
-                    puts("Pong init: native Metal entry enabled for backboardd");
-                }
-                break;
-            }
-            while(*p && *p!=' ')p++;
-        }
-    }
-    int result=sysctlbyname("kern.exec_inject",NULL,NULL,conf,strlen(conf)+1);
+    /* Metal is loaded by stock IOAcceleratorES/NSBundle discovery. Injecting
+     * it too would re-enter the catalog while discovery is constructing it. */
+    int result=sysctlbyname("kern.exec_inject",NULL,NULL,(void *)base,strlen(base)+1);
     printf("Pong init: UI library configuration result=%d errno=%d\n",result,result?errno:0);
 }
 

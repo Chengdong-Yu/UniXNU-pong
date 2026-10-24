@@ -1,5 +1,7 @@
 # UniXNU-pong
 
+> **Local `ipados18` branch:** current Pong iOS 16 development sources have been captured for a future iPadOS 18 port using seventh-generation iPad restore components. No iPadOS 18 kernel or boot image has been built. The instructions below still describe the iOS 16 baseline. See the [migration preparation notes](migration/ipados18/README.zh.md).
+
 [简体中文](README.md) | **English**
 
 UniXNU device support for Nothing Phone (2), codename **Pong**, Qualcomm **SM8475**. This repository contains the device configuration, XNU patches, board drivers, userland adaptation, and build scripts for **iOS 16.6.1 (20G81)**.

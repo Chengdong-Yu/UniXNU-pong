@@ -20,7 +20,7 @@ use metal2vulkan_runtime::{
     BinaryArchive, BinaryArchiveDescriptor, BlitCommandEncoder, FamilyRow, FeatureRow, GpuFamily, RowState, BlitOption, Buffer, ClearColor, CommandBuffer, CommandQueue, ComputeCommandEncoder,
     ComputePipelineState, Deallocator, DebugMessage, DepthStencilState, Device, DeviceOptions, MessageSeverity, MessageSink, Event, EventRef, Fence, Function, Heap, HeapDescriptor, HeapType, HostMemory, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction,
     MetalLevel, Origin, PipelineOption, PipelineOptions, PurgeableState, PrivateCount, PrivateFlag, PrivateProperties, MAX_COLOR_ATTACHMENTS, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    SamplerState, ScissorRect, SharedEvent, SharedEventListener, Size, StoreAction, Texture, TextureDescriptor, Viewport, VisibilityResultMode,
+    SamplerState, ScissorRect, SharedEvent, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture, TextureDescriptor, Viewport, VisibilityResultMode,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -719,13 +719,19 @@ pub extern "C" fn nmb_texture_new_on_buffer(buffer: *mut NmbBuffer, descriptor: 
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_texture_new_on_surface(buffer: *mut NmbBuffer, descriptor: *const NmbTextureDescriptor, offset: u64,
                                              bytes_per_row: u64, pixel_format: u32, plane: u64, width: u64, height: u64,
-                                             chroma_offset: u64, chroma_bytes_per_row: u64) -> *mut NmbTexture {
+                                             chroma_offset: u64, chroma_bytes_per_row: u64, ycbcr_matrix: *const c_char) -> *mut NmbTexture {
     guard(std::ptr::null_mut(), || {
         let descriptor = texture_descriptor(descriptor)?;
         let buffer = &get(buffer)?.0;
         let mut surface = IoSurfacePlane::new(offset, bytes_per_row, true);
         if chroma_bytes_per_row != 0 {
-            surface = surface.with_ycbcr(IoSurfaceYCbCr::new(pixel_format, plane, [width, height], chroma_offset, chroma_bytes_per_row));
+            let mut facts = IoSurfaceYCbCr::new(pixel_format, plane, [width, height], chroma_offset, chroma_bytes_per_row);
+            if !ycbcr_matrix.is_null() {
+                let value = unsafe { CStr::from_ptr(ycbcr_matrix) }.to_str()
+                    .map_err(|_| "IOSurface YCbCr matrix is not UTF-8".to_string())?;
+                facts = facts.with_matrix(SurfaceYCbCrMatrix::from_attachment(value));
+            }
+            surface = surface.with_ycbcr(facts);
         }
         let texture = buffer.new_texture_with_iosurface_plane(&descriptor, surface);
         Ok(boxed(NmbTexture(texture.map_err(e("texture over surface"))?)))

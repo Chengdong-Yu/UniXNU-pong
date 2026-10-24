@@ -2,6 +2,8 @@
 
 **简体中文** | [English](README_EN.md)
 
+> **本地 `ipados18` 分支**：已同步当前 Pong iOS 16 开发源码，为第七代 iPad 的 iPadOS 18 迁移准备。新系统适配尚未开始；下文的构建说明仍属于 iOS 16 基线。分支说明和待适配项目见 [迁移准备](migration/ipados18/README.zh.md)。
+
 Nothing Phone (2)（代号 **Pong**，高通 **SM8475**）的 UniXNU 设备支持仓库。这里包含设备配置、XNU 补丁、板级驱动、用户空间适配和构建脚本，目标系统为 **iOS 16.6.1（20G81）**。
 
 当前代码以已达到 iOS 主界面的设备状态为基准。屏幕显示和触摸可用；Adreno 730 的硬件加速与 Metal 接入仍未确认完成。

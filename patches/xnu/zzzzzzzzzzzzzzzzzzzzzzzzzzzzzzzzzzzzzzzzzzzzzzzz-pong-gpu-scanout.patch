@@ -1,0 +1,74 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -41,6 +41,10 @@
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ 
+ #include "MiniIOSurface.h"
++
++extern "C" void pong_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
++extern "C" int pong_scanout_frame(IOMemoryDescriptor *,size_t,uint32_t,uint32_t,uint32_t);
++extern "C" bool pong_scanout_quarantined(void);
+ 
+ 
+ /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
+@@ -386,6 +390,8 @@
+ 	fPanelWidth = vinfo.v_width;
+ 	fPanelHeight = vinfo.v_height;
+ 	fRowBytes = vinfo.v_rowbytes;
++	pong_scanout_initialize((uint64_t)fBase,(size_t)fRowBytes*fPanelHeight,
++	    fRowBytes,fPanelWidth,fPanelHeight);
+ 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
+ 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
+ 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
+@@ -801,9 +807,11 @@
+ 	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
+ 	uint32_t layers = 0;
+ 	bool report;
++	bool surfacesReady = true;
+ 
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
++			surfacesReady = false;
+ 			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
+ 			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+ 		}
+@@ -859,6 +867,30 @@
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
++	/* The firmware scanout is linear BGRA. Hand off only one full-size,
++	 * unscaled layer; other layouts keep the existing CPU composition path.
++	 * No CPU writes may race an outstanding GPU copy after a timeout. */
++	bool gpuFrame=false;
++	if(pong_scanout_quarantined()){IOLockUnlock(fLock);return;}
++	MiniIOSurface *base=surfaces[0];
++	int32_t source[4],destination[4];
++	memcpy(source,swap+SWAP_SOURCE(0),sizeof(source));
++	memcpy(destination,swap+SWAP_DEST(0),sizeof(destination));
++	if(surfacesReady && base && !swapWord(swap,SWAP_SURFACE(1)) && !swapWord(swap,SWAP_SURFACE(2)) &&
++	    !swapWord(swap,SWAP_SURFACE(3)) && base->info.bytesPerElement==4 && !base->info.planeCount &&
++	    base->info.pixelFormat==FOURCC('B','G','R','A') && base->info.bytesPerRow==fRowBytes &&
++	    !source[0] && !source[1] && !destination[0] && !destination[1] &&
++	    source[2]==(int32_t)fPanelWidth && source[3]==(int32_t)fPanelHeight &&
++	    destination[2]==(int32_t)fPanelWidth && destination[3]==(int32_t)fPanelHeight) {
++		IOMemoryDescriptor *memory=base->client?base->client:base->memory;
++		size_t offset=(size_t)(base->pixels()-(base->client?base->kpixels:base->kbase));
++		if(!fGraphics) {
++			fGraphics=true;
++			PE_initialize_console(NULL,kPEGraphicsMode);
++			PE_initialize_console(NULL,kPEReleaseScreen);
++		}
++		gpuFrame=pong_scanout_frame(memory,offset,fRowBytes,fPanelWidth,fPanelHeight)!=0;
++	}
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 		int32_t src[4], dst[4];
+@@ -905,7 +937,7 @@
+ 				 * frame, otherwise vcputc continues painting over it. */
+ 				PE_initialize_console(NULL, kPEReleaseScreen);
+ 			}
+-			drawLayer(s, src, dst);
++			if(!gpuFrame)drawLayer(s, src, dst);
+ 		}
+ 	}
+ 	drawn = mach_absolute_time();

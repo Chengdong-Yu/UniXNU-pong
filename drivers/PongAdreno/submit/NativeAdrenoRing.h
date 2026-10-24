@@ -76,6 +76,11 @@ public:
      * it with one WPTR update. Returns a nonzero fence value on success. The
      * words are copied; the caller's buffer is never retained. */
     IOReturn submit(const uint32_t *words,size_t word_count,uint32_t *fence);
+    /* Secure bootstrap before ZAP: commit only these packets, without a
+     * normal-memory timestamp write. The board must observe RPTR at the
+     * returned WPTR and GPU idle before advancing bootstrap or publishing a
+     * client. Allowed only before the first fenced submission. */
+    IOReturn submitBootstrap(const uint32_t *words,size_t word_count,uint32_t *writePointer);
     /* User command buffers: the A7XX BR/BV thread framing of a7xx_submit() around the words (CP init and the kernel's own
      * bring-up packets keep the plain submit() above, as Linux sends them outside a7xx_submit()). */
     IOReturn submitFramed(const uint32_t *words,size_t word_count,uint32_t *fence);

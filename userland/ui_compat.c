@@ -29,10 +29,8 @@
 extern const void *_dyld_get_shared_cache_range(size_t *);
 static pthread_mutex_t hooks_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool is_springboard, is_media, is_settings;
-static IMP orb_original, persona_original, snapshot_original, activation_original, setup_original;
+static IMP persona_original, snapshot_original, activation_original, setup_original;
 static ptrdiff_t activation_offset = -1;
-static IMP portrait_original;
-static IMP poster_original, wallpaper_original;
 static IMP battery_original;
 static IMP statusbar_factory_original;
 static Class statusbar_pong_provider;
@@ -443,18 +441,6 @@ static BOOL set_setup_reason(id self, SEL sel, unsigned long long reason)
     return ((BOOL(*)(id,SEL,unsigned long long))setup_original)(self,sel,0);
 }
 
-/* HackiOS's software-only UI policy. The poster editor and switcher's wash
- * need rendering facilities absent from this CPU presenter. The main
- * wallpaper, scene services and ordinary app switcher remain available. */
-static BOOL poster_switcher_allowed(id self, SEL sel, id *explanation)
-{
-    (void)self;(void)sel;
-    if (explanation) *explanation=(id)CFSTR("Poster editing unavailable during software display bring-up");
-    return NO;
-}
-
-static void wallpaper_overlay(id self, SEL sel) { (void)self;(void)sel; }
-
 /* The 20G81 status provider already accepts nil for an absent internal
  * battery. With no actual power-source driver on Pong, do not synchronously
  * ask powerd for one on SpringBoard's main thread. A real published source
@@ -483,42 +469,6 @@ static long snapshot_format(id self, SEL sel, id snapshot)
     return 0; /* PNG: software-readable, preserves alpha */
 }
 
-static void prewarm_orb(id self, SEL sel)
-{
-    id (*create)(void)=(id(*)(void))dlsym(RTLD_DEFAULT,"MTLCreateSystemDefaultDevice");
-    if (!create || create()==nil) {
-        /* Siri's optional Metal animation must not abort software UI startup. */
-        say("Pong UI: Siri orb Metal prewarm SKIP (no Metal device)\n");
-        return;
-    }
-    ((void(*)(id,SEL))orb_original)(self,sel);
-}
-
-static void prewarm_portrait(id self, SEL sel, int version, BOOL styles)
-{
-    id (*create)(void)=(id(*)(void))dlsym(RTLD_DEFAULT,"MTLCreateSystemDefaultDevice");
-    if (!create || create()==nil) {
-        say("Pong UI: optional camera-filter GPU prewarm skipped (software-only platform)\n");
-        return;
-    }
-    ((void(*)(id,SEL,int,BOOL))portrait_original)(self,sel,version,styles);
-}
-
-static void install_media_hook(void)
-{
-    Class cls=objc_getClass("BWCoreImageFilterRenderer");
-    Method m=cls?class_getClassMethod(cls,sel_registerName("prewarmPortraitFilterVersion:semanticStyleFilters:")):NULL;
-    if (!m || method_getNumberOfArguments(m)!=4) return;
-    char *r=method_copyReturnType(m),*a=method_copyArgumentType(m,2),*b=method_copyArgumentType(m,3);
-    bool valid=r && r[0]=='v' && a && a[0] && strchr("iI",a[0]) &&
-               b && b[0] && strchr("cB",b[0]);
-    free(r); free(a); free(b);
-    if (!valid) return;
-    portrait_original=method_getImplementation(m);
-    method_setImplementation(m,(IMP)prewarm_portrait);
-    say("Pong UI: installed software-only camera filter prewarm policy\n");
-}
-
 static void install_objc_hooks(void)
 {
     pthread_mutex_lock(&hooks_lock);
@@ -530,7 +480,6 @@ static void install_objc_hooks(void)
         if(!system_name_original)
             system_name_original=hook("UIDevice","systemName",false,"@",NULL,(IMP)ios_system_name);
     }
-    if (is_media && !portrait_original) install_media_hook();
     if (is_springboard) {
         if (!watch_unlock_original)
             watch_unlock_original=hook("SFAutoUnlockManager","autoUnlockEnabled",true,
@@ -556,14 +505,6 @@ static void install_objc_hooks(void)
         }
         if (!setup_original)
             setup_original=hook("SBSetupManager","_setSetupRequiredReason:",false,"Bc","Q",(IMP)set_setup_reason);
-        if (!poster_original)
-            poster_original=hook("SBMainDisplayPolicyAggregator","_allowsCapabilityPosterSwitcherWithExplanation:",
-                                 false,"Bc","^",(IMP)poster_switcher_allowed);
-        if (!wallpaper_original)
-            wallpaper_original=hook("SBAppSwitcherPageView","_createOrDestroyWallpaperOverlayView",
-                                    false,"v",NULL,(IMP)wallpaper_overlay);
-        if (!orb_original)
-            orb_original=hook("SiriPresentationViewController","prewarmOrbViewShaders",false,"v",NULL,(IMP)prewarm_orb);
         if (!snapshot_original)
             snapshot_original=hook("XBApplicationSnapshotManifestImpl","_outputFormatForSnapshot:",true,"qQ", "@",(IMP)snapshot_format);
     }
@@ -688,25 +629,11 @@ static void start_home_transition(void)
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,300*NSEC_PER_SEC),queue,(void *)300,main_snapshot);
 }
 
-/* Addresses resolved from the supplied 20G81 QuartzCore, not from 20F66.
- * The replacement preserves the real first result; a missing GPU is cached so
- * CoreAnimation can continue using its existing sw_renderer rather than retry.
- */
-static uintptr_t original_renderer, original_format, original_ready, original_ignore;
+/* Addresses resolved from the supplied 20G81 QuartzCore. A render service
+ * can appear after the first query: never permanently cache a missing GPU. */
+static uintptr_t original_format, original_ready, original_ignore;
 static uintptr_t original_begin, original_render;
-static bool renderer_unavailable;
-static void *renderer(void *server)
-{
-    if (__atomic_load_n(&renderer_unavailable,__ATOMIC_ACQUIRE)) return NULL;
-    void *r=((void *(*)(void *))original_renderer)(server);
-    if (!r) {
-        __atomic_store_n(&renderer_unavailable,true,__ATOMIC_RELEASE);
-        say("Pong UI: CoreAnimation renderer unavailable; retain software renderer\n");
-    }
-    return r;
-}
-
-/* A CPU-only scanout consumes uncompressed 8-bit BGRA. Do not select the
+/* Pong's GPU scanout consumes uncompressed 8-bit BGRA. Do not select the
  * compressed/half-float formats that the original Apple product supports.
  * The slot and original method are from this supplied 20G81 QuartzCore. */
 static uint32_t framebuffer_format(void *display)
@@ -714,7 +641,7 @@ static uint32_t framebuffer_format(void *display)
     uint32_t wanted=((uint32_t(*)(void *))original_format)(display);
     static unsigned calls;
     if (__atomic_fetch_add(&calls,1,__ATOMIC_RELAXED)==0)
-        say("Pong UI: framebuffer format requested=%08x selected=42475241 (software BGRA)\n",wanted);
+        say("Pong UI: framebuffer format requested=%08x selected=42475241 (native scanout BGRA)\n",wanted);
     return 0x42475241; /* 'BGRA', the actual MiniIOMobileFramebuffer format */
 }
 
@@ -795,11 +722,52 @@ static bool replace_virtual(const char *name, uintptr_t slot_address, uintptr_t 
     return true;
 }
 
+/* Keep Metal available to clients while using the stock SWContext for desktop
+ * composition. In 20G81 EAGLServer's constructor calls renderer() directly, so
+ * a vtable-only hook misses its first Metal context and shader creation.
+ * Returning no EAGL renderer takes the original Server::render_update fallback
+ * and its software-display flag. Do not replace sw_renderer or invent a Metal
+ * context. This process-private policy is enabled only by the boot argument. */
+static void install_software_compositor_policy(void)
+{
+    char args[4096];size_t args_length=sizeof(args)-1;
+    if(sysctlbyname("kern.bootargs",args,&args_length,NULL,0)!=0)return;
+    args[args_length<sizeof(args)?args_length:sizeof(args)-1]='\0';
+    const char key[]="pong_ui_software=1";
+    const char *option=args;
+    bool enabled=false;
+    while((option=strstr(option,key))!=NULL) {
+        const char after=option[sizeof(key)-1];
+        if((option==args || option[-1]==' ' || option[-1]=='\t') &&
+           (after=='\0' || after==' ' || after=='\t')){enabled=true;break;}
+        option+=sizeof(key)-1;
+    }
+    if(!enabled)return;
+    size_t length=0;
+    uintptr_t base=(uintptr_t)_dyld_get_shared_cache_range(&length);
+    const uintptr_t target=base+(0x18826a418ULL-0x180000000ULL);
+    if(!base || length<8 || target<base || target>base+length-8)return;
+    Dl_info info;
+    if(!dladdr((void *)target,&info) || !info.dli_fname ||
+       !strstr(info.dli_fname,"/QuartzCore.framework/QuartzCore"))return;
+    uint32_t instructions[2]={0};vm_size_t read=0;
+    if(vm_read_overwrite(mach_task_self(),target,sizeof(instructions),(vm_address_t)instructions,&read)!=KERN_SUCCESS ||
+       read!=sizeof(instructions) || instructions[0]!=0xd10143ff || instructions[1]!=0xa9015ff8) {
+        say("Pong UI:20G81 EAGL renderer ABI unavailable; software policy skipped\n");return;
+    }
+    const vm_address_t page=target&~((vm_address_t)vm_page_size-1);
+    kern_return_t result=vm_protect(mach_task_self(),page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY);
+    if(result!=KERN_SUCCESS){say("Pong UI:renderer policy protection failed %d\n",result);return;}
+    const uint32_t disabled[2]={0xd2800000,0xd65f03c0}; /* return nullptr */
+    memcpy((void *)target,disabled,sizeof(disabled));sys_icache_invalidate((void *)target,sizeof(disabled));
+    result=vm_protect(mach_task_self(),page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE);
+    say("Pong UI:desktop uses stock software composition; Metal remains available (%d)\n",result);
+}
+
 static void install_renderer_hook(void)
 {
-    replace_virtual("software renderer fallback",0x1d586e000ULL,0x18826a418ULL,
-                    (void *)renderer,&original_renderer);
-    replace_virtual("software framebuffer format",0x1d586c7c0ULL,0x1884aa47cULL,
+    install_software_compositor_policy();
+    replace_virtual("native scanout format",0x1d586c7c0ULL,0x1884aa47cULL,
                     (void *)framebuffer_format,&original_format);
     replace_virtual("display readiness",0x1d586c7c8ULL,0x1882787f4ULL,
                     (void *)display_ready,&original_ready);

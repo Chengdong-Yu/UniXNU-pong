@@ -3,12 +3,13 @@
 
 prepare: build static init, curate real 20G81 jobs, extract a Data seed and clone images.
 apply:   mount ONLY these image copies and apply the prepared changes (macOS admin).
-finish:  produce PackedRAMDisk without a separate image-verification pass.
+finish:  produce PackedRAMDisk; image verification is opt-in.
 helper:  compile a RAM-Data init update without rebuilding the OS image.
 No mode writes a phone, a physical disk or the original restore image.
 """
 import argparse
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,8 +21,9 @@ import struct
 import subprocess
 import sys
 
+VERIFY_IMAGES = False
+
 PROJECT = Path(__file__).resolve().parents[1]
-USERLAND = PROJECT / 'userland'
 sys.path.insert(0, str(PROJECT / 'tools/apfs'))
 import apfs
 
@@ -36,12 +38,9 @@ com.apple.SpringBoard com.apple.configd'''.split()
 # Keep the reference's on-demand policy, so restoring a provider does not
 # start every service at boot. These software services have real 20G81 jobs;
 # a missing dependency is not evidence that its clients should be disabled.
-BOOT_SKIP = {
-    # v80 REC: Chrono's eager extension discovery repeatedly launches widgets
-    # which never check in, then kills them all. Keep the other restored
-    # providers; widget timelines are optional before the first home screen.
-    'com.apple.chronod': 'widget extension discovery repeatedly times out before the first UI',
-}
+# Widget timelines need the real matching20G81 chronod provider. The early
+# no-GPU exclusion must not survive once the desktop and its Metal clients run.
+BOOT_SKIP = {}
 RESTORED_SOFTWARE = {
     'mobileassetd', 'bird', 'homed', 'routined', 'duetexpertd',
     'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'ReportCrash',
@@ -67,6 +66,15 @@ TRIGGERS = ('RunAtLoad', 'KeepAlive', 'StartInterval', 'StartCalendarInterval',
 
 def run(cmd, **kw):
     return subprocess.run([str(x) for x in cmd], check=True, **kw)
+
+
+def sha(path):
+    if not VERIFY_IMAGES: return None
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(b)
+    return h.hexdigest()
 
 
 def native_init_signature(data):
@@ -106,6 +114,29 @@ def native_init_signature(data):
             pages.append(1 << shift)
     if not pages: raise RuntimeError('static init signature lacks a CodeDirectory')
     return {'code_directories': len(pages), 'page_bytes': 4096}
+
+
+def packed_digest(path):
+    """Reconstruct a DBRDISK1 digest without allocating its logical disk in RAM."""
+    b = path.read_bytes()
+    magic, version, page, size, count = struct.unpack_from('<8sIIQQ', b)
+    if (magic, version, page) != (b'DBRDISK1', 1, 4096) or count > 65536:
+        raise RuntimeError('invalid PackedRAMDisk header')
+    cursor, previous = 32 + 16 * count, 0
+    digest, zero = hashlib.sha256(), bytes(1024 * 1024)
+    def zeros(n):
+        while n:
+            amount = min(n, len(zero)); digest.update(zero[:amount]); n -= amount
+    for i in range(count):
+        offset, length = struct.unpack_from('<QQ', b, 32 + 16 * i)
+        if not length or ((offset | length) & 4095) or offset < previous or offset + length > size:
+            raise RuntimeError('invalid PackedRAMDisk extent')
+        zeros(offset - previous)
+        digest.update(b[cursor:cursor + length])
+        cursor += length; previous = offset + length
+    zeros(size - previous)
+    if cursor != len(b): raise RuntimeError('PackedRAMDisk size mismatch')
+    return digest.hexdigest()
 
 
 def dump(path, value):
@@ -347,15 +378,19 @@ def compile_init(out, developer, destination):
     cmd = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios16.6.1',
            '-isysroot', sdk, '-Os', '-static', '-nostdlib', '-ffreestanding',
            '-fno-stack-protector', '-fno-stack-check', '-fno-builtin', '-Wall', '-Wextra', '-Werror',
-           '-I' + str(USERLAND / 'libmini'), '-Wl,-e,_start',
+           '-I' + str(PROJECT / 'userland/libmini'), '-Wl,-e,_start',
            '-Wl,-pagezero_size,0x100000000', '-Wl,-no_fixup_chains',
-           str(USERLAND / 'libmini/start.S'), str(USERLAND / 'libmini/mini.c'),
-           str(USERLAND / 'init.c'), '-o', str(destination)]
+           str(PROJECT / 'userland/libmini/start.S'), str(PROJECT / 'userland/libmini/mini.c'),
+           str(PROJECT / 'userland/init.c'), '-o', str(destination)]
     run(cmd, env=env)
     # codesign defaults to 16K for arm64, independently of the kernel ABI.
     run(['codesign', '--force', '--sign', '-', '--pagesize', '4096',
-         '--entitlements', USERLAND / 'init-entitlements.plist', destination])
-    init_signature = native_init_signature(destination.read_bytes())
+         '--entitlements', PROJECT / 'userland/init-entitlements.plist', destination])
+    if VERIFY_IMAGES:
+        run(['codesign', '--verify', '--strict', destination])
+        init_signature = native_init_signature(destination.read_bytes())
+    else:
+        init_signature = {'page_bytes': 4096, 'verification': 'skipped by request'}
     os.chmod(destination, 0o755)
     (out / 'compile-command.json').write_text(json.dumps(cmd, indent=2) + '\n')
     return init_signature
@@ -370,8 +405,8 @@ def compile_ui(out, developer):
            '-isysroot', sdk, '-Os', '-fblocks', '-dynamiclib', '-Wall', '-Wextra', '-Werror',
            '-Wl,-no_fixup_chains', '-install_name', '/private/var/pong/libpong-ui.dylib',
            '-framework', 'CoreFoundation', '-framework', 'CoreGraphics', '-lobjc',
-           str(USERLAND / 'ui_compat.c'), str(USERLAND / 'icons_cpu.c'),
-           str(USERLAND / 'touch.c'),
+           str(PROJECT / 'userland/ui_compat.c'), str(PROJECT / 'userland/icons_cpu.c'),
+           str(PROJECT / 'userland/touch.c'),
            '-o', str(destination)]
     run(cmd, env=env)
     run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', destination])
@@ -379,15 +414,37 @@ def compile_ui(out, developer):
     return destination
 
 
+def compile_sleep(out, developer):
+    """20G81 local Sleep configuration service; uses shipped XPC interfaces."""
+    env = dict(os.environ, DEVELOPER_DIR=str(developer))
+    destination = out / 'sleepserver'
+    cmd = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios16.6.1',
+           '-Os', '-fobjc-arc', '-fblocks', '-Wall', '-Wextra', '-Werror',
+           '-Wl,-no_fixup_chains', '-framework', 'Foundation',
+           PROJECT / 'userland/sleepserver.m', '-o', destination]
+    run(cmd, env=env)
+    run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', destination])
+    (out / 'sleep-compile-command.json').write_text(json.dumps([str(x) for x in cmd], indent=2) + '\n')
+    put_plist(out / 'com.apple.sleepd.plist', dict(Label='com.apple.sleepd',
+        ProgramArguments=['/private/var/pong/sleepserver'], UserName='mobile',
+        MachServices={'com.apple.sleepd.sleepserver': True}, RunAtLoad=True,
+        ThrottleInterval=30, StandardOutPath='/dev/console', StandardErrorPath='/dev/console',
+        POSIXSpawnType='Interactive'))
+    return destination
+
+
 def helper(a):
     out = a.out.resolve(); out.mkdir(parents=True, exist_ok=True)
     signature = compile_init(out, a.developer, out / 'init')
     ui_library = compile_ui(out, a.developer)
+    sleep_service = compile_sleep(out, a.developer)
     dump(out / 'helper.json', dict(helper=str(out / 'init'), runtime_path='/private/var/pong/init',
         signature=signature, required_kernel=['pong_init_path',
         'native writable Data mount', 'DEVELOPMENT PONG arm64 4K'],
         ui_library=str(ui_library),
-        ui_library_runtime='/private/var/pong/libpong-ui.dylib'))
+        ui_library_runtime='/private/var/pong/libpong-ui.dylib',
+        sleep_service=str(sleep_service), sleep_scope='local configuration; no alarm/Focus/Health/Watch backend',
+        image_verification='skipped' if not VERIFY_IMAGES else 'requested'))
     print(out / 'init')
 
 
@@ -402,7 +459,7 @@ def prepare(a):
         raise RuntimeError('SystemCryptex must also be 16.6.1 / 20G81; refusing mixed builds')
     overlay = out / 'overlay'
     (overlay / 'pong/etc').mkdir(parents=True, exist_ok=True)
-    (overlay / 'pong/LICENSE-HackiOS').write_bytes((USERLAND / 'LICENSE-HackiOS').read_bytes())
+    (overlay / 'pong/LICENSE-HackiOS').write_bytes((PROJECT / 'userland/LICENSE-HackiOS').read_bytes())
     (overlay / 'sbin').mkdir(exist_ok=True)
     init_signature = compile_init(out, a.developer, overlay / 'sbin/launchd')
     counts = jobs(root, cryptex, overlay, out)
@@ -413,12 +470,16 @@ def prepare(a):
             dest = overlay / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.symlink_to('/System/Cryptexes/OS/' + rel.as_posix())
+    required = ['sbin/launchd', 'usr/lib/dyld', 'System/Library/CoreServices/SystemVersion.plist']
+    hashes = {p: sha(root / p) for p in required}
     cache = cryptex / 'System/Library/Caches/com.apple.dyld'
     cache_files = sorted(p for p in cache.glob('dyld_shared_cache_arm64*') if p.is_file())
     if len(cache_files) < 2: raise RuntimeError('matching split arm64 shared cache missing')
+    # Record all matching cache pieces; do not copy or replace any with 20F66 files.
+    cache_info = {p.name: {'size': p.stat().st_size, 'sha256': sha(p)} for p in cache_files}
     state = dict(format='pong-hackios-userland-20G81-v1', version=version, cryptex_version=cv,
                  os_source=str(a.os_image.resolve()), os_root=str(root), system_cryptex=str(cryptex),
-                 data_source=str(a.data_image.resolve()),
+                 data_source=str(a.data_image.resolve()), apple_sha256=hashes, cache=cache_info,
                  jobs=counts, data=seed, static_init_signature=init_signature,
                  disabled=['20F66 fixed-address injection', 'Redwood sysctls',
                  'HackiOS ramfs / custom APFS ABI', 'hardware firmware and GPU libraries'],
@@ -459,6 +520,8 @@ def apply(a):
     root = out / 'system-mount'
     device = attach(out / 'pong-ios1661-system.cdr', root)
     try:
+        if sha(root / 'sbin/launchd') != plan['apple_sha256']['sbin/launchd']:
+            raise RuntimeError('launchd does not match source 20G81')
         stock = root / 'pong/stock-config'
         stock.mkdir(parents=True)
         for rel in ('System/Library/LaunchDaemons', 'System/Library/NanoLaunchDaemons',
@@ -490,6 +553,8 @@ def apply(a):
             dest = root / 'Applications' / p.name
             if os.path.lexists(dest): raise RuntimeError('app already exists: ' + p.name)
             p.rename(dest); moved.append(p.name)
+        if sha(root / 'sbin/launchd.ios') != plan['apple_sha256']['sbin/launchd']:
+            raise RuntimeError('original launchd changed')
     finally:
         run(['hdiutil', 'detach', device])
     data = out / 'data-mount'
@@ -531,12 +596,70 @@ def pack_data(data_path, output):
 def finish(a):
     out = a.out.resolve(); plan = json.loads((out / 'build-plan.json').read_text())
     if not (out / 'apply-complete.json').exists(): raise RuntimeError('apply has not completed')
+    if not VERIFY_IMAGES:
+        packed = out / 'pong-ios1661-data.packed'
+        pack_data(out / 'pong-ios1661-data.cdr', packed)
+        result = dict(image_verification='skipped by request', device_boot_verified=False,
+            static_init_signature=plan.get('static_init_signature'), phone_written=False,
+            files={name: {'bytes': (out / name).stat().st_size} for name in
+                ('pong-ios1661-system.cdr', 'pong-ios1661-data.cdr', 'pong-ios1661-data.packed')})
+        dump(out / 'result.json', result)
+        print(json.dumps(result, indent=2))
+        return
+    c = apfs.Container(str(out / 'pong-ios1661-system.cdr')); v = apfs.pick_volume(c, None)
+    def content(path):
+        found = v.lookup(path)
+        if not found: raise RuntimeError('missing image path: ' + path)
+        return v.inode(found[0]).contents()
+    for source, expected in plan['apple_sha256'].items():
+        path = '/sbin/launchd.ios' if source == 'sbin/launchd' else '/' + source
+        if hashlib.sha256(content(path)).hexdigest() != expected:
+            raise RuntimeError('Apple original readback mismatch: ' + source)
+    if content('/System/Cryptexes/OS') != b'/private/preboot': raise RuntimeError('wrong cryptex link')
+    if content('/System/Library/Caches/com.apple.dyld') != b'/private/preboot/System/Library/Caches/com.apple.dyld':
+        raise RuntimeError('wrong canonical shared cache link')
+    if content('/sbin/launchd') != (out / 'overlay/sbin/launchd').read_bytes():
+        raise RuntimeError('static init readback mismatch')
+    init_signature = native_init_signature(content('/sbin/launchd'))
+    if v.lookup('/System/Library/xpc/launchd.plist'): raise RuntimeError('stock job cache still active')
+    for p in (out / 'overlay/pong/LaunchDaemons').glob('*.plist'):
+        inode = v.inode(v.lookup('/pong/LaunchDaemons/' + p.name)[0])
+        if inode.owner != 0 or inode.group != 0 or inode.contents() != p.read_bytes():
+            raise RuntimeError('launchd job ownership/content mismatch: ' + p.name)
+    system_uuid = apfs._uuid(v.vol_uuid); c.close()
+    data_path = out / 'pong-ios1661-data.cdr'
+    c = apfs.Container(str(data_path)); v = apfs.pick_volume(c, None)
+    data_uuid = apfs._uuid(v.vol_uuid)
+    for path, (mode, uid, gid) in json.loads((out / 'data-metadata.json').read_text()).items():
+        found = v.lookup('/' + path)
+        if not found: raise RuntimeError('missing Data seed entry: ' + path)
+        inode = v.inode(found[0])
+        if (inode.mode, inode.owner, inode.group) != (mode, uid, gid):
+            raise RuntimeError('Data seed metadata mismatch: ' + path)
+    ino = v.inode(v.lookup('/mobile/Library/Preferences/com.apple.migration.plist')[0])
+    migration = plistlib.loads(ino.contents())
+    if migration['LastSystemVersion'] != '20G81' or ino.owner != 501:
+        raise RuntimeError('Data version/ownership mismatch')
+    c.close()
     packed = out / 'pong-ios1661-data.packed'
-    pack_data(out / 'pong-ios1661-data.cdr', packed)
-    result = {'phone_written': False, 'device_boot_verified': False,
-              'static_init_signature': plan.get('static_init_signature'),
-              'files': {name: {'bytes': (out / name).stat().st_size} for name in
-                  ('pong-ios1661-system.cdr', 'pong-ios1661-data.cdr', 'pong-ios1661-data.packed')}}
+    pack_data(data_path, packed)
+    result = {'os_volume_uuid': system_uuid, 'data_volume_uuid': data_uuid,
+              'original_launchd_preserved': True, 'original_dyld_and_SystemVersion_preserved': True,
+              'static_init_readback': True,
+              'static_init_signature': init_signature,
+              '20G81_Data_preferences': True, 'phone_written': False,
+              'Data_numeric_owners_and_modes_preserved': True,
+              'launchd_plists_root_wheel': len(list((out / 'overlay/pong/LaunchDaemons').glob('*.plist'))),
+              'Data_metadata_entries': len(json.loads((out / 'data-metadata.json').read_text())),
+              'native_APFS_readback': 'passed',
+              'device_boot_verified': False, 'files': {}}
+    for name in ('pong-ios1661-system.cdr', 'pong-ios1661-data.cdr', 'pong-ios1661-data.packed'):
+        p = out / name
+        result['files'][name] = {'bytes': p.stat().st_size, 'sha256': sha(p)}
+    packed_sha = packed_digest(packed)
+    if packed_sha != result['files']['pong-ios1661-data.cdr']['sha256']:
+        raise RuntimeError('PackedRAMDisk reconstruction does not match Data')
+    result['packed_Data_roundtrip_sha256'] = packed_sha
     dump(out / 'result.json', result)
     print(json.dumps(result, indent=2))
 
@@ -551,7 +674,12 @@ def main():
         s = sub.add_parser(name); s.add_argument('--out', type=Path, required=True)
     s = sub.add_parser('helper'); s.add_argument('--out', type=Path, required=True)
     s.add_argument('--developer', type=Path, required=True)
+    for mode in sub.choices.values():
+        mode.add_argument('--verify-images', action='store_true',
+                          help='explicitly request image hashes and readback (off by default)')
     a = p.parse_args()
+    global VERIFY_IMAGES
+    VERIFY_IMAGES = a.verify_images
     globals()[a.mode](a)
 
 

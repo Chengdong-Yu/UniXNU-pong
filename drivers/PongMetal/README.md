@@ -1,9 +1,10 @@
 # Pong Metal / iOS16.6.1 development
 
 This is a local fork of Sheng's NativeMetal frontend and object bridge over
-metal2vulkan and Turnip. The libraries compile and link; **no Metal device is
-registered and actual Pong GPU execution is not yet confirmed**. This is not
-an automatically exposed hardware acceleration plugin yet.
+metal2vulkan and Turnip. The compiled path now includes stock20G81 Metal
+discovery, a genuine IOAcceleratorES parent, native BO clients and GPU scanout.
+**Actual Pong GPU execution and accelerated presentation remain unconfirmed.**
+The most recent phone log stops before CP initialization completes.
 
 ## Actual adaptations
 
@@ -14,8 +15,10 @@ an automatically exposed hardware acceleration plugin yet.
   actual completed CP and qualified20G81 runtime policy before this entry
   can create a device. The plugin cannot set those readiness properties.
   `build-pong-metal-plugin.py` links a self-contained development bundle
-  beside the Rust bridge and Turnip. v96 stages it under private RAM Data
-  `/pong/PongAdrenoMetal.bundle`; it is not a system discovery/injection path.
+  beside the Rust bridge and Turnip. The PID1 helper presents the bundle
+  through a read-only union at `/System/Library/Extensions`, as Sheng does.
+  The original Metal discovery loads its principal class; manual MTLAddDevice
+  injection has been removed.
 - Read the supplied20G81 cache's Objective-C metadata: `_MTLDevice` has
  528bytes and523 own methods, rather than Sheng21H461's536byte extent.
  `PongMetalAbi.h` requires the actual size and selector return/argument ABI
@@ -50,31 +53,43 @@ Unqualified Apple compressed-heap layouts and lossless compressed blits
 stay unsupported. The reproducible source patch is
 `patches/metal2vulkan/0008-pong-ios16-20G81-policy.patch`.
 
-## Remaining integration
+## Hardware integration and remaining confirmation
 
 Pong CP/GPU-VM/ZAP/native-client startup is now connected, with actual
 timestamp completion required before publication. Phone execution is still
-unconfirmed. The plugin's standard Metal accelerator discovery and GPU
-IOSurface presentation remain separate work. Its policy-ready property
-stays false until that integration exists, so merely staging these files
-does not replace the functioning software renderer. Sheng's iOS17 private
-offsets, diagnostic workloads and A740 identity are not used. v95 software
-rendering/touch/About remain the known working baseline.
+unconfirmed. `PongAdrenoAccelerator` uses the supplied20G81 base metaclass,
+constructor and destructor. It initializes only that empty original base;
+loading every IOGPUFamily dependency would duplicate the native IOSurface
+provider. The native GPU service and accelerator share one BO/VM/submission
+backend. The compositor owns its large address window and scanout connection.
+`PongAdrenoMetal.publish` and `.clients` enable discovery for backboardd,
+SpringBoard, CollectionsPoster and WidgetRenderer_Default. The seed file is the publication
+policy; there is no second compiled list rejecting wallpaper clients. BOs and surfaces are imported
+through the native ABI, and only completed GPU work retires displayed frames.
+Successful compilation or a staged bundle does not establish acceleration.
 
-## Build integration
+## Rebuild, without image verification or device operations
 
-The final bundle is assembled from locally built NativeMetal bridge and Turnip
-libraries. These third-party source trees and compiled libraries are not
-vendored here. The repository script packages the local products without
-installing them on a phone:
+From the main project root:
 
 ```sh
-python3 scripts/build-pong-metal-plugin.py \
-  --bridge-directory "$NATIVE_METAL_BUILD" \
-  --turnip-library "$TURNIP_BUILD/libvulkan_freedreno.dylib" \
-  --output-dir out/metal
+/opt/local/bin/python3.12 scripts/build-pong-metal-bridge.py \
+  --translator /Volumes/PongDev/upstream/gpu-pong/metal2vulkan \
+  --output-dir /Volumes/PongDev/build/Pong-iOS16-adreno-development/metal
+
+/opt/local/bin/python3.12 scripts/build-pong-turnip.py \
+  --mesa /Volumes/PongDev/upstream/gpu-pong/mesa \
+  --abi-directory /Volumes/PongDev/upstream/gpu-pong/NativeAdreno \
+  --tools-directory /Volumes/PongDev/build/Pong-iOS16-adreno-development/tools \
+  --venv /Volumes/PongDev/build/Pong-iOS16-adreno-development/venv \
+  --output-dir /Volumes/PongDev/build/Pong-iOS16-adreno-development/turnip
 ```
 
-Set `DEVELOPER_DIR` or pass `--developer-dir` when Xcode is not selected by
-`xcode-select`. No generated libraries, firmware blobs or Apple restore files
-are committed.
+The translator uses NativeMetal's seven bridge patches at its pinned
+720ef1ce revision. Mesa uses UniXNU's nine Darwin/compiler/import patches
+at85fda3b3. Source pin identifiers identify upstream code; no image hashes
+or readback checks are performed. Dependency licenses remain in their
+source trees: NativeMetal MIT, metal2vulkan GPL/LGPL, and Mesa per-file
+licenses. Product archives, frontend objects and exact build commands stay
+beside the local libraries; no phone installation or runtime test is run by
+these scripts.

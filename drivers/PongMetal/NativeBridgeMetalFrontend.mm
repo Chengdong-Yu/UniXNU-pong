@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Native Metal API frontend over the bridge (bridge/NativeMetalObjects.h).
-// Pong fork of Sheng's frontend; real A730 submission is not connected yet.
+// Pong fork of Sheng's frontend over the native A730 kernel transport.
 // The device is a dynamically allocated subclass of the target's own _MTLDevice that
 // only adds this file's implementations; every other object is an own class answering the Metal protocol methods it implements.
 // Every result comes from the runtime and the GPU: a refused call returns nil/NO with the runtime's reason, an encoder call the runtime
@@ -298,8 +298,16 @@ static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUIn
 static NBTexture *textureOnSurface(NBBuffer *buffer,MTLTextureDescriptor *d,IOSurfaceRef surface,NSUInteger plane,NSUInteger offset,NSUInteger row) {
  NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;
  const uint64_t base=(uintptr_t)IOSurfaceGetBaseAddress(surface),chroma=(uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface,1);
+ // Preserve the producer's color matrix. Treating every video/image surface
+ // as BT.601 changes the colors of BT.709/2020 wallpaper and weather images.
+ static const CFStringRef *matrixKey=(const CFStringRef *)dlsym(RTLD_DEFAULT,"kIOSurfaceYCbCrMatrix");
+ CFTypeRef matrix=IOSurfaceCopyValue(surface,matrixKey?*matrixKey:CFSTR("IOSurfaceYCbCrMatrix"));
+ if(!matrix)matrix=IOSurfaceCopyValue(surface,CFSTR("YCbCrMatrix"));
+ const char *matrixText=nullptr;
+ if(matrix)matrixText=CFGetTypeID(matrix)==CFStringGetTypeID()?[( __bridge NSString *)matrix UTF8String]:"unsupported IOSurface matrix type";
  NmbTexture *handle=nmb_texture_new_on_surface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,
-  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chroma>=base?chroma-base:0,IOSurfaceGetBytesPerRowOfPlane(surface,1));
+  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chroma>=base?chroma-base:0,IOSurfaceGetBytesPerRowOfPlane(surface,1),matrixText);
+ if(matrix)CFRelease(matrix);
  if(!handle){NBLOG(@"native-metal: texture over surface refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
  texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;return texture;
@@ -346,20 +354,27 @@ static bool methodABI(id object,SEL selector,const char *encoding) {
  Method method=class_getInstanceMethod(object_getClass(object),selector);
  return method && !strcmp(method_getTypeEncoding(method),encoding);
 }
-// Bytes of a function constant of MTLDataType `type` (scalars and 2/4-wide vectors; 3-wide vectors are not qualified).
+// Packed scalar components of a function constant. MSL's 3-wide storage has
+// tail padding, but the AIR constant binder consumes exactly three lanes.
+// Actual20G81 QuartzCore supplies UChar3 (51) at create_fragment_shader+0x868;
+// rejecting every 3-wide type made ordinary desktop shader specialization nil.
 static uint64_t constantBytes(uint64_t type) {
  switch(type) {
   case 3:case 29:case 33:return 4;
   case 4:case 30:case 34:return 8;
+  case 5:case 31:case 35:return 12;
   case 6:case 32:case 36:return 16;
   case 16:case 37:case 41:return 2;
   case 17:case 38:case 42:return 4;
+  case 18:case 39:case 43:return 6;
   case 19:case 40:case 44:return 8;
   case 45:case 49:case 53:return 1;
   case 46:case 50:case 54:return 2;
+  case 47:case 51:case 55:return 3;
   case 48:case 52:case 56:return 4;
   case 81:case 85:return 8;
   case 82:case 86:return 16;
+  case 83:case 87:return 24;
   case 84:case 88:return 32;
   default:return 0;
  }
@@ -369,6 +384,7 @@ static std::string quartzCoreCallers();
 - (void)dealloc {nmb_library_release(_handle);}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
  if(!name || !values || !methodABI(values,@selector(newIndexedConstantArray),"@16@0:8") || !methodABI(values,@selector(newNamedConstantArray),"@16@0:8")) {
+  NBLOG(@"native-metal: function %@ refused: constant values ABI",name);
   if(error)*error=nbError(@"unqualified function constant values");return nil;
  }
  MTLFunctionConstantValues *snapshot=[values copy];
@@ -377,11 +393,12 @@ static std::string quartzCoreCallers();
  for(unsigned group=0;group<2;group++)for(id value in (group?named:indexed)) {
   if(!methodABI(value,@selector(dataType),"Q16@0:8") || !methodABI(value,@selector(data),"^v16@0:8") ||
      !methodABI(value,group?@selector(name):@selector(index),group?"@16@0:8":"Q16@0:8")) {
+   NBLOG(@"native-metal: function %@ refused: constant value ABI",name);
    if(error)*error=nbError(@"unqualified constant value ABI");return nil;
   }
   id<NBOriginalConstantValue> v=value;
   const uint64_t bytes=constantBytes(v.dataType);
-  if(!bytes || !v.data){if(error)*error=nbError([NSString stringWithFormat:@"constant type %lu is not qualified",(unsigned long)v.dataType]);return nil;}
+  if(!bytes || !v.data){NBLOG(@"native-metal: function %@ refused: constant type %lu",name,(unsigned long)v.dataType);if(error)*error=nbError([NSString stringWithFormat:@"constant type %lu is not qualified",(unsigned long)v.dataType]);return nil;}
   constants.push_back({v.dataType,group?0:v.index,group?v.name.UTF8String:nullptr,v.data,bytes});
  }
  std::string text;
@@ -400,7 +417,7 @@ static std::string quartzCoreCallers();
   journal(head+std::string(name.UTF8String?:"?")+" k="+text+(handle?std::string():" err="+std::string(lastError().UTF8String?:"?"))+" | "+quartzCoreCallers());
  }
  if(!handle){
-  noteProblem([NSString stringWithFormat:@"specialized function %@: %@",name,lastError()]);
+  NBLOG(@"native-metal: specialized function %@: %@",name,lastError());
   if(error)*error=nbError([NSString stringWithFormat:@"specialized function: %@",lastError()]);return nil;
  }
  NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
@@ -417,7 +434,7 @@ static std::string quartzCoreCallers();
  if(!d.name){if(error)*error=nbError(@"a function name is required");return nil;}
  if(d.constantValues)return [self newFunctionWithName:d.name constantValues:d.constantValues error:error];
  id<MTLFunction> function=[self newFunctionWithName:d.name];
- if(!function){if(error)*error=nbError([NSString stringWithFormat:@"function %@: %@",d.name,lastError()]);return nil;}
+ if(!function){NBLOG(@"native-metal: function %@: %@",d.name,lastError());if(error)*error=nbError([NSString stringWithFormat:@"function %@: %@",d.name,lastError()]);return nil;}
  if(error)*error=nil;return function;
 }
 - (NSArray<NSString *> *)functionNames {

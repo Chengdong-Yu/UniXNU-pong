@@ -27,13 +27,12 @@ uint32_t NativeAdrenoCpInit::meInitMask()
     return (1u<<0)|(1u<<1)|(1u<<3)|(1u<<6)|(1u<<8);
 }
 IOReturn NativeAdrenoCpInit::run(const NativeAdrenoRingIo *io,NativeAdrenoRing *ring,
-    const NativeAdrenoCpInitConfig *config,uint32_t *fence)
+    const NativeAdrenoCpInitConfig *config,uint32_t *writePointer)
 {
-    if(!fence)return kIOReturnBadArgument;*fence=0;
+    if(!writePointer)return kIOReturnBadArgument;*writePointer=0;
     if(done_ || poisoned_)return kIOReturnNotReady;
     if(!io || !io->write32 || !ring || ring->poisoned())return kIOReturnBadArgument;
-    if(!config || config->dms_enabled>1 || config->sqe_base_programmed>1 ||
-        !config->sqe_iova || (config->sqe_iova&4095) ||
+    if(!config || config->dms_enabled>1 || !config->sqe_iova || (config->sqe_iova&4095) ||
         config->sqe_iova>=UINT64_C(1)<<48 || !config->pwrup_reglist_iova ||
         (config->pwrup_reglist_iova&3) || config->pwrup_reglist_iova>=UINT64_C(1)<<48)
         return kIOReturnBadArgument;
@@ -56,8 +55,10 @@ IOReturn NativeAdrenoCpInit::run(const NativeAdrenoRingIo *io,NativeAdrenoRing *
     words[8]=(uint32_t)(config->pwrup_reglist_iova>>32);
     words[9]=1u<<31;          /* read registers from the list */
     uint32_t value=0;
-    const IOReturn status=ring->submit(words,CpInitWords,&value);
+    /* SM8475 gen7_send_cp_init does not emit a normal-memory timestamp
+     * before ZAP. The caller observes actual ring drain AND GPU idle. */
+    const IOReturn status=ring->submitBootstrap(words,CpInitWords,&value);
     if(status)return poison();
-    done_=true;*fence=value;
+    done_=true;*writePointer=value;
     return kIOReturnSuccess;
 }

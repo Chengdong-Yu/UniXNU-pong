@@ -152,6 +152,12 @@ PongGpuStatus PongAdrenoGmuStart(PongGpuGmuDevice *d,const PongGpuGmuConfig *c,P
     };
     for(unsigned i=0;i<sizeof(config)/sizeof(config[0]);i++)
         if(core_write(d,config[i].reg,config[i].value,r))goto failed;
+    /* Nothing gen7_gmu_register_config releases the CX GBIF halt BEFORE
+     * CM3 boot. GDSC retention may preserve the boot firmware's halt; waiting
+     * until CP initialization leaves the firmware starting on a halted bus.
+     * This CX register is accessible with GX still off. */
+    if(wr(d,PongGpuCore,0x3c45u*4,0,r) ||
+       d->io.barrier(d->io.cookie) || rd(d,PongGpuCore,0x3c45u*4,&value) || value)goto failed;
     if(core_write(d,GEN7_GMU_HFI_QTBL_ADDR,c->hfi.iova,r) ||
        core_write(d,GEN7_GMU_GENERAL_8,c->log.iova|3,r) ||
        d->io.barrier(d->io.cookie) || d->io.platform_ready(d->io.cookie) ||

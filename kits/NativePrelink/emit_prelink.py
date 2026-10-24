@@ -115,7 +115,8 @@ def instruction_inventory(original_data, parent, modules):
             'register_dataflow_qualified': False}
 
 
-def emit(native_data, original_data, roots, slide, early_security_init=None, verify_images=True):
+def emit(native_data, original_data, roots, slide, early_security_init=None, verify_images=True,
+         library_only_components=()):
     report = plan(native_data, original_data, roots, slide, verify_images=verify_images)
     native, original = macho(native_data), macho(original_data)
     marker = [address for address, names in exports(native_data, native).items()
@@ -148,6 +149,13 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
         if struct.unpack_from('<I', native_data, at)[0] != 1:
             raise ValueError('Unsupported early security initializer ABI')
     report['early_security_initializers'] = {}
+    library_only_components=set(library_only_components)
+    if library_only_components-set(modules):
+        raise ValueError('Library-only policy requires executable components: '+
+                         ', '.join(sorted(library_only_components-set(modules))))
+    if library_only_components & set(early_security_init):
+        raise ValueError('Library-only components cannot run an early security initializer')
+    report['library_only_components']={}
     for identifier, address in early_security_init.items():
         if identifier not in modules or entries[identifier].get('AppleSecurityExtension') is not True:
             raise ValueError('Early initializer requires a selected security extension')
@@ -260,6 +268,16 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
             raise ValueError('Refuse an initializer supplied by input metadata')
         if identifier in early_security_init:
             entry['_NativePrelinkEarlySecurityInit'] = early_security_init[identifier] + slide
+        if identifier in library_only_components:
+            # Retain executable code and pointer dependencies, while native
+            # board drivers retain device ownership. Merely adding a library
+            # dependency must not auto-match Apple CPU/PMGR/IOSurface hardware
+            # or register a second security policy on the non-Apple board.
+            personalities=entry.pop('IOKitPersonalities',{})
+            security=entry.pop('AppleSecurityExtension',None)
+            report['library_only_components'][identifier]={
+                'removed_personalities':sorted(personalities),
+                'removed_security_autoload':security is not None}
         for key in ('_PrelinkExecutableLoadAddr', '_PrelinkExecutableSourceAddr', '_PrelinkKmodInfo'):
             if entry.get(key):
                 entry[key] += slide

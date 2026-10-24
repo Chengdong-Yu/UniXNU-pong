@@ -8,20 +8,20 @@ struct NativeAdrenoCpInitConfig {
     /* Nonzero when the caller already wrote CP_SQE_INSTR_BASE before CP_SQE_CNTL, as a6xx hw_init does: the base is
      * then read back and compared instead of rewritten after the SQE started. */
     uint32_t sqe_base_programmed;
-    /* Actual SM8475 gen7_cp_init_cmds: disabled DMS requires ordinal bit11.
-     * Keep off until the board has actually negotiated DMS support. */
+    /* Pong's gen7 firmware requires BIT11 when DMS is not negotiated. */
     uint32_t dms_enabled;
 };
 /* One-shot A7XX command-processor start sequence, not a GPU power or reset
  * driver. The caller must have completed GMU boot, powered GX/core clocks,
- * released the CP reset and loaded the actual captured a730 SQE into the
+ * released the CP reset, loaded the board's SQE microcode into the
  * real IOVA given here, and hold exclusive MMIO. This programs
  * CP_SQE_INSTR_BASE, then submits the pinned a7xx_cp_init sequence directly
  * through the ring: CP_THREAD_CONTROL with concurrent binning disabled and
  * CP_ME_INIT with the Linux mask, hardware-context count, operation mode and
- * power-up register list. Completion is the ring timestamp fence, so a hung
- * CP is reported as a timeout instead of a fabricated success. A second call
- * cannot re-initialize the same object. */
+ * power-up register list. run returns the bootstrap WPTR, NOT a fence.
+ * The SM8475 board must observe RPTR at that WPTR AND real GPU idle before
+ * ZAP; only after the secure-mode switch may it submit ordinary timestamps.
+ * A second call cannot re-initialize the same object. */
 class NativeAdrenoCpInit final {
     bool done_=false,poisoned_=false;
     IOReturn poison();
@@ -31,7 +31,7 @@ public:
     NativeAdrenoCpInit(const NativeAdrenoCpInit &)=delete;
     NativeAdrenoCpInit &operator=(const NativeAdrenoCpInit &)=delete;
     IOReturn run(const NativeAdrenoRingIo *,NativeAdrenoRing *,
-        const NativeAdrenoCpInitConfig *,uint32_t *fence);
+        const NativeAdrenoCpInitConfig *,uint32_t *writePointer);
     bool completed() const {return done_;}
     bool poisoned() const {return poisoned_;}
     static uint32_t meInitMask();

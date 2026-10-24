@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-/*20G81 Metal discovery over the real Pong native client. MTLAddDevice is
- * resolved from this guest's Metal framework; no IOAcceleratorES masquerade,
- * iOS17 QuartzCore offsets, fixed function addresses or fake device.
+/*20G81 stock Metal discovery over Pong's real IOAcceleratorES provider.
+ * The OS loads this bundle and registers the returned native device.
+ * No manual catalog mutation or iOS17 QuartzCore offsets.
  */
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -32,6 +32,7 @@ using Property=CFTypeRef(*)(unsigned,CFStringRef,CFAllocatorRef,unsigned);
 using Registry=kern_return_t(*)(unsigned,uint64_t *);
 static id device;
 static void *iokit;
+}
 static void report(const char *phase,int status)
 {
     char line[256];snprintf(line,sizeof(line),"Pong Metal: %s status=0x%x\n",phase,status);
@@ -40,6 +41,8 @@ static void report(const char *phase,int status)
     if(!sysctlnametomib("kern.pong_diagnostic",mib,&count))
         (void)sysctl(mib,(u_int)count,NULL,NULL,line,strlen(line));
 }
+#include "PongMetalScanout.h"
+namespace {
 static void missing(const char *type,const char *selector)
 {
     static unsigned count;
@@ -83,7 +86,7 @@ static bool backend(unsigned port,uint64_t *registryID)
      */
     if(!propertyTrue(read,port,CFSTR("PongAdrenoCPReady")) ||
        !propertyTrue(read,port,CFSTR("PongMetal20G81Enabled"))) {
-        report("CP unavailable or Metal disabled; retain software renderer",-1);return false;
+        report("CP unavailable or Metal disabled; CPU display remains available",-1);return false;
     }
     unsigned connection=0;kern_return_t result=open(port,mach_task_self(),0x4147,&connection);
     if(result){report("native connection refused",result);return false;}
@@ -116,10 +119,10 @@ static id openDevice(unsigned port)
     if(access(loader.fileSystemRepresentation,R_OK)){report("Turnip library absent",-1);return nil;}
     NSString *process=[NSProcessInfo processInfo].processName;
     NSMutableArray<NSString *> *candidates=[NSMutableArray new];
-    // backboardd's container policy need not admit a generic Library/Caches
-    // directory. Prefer its actual user cache and keep the stock temp path.
+    // Keep separate process caches as in Sheng's native Metal clients.
     if(const struct passwd *user=getpwuid(getuid());user && user->pw_dir && user->pw_dir[0])
-        [candidates addObject:[@(user->pw_dir) stringByAppendingPathComponent:@"Library/Caches/com.apple.backboardd/PongMetal"]];
+        [candidates addObject:[@(user->pw_dir) stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"Library/Caches/com.apple.%@/PongMetal",process]]];
     for(int key:{_CS_DARWIN_USER_CACHE_DIR,_CS_DARWIN_USER_TEMP_DIR}) {
         char path[1024]={};
         if(confstr(key,path,sizeof(path)) && path[0])
@@ -130,6 +133,7 @@ static id openDevice(unsigned port)
     // A7xx sysmem/no concurrent binning until Pong's BV/BR scheduling is ready.
     // Plain IOSurface rows match Pong's current framebuffer/scanout contract.
     setenv("TU_DEBUG","sysmem,nocb",0);
+    setenv("PONG_IOSURFACE_PADDING","1",1);
     // Pong implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
@@ -153,40 +157,45 @@ static id openDevice(unsigned port)
     return result;
 }
 
-static void registerRenderDevice()
+static bool selectedClient()
+{
+    const char *process=getprogname();
+    if(!process || !*process)return false;
+    // Sheng uses publish/clients seed files to enable real device discovery.
+    // The root-owned client seed is the single publication policy. A second
+    // compiled list used to silently reject the wallpaper processes.
+    // The extension view is the same root-owned seed under a system-readable
+    // path. Sandboxed poster/widget clients cannot necessarily read /var/pong.
+    for(const char *directory:{"/System/Library/Extensions","/private/var/pong"}) {
+        char marker[256],clients[256];
+        snprintf(marker,sizeof(marker),"%s/PongAdrenoMetal.publish",directory);
+        snprintf(clients,sizeof(clients),"%s/PongAdrenoMetal.clients",directory);
+        struct stat st={};
+        if(lstat(marker,&st) || !S_ISREG(st.st_mode) || st.st_uid || (st.st_mode&022))continue;
+        FILE *file=fopen(marker,"r");if(!file)continue;
+        const bool publish=fgetc(file)=='1';fclose(file);if(!publish)return false;
+        if(lstat(clients,&st) || !S_ISREG(st.st_mode) || st.st_uid || (st.st_mode&022))continue;
+        file=fopen(clients,"r");if(!file)continue;
+        char line[80];bool selected=false;
+        while(fgets(line,sizeof(line),file)) {
+            line[strcspn(line,"\r\n")]=0;
+            if(!strcmp(line,process)){selected=true;break;}
+        }
+        fclose(file);return selected;
+    }
+    return false;
+}
+static void startPresentation(id candidate,unsigned port)
 {
     if(strcmp(getprogname(),"backboardd"))return;
-    // Resolve SPI by name. Its20G81 implementation asserts a non-null device
-    // catalog and MTLDevice/MTLDeviceSPI conformance, then calls initLimits
-    // and initFeatureQueries before adding to the catalog synchronously.
-    void *metal=dlopen("/System/Library/Frameworks/Metal.framework/Metal",RTLD_NOW|RTLD_LOCAL);
-    using Add=void(*)(id);
-    auto add=metal?(Add)dlsym(metal,"MTLAddDevice"):nullptr;
-    if(!add){report("20G81 device registration entry unavailable",-1);return;}
-    id<MTLDevice> original=MTLCreateSystemDefaultDevice();
-    (void)original; // Initializes Metal's actual device catalog even if empty.
-    if(!iokit)iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_NOW|RTLD_LOCAL);
-    using Match=CFMutableDictionaryRef(*)(const char *);
-    using Find=unsigned(*)(unsigned,CFDictionaryRef);
-    using Release=kern_return_t(*)(unsigned);
-    auto match=iokit?(Match)dlsym(iokit,"IOServiceMatching"):nullptr;
-    auto find=iokit?(Find)dlsym(iokit,"IOServiceGetMatchingService"):nullptr;
-    auto release=iokit?(Release)dlsym(iokit,"IOObjectRelease"):nullptr;
-    if(!match || !find || !release)return;
-    // Matching consumes the dictionary; the port remains owned until release.
-    unsigned port=find(0,match("NativeAdrenoGpuPublished"));
-    if(!port){report("native CP service absent; retain original catalog",-1);return;}
-    id candidate=[[PongAdrenoMetalDevice alloc] initWithAcceleratorPort:port];
-    release(port);
-    if(!candidate)return;
-    Protocol *publicProtocol=objc_getProtocol("MTLDevice");
-    Protocol *privateProtocol=objc_getProtocol("MTLDeviceSPI");
-    if(!publicProtocol || !privateProtocol ||
-       ![candidate conformsToProtocol:publicProtocol] || ![candidate conformsToProtocol:privateProtocol]) {
-        report("actual20G81 device protocols unavailable",-1);return;
-    }
-    add(candidate);
-    report("Adreno device registered in20G81 Metal catalog",0);
+    using Ref=kern_return_t(*)(unsigned);
+    auto retain=(Ref)dlsym(iokit,"IOObjectRetain"),release=(Ref)dlsym(iokit,"IOObjectRelease");
+    if(!retain || !release || retain(port))return;
+    // Leave the stock catalog's construction lock before creating the
+    // presenter. Its actual client retains the device and scanout backing.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),^{
+        pongscanout::start(iokit,port,(id<MTLDevice>)candidate);release(port);
+    });
     // Bounded observations of real application work, not synthetic renders.
     // RAM cache journals disappear on REC; retain these few status lines.
     for(unsigned seconds:{5u,20u,60u})
@@ -200,21 +209,14 @@ static void registerRenderDevice()
 @implementation PongAdrenoMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port
 {
-    (void)self;
+    self=[super init];if(!self || !port || !selectedClient())return nil;
     @synchronized([PongAdrenoMetalDevice class]) {
-        if(!device)device=openDevice(port);
+        if(!device) {
+            device=openDevice(port);
+            if(device){report("real device returned to stock20G81 discovery",0);startPresentation(device,port);}
+        }
         return device;
     }
 }
 @end
 
-__attribute__((constructor)) static void pongMetalEntry()
-{
-    @autoreleasepool {
-        @try {registerRenderDevice();}
-        @catch(NSException *exception) {
-            NSLog(@"Pong Metal: registration refused: %@",exception);
-            report("registration exception; original catalog retained",-1);
-        }
-    }
-}

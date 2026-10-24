@@ -1,0 +1,43 @@
+{
+  "captured_on": "2026-10-23",
+  "source_baseline": "Pong iOS16 v115 source (latest local build)",
+  "kernel": "XNU 8796.141.3 / Darwin 22.6.0",
+  "restore_build": "20G81",
+  "device_source": "/Volumes/PongDev/handoffs/Pong-iOS16-Mac-Next-20261020/UniXNU-pong",
+  "userland_source": "/Users/desktop/Downloads/hackios-xnu-userland-main/pong",
+  "latest_boot_artifacts": "/Volumes/PongDev/build/Pong-iOS16-v115-wallpaper-formats",
+  "latest_boot": "fastboot temporary boot returned OKAY; visual fixes not yet confirmed",
+  "migration_state": "preparation only; no iPadOS18 kernel or boot image has been built",
+  "external_repositories": {
+    "UniXNU": {
+      "local_path": "/Volumes/PongDev/upstream/UniXNU",
+      "commit": "1a01c2afa197d975d04da892325c56b6b14aaecb"
+    },
+    "UniXNU-sheng": {
+      "local_path": "/Volumes/PongDev/upstream/UniXNU-sheng",
+      "commit": "251b291adf941b9953fe3ae66a808b9b626e164d"
+    },
+    "NativeAdreno": {
+      "local_path": "/Volumes/PongDev/upstream/gpu-pong/NativeAdreno",
+      "commit": "b686b9054f57d393c80195b82568a09f8ca106a2"
+    },
+    "NativeMetal": {
+      "local_path": "/Volumes/PongDev/upstream/gpu-pong/NativeMetal",
+      "commit": "c6d29caad6d880cc8204ebe3bc34d77479a3255d"
+    },
+    "NativeMobileDisplay": {
+      "local_path": "/Volumes/PongDev/upstream/gpu-pong/NativeMobileDisplay",
+      "commit": "8666a9950c9699b368931d18cac92c0fdb2ce9c0"
+    },
+    "metal2vulkan": {
+      "local_path": "/Volumes/PongDev/upstream/gpu-pong/metal2vulkan",
+      "commit": "720ef1ce9ae2a2068999a8675717418b9416283e",
+      "local_changes": "migration/ipados18/baseline/metal2vulkan-local.patch"
+    },
+    "mesa": {
+      "local_path": "/Volumes/PongDev/upstream/gpu-pong/mesa",
+      "commit": "85fda3b36405bcaea8bffc64aa4f2651dc90770d",
+      "local_changes": "migration/ipados18/baseline/mesa-local.patch"
+    }
+  }
+}

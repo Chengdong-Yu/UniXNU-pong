@@ -1,0 +1,27 @@
+# Migration planning metadata only. Not consumed by the iOS16 build scripts.
+[target]
+os = "iPadOS"
+major_version = 18
+device_family = "iPad (7th generation)"
+product_type = ""
+device_class = ""
+version = ""
+build = ""
+ipsw_url = ""
+stage = "preparation"
+
+[hardware]
+board = "pong"
+soc = "SM8475"
+gpu = "Adreno 730"
+
+[baseline]
+os_version = "16.6.1"
+restore_build = "20G81"
+source_product_type = "iPad7,1"
+source_device_class = "j120ap"
+xnu = "8796.141.3"
+darwin = "22.6.0"
+page_bytes = 4096
+data_backend = "ufs"
+data_capacity_bytes = 8589934592

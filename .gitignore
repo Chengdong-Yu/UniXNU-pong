@@ -22,3 +22,18 @@
 *.a
 __pycache__/
 *.py[cod]
+
+# Keep migration inputs and outputs outside source control.
+/.cache/
+/refer/
+/reference/
+/local/
+/artifacts/
+/firmware/
+*.dylib
+*.metallib
+*.air
+*.kc
+*.kernelcache
+/BuildManifest.plist
+/Restore.plist

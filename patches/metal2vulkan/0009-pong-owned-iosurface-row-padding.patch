@@ -1,0 +1,59 @@
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -76,6 +76,8 @@
+     /// The bytes of one texel.
+     texel_bytes: u64,
+     pub(super) allow_gpu_optimized_contents: bool,
++    // Pong native IOSurface: unplanar color rows own their padding.
++    pub(super) surface_row_padding: bool,
+     /// The texture's resource options, its hazard tracking mode resolved, as `resourceOptions`
+     /// reports them: the buffer's, which Metal's texture over a buffer takes, but an IOSurface
+     /// plane's descriptor's (`Buffer::new_texture_with_iosurface_plane`). Its hazard tracking
+@@ -670,8 +672,9 @@
+             let texels = Texels::texture_buffer(self.clone(), placed.gpu, texel_bytes, descriptor)?;
+             Ok(texels.texture(descriptor, &layout, IdUse::Program(descriptor.placement)))
+         } else {
+-            let texels =
++            let mut texels =
+                 Texels::placed(self.clone(), placed, texel_bytes, descriptor).with_options(options);
++            texels.surface_row_padding = matches!(form, BufferTextureCall::IoSurfacePlane { planar: false });
+             let id_use = IdUse::Program(descriptor.placement);
+             let texture = self
+                 .device()
+@@ -1066,6 +1069,7 @@
+             shader: placed,
+             texel_bytes,
+             allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
++            surface_row_padding: false,
+             options: buffer.resource_options(),
+             views,
+             staged: None,
+--- a/crates/metal2vulkan-runtime/src/texture.rs
++++ b/crates/metal2vulkan-runtime/src/texture.rs
+@@ -1962,7 +1962,25 @@
+         // What an image over the texels may hold beside them: the bytes between padded rows too
+         // where the texture only reads, by the policy (`linear_plan::holding`); else why none may.
+         let policy = self.compile_device().policy().padded_reads;
+-        let holds = holding(&texels.layout, usage, policy);
++        let mut holds = holding(&texels.layout, usage, policy);
++        // Pong's uncompressed single-plane 8-bit IOSurfaces own the bytes
++        // between rows. They are not arbitrary buffers with unrelated data
++        // in their padding. Permit the native driver to render directly into
++        // those pages instead of synchronously copying a shadow every frame.
++        // The image's exact pitch, span, alignment and memory type are still
++        // checked by alias_image/aliases before it can be bound. Other planes,
++        // formats and caller buffers retain the original shadow policy.
++        let native_surface = texels.surface_row_padding
++            && matches!(texels.buffer.caller_memory(), Some(CallerMemory::HostPages))
++            && matches!(layout.pixel_format, PixelFormat::BGRA8Unorm | PixelFormat::BGRA8UnormSRGB
++                | PixelFormat::RGBA8Unorm | PixelFormat::RGBA8UnormSRGB)
++            && texels.layout.slices == 1
++            && texels.layout.row_pitch >= texels.layout.row_bytes
++            && std::env::var_os("PONG_IOSURFACE_PADDING").as_deref()
++                == Some(std::ffi::OsStr::new("1"));
++        if holds.is_err() && native_surface {
++            holds = Ok(Holds::Padding);
++        }
+         // Over bytes detached from their pages (`detach.rs`) no image aliases them: the texture
+         // is their shadow, which presents a stand-in until they lie in pages again.
+         let detached = texels.buffer.detached();
