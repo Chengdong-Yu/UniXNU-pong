@@ -75,6 +75,31 @@ static PongClockStatus source(const PongClockOps *io,uint32_t cmd,uint32_t cfg,P
         update(io,PongClockGpucc,cmd,1,1,r)) return PongClockIo;
     return poll(io,PongClockGpucc,cmd,1,0,500,r);
 }
+/* gpu_cc_cape_fixup + clk_lucid_evo_pll_configure, with the LUCID_OLE
+ * register layout used by the actual qcom,cape-gpucc DT node. GPLL0 can
+ * clock the GMU while both GPU PLLs are unconfigured; a working HFI then
+ * says nothing about the CP's GX clock. Initialize the PLLs before handing
+ * rate control to the GMU. As in the vendor driver, preserve a running PLL.
+ */
+static PongClockStatus cape_pll(const PongClockOps *io,uint32_t base,
+    uint32_t l,uint32_t alpha,PongClockResult *r)
+{
+    uint32_t mode,opmode;
+    if(rd(io,PongClockGpucc,base,&mode) || rd(io,PongClockGpucc,base+4,&opmode))return PongClockIo;
+    if((mode&1) && (opmode&1))return PongClockSuccess;
+    const uint32_t offsets[]={0x10,0x14,0x20,0x24,0x28,0x1c,0x30,0x34,0x38};
+    const uint32_t values[]={0x44440000u|l,alpha,0x20485699,0x00182261,0x82aa299c,5,3,0x9000,0x34};
+    for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);i++)
+        if(update(io,PongClockGpucc,base+offsets[i],~0u,values[i],r))return PongClockIo;
+    /* Vendor skips zero USER_CTL/TEST_CTL values; retain their reset and
+     * firmware-owned bits. Leave output disabled in STANDBY with RESET_N
+     * asserted. GMU firmware owns enabling/rate changes after HFI START.
+     */
+    if(update(io,PongClockGpucc,base,1,0,r) ||
+       update(io,PongClockGpucc,base+4,~0u,0,r) ||
+       update(io,PongClockGpucc,base,4,4,r))return PongClockIo;
+    return PongClockSuccess;
+}
 PongClockStatus PongAdrenoEnableCxClocks(const PongClockOps *io,
     PongClockState *state,PongClockResult *r)
 {
@@ -107,6 +132,10 @@ PongClockStatus PongAdrenoEnableCxClocks(const PongClockOps *io,
     status=branch(io,PongClockGcc,0x81010,0,r);if (status) goto failed;
     status=branch(io,PongClockGcc,0x81018,1,r);if (status) goto failed;
     r->phase=3;
+    status=cape_pll(io,0,0x1d,0xb000,r);if(status)goto failed;
+    status=cape_pll(io,0x1000,0x34,0x1555,r);if(status)goto failed;
+    /* Final Cape GPUCC probe write, before any GMU/GX rate requests. */
+    if(update(io,PongClockGpucc,0x9534,~0u,0,r)){status=PongClockIo;goto failed;}
     status=source(io,0x9318,0x100602,r);if (status) goto failed; /*300MHz/1.5*/
     status=source(io,0x93ec,0x100603,r);if (status) goto failed; /*300MHz/2*/
     status=source(io,0x9010,0x100001,r);if (status) goto failed; /*TCXO/1*/

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Fetch only the 20G81 IPSW members selected by board.toml, using HTTP ranges.
 
-No IPSW archive is downloaded as a whole. Each streamed member is checked
-against the ZIP CRC-32 recorded in the central directory. The extracted
-restore files are local build inputs and belong under the ignored UniXNU
-output directory, never in this repository.
+No IPSW archive is downloaded as a whole and no member checksum is computed.
+The extracted restore files are local build inputs and belong under the ignored
+UniXNU output directory, never in this repository.
 """
 import argparse
 import io
@@ -86,7 +85,7 @@ class RangeFile(io.RawIOBase):
 
 
 def raw_member(archive, info, output):
-    """Stream a stored or deflated ZIP member and verify its central-directory CRC-32."""
+    """Stream a stored/deflated ZIP member without running ZIP CRC checks."""
     source = archive.fp
     source.seek(info.header_offset)
     header = source.read(30)
@@ -100,7 +99,6 @@ def raw_member(archive, info, output):
     remaining = info.compress_size
     inflater = zlib.decompressobj(-15) if method == zipfile.ZIP_DEFLATED else None
     written = 0
-    crc = zlib.crc32(b'')
     while remaining:
         block = source.read(min(BLOCK, remaining))
         if not block:
@@ -108,24 +106,19 @@ def raw_member(archive, info, output):
         remaining -= len(block)
         if method == zipfile.ZIP_STORED:
             output.write(block)
-            crc = zlib.crc32(block, crc)
             written += len(block)
         elif inflater:
             data = inflater.decompress(block)
             output.write(data)
-            crc = zlib.crc32(data, crc)
             written += len(data)
         else:
             raise RuntimeError(f'unsupported ZIP compression method {method}: {info.filename}')
     if inflater:
         tail = inflater.flush()
         output.write(tail)
-        crc = zlib.crc32(tail, crc)
         written += len(tail)
     if written != info.file_size:
         raise RuntimeError(f'extracted size differs from ZIP directory for {info.filename}')
-    if crc != (info.CRC & 0xffffffff):
-        raise RuntimeError(f'ZIP CRC-32 mismatch for {info.filename}')
 
 
 def member_bytes(archive, info):

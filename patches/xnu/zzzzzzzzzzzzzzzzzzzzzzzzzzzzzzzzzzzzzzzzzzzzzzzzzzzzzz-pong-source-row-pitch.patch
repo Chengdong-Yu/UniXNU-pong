@@ -1,0 +1,20 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -882,7 +882,7 @@
+ 	memcpy(destination,swap+SWAP_DEST(0),sizeof(destination));
+ 	if(surfacesReady && base && !swapWord(swap,SWAP_SURFACE(1)) && !swapWord(swap,SWAP_SURFACE(2)) &&
+ 	    !swapWord(swap,SWAP_SURFACE(3)) && base->info.bytesPerElement==4 && !base->info.planeCount &&
+-	    base->info.pixelFormat==FOURCC('B','G','R','A') && base->info.bytesPerRow==fRowBytes &&
++	    base->info.pixelFormat==FOURCC('B','G','R','A') && base->info.bytesPerRow>=uint64_t(fPanelWidth)*4 &&
+ 	    !source[0] && !source[1] && !destination[0] && !destination[1] &&
+ 	    source[2]==(int32_t)fPanelWidth && source[3]==(int32_t)fPanelHeight &&
+ 	    destination[2]==(int32_t)fPanelWidth && destination[3]==(int32_t)fPanelHeight) {
+@@ -893,7 +893,7 @@
+ 			PE_initialize_console(NULL,kPEGraphicsMode);
+ 			PE_initialize_console(NULL,kPEReleaseScreen);
+ 		}
+-		gpuFrame=pong_scanout_frame(memory,offset,fRowBytes,fPanelWidth,fPanelHeight)==1;
++		gpuFrame=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight)==1;
+ 	}
+ 	/* A delivered GPU copy whose completion is uncertain must never race a
+ 	 * CPU write. Result 2 poisons the handoff; result 0 permits CPU fallback. */

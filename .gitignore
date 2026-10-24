@@ -1,7 +1,12 @@
-# Apple restore components are fetched locally by scripts; never commit them.
+# Local Apple restore inputs and generated images
 /apple/
 /out/
 /build/
+/reference/
+/refer/
+/firmware/
+/artifacts/
+/evidence/
 *.ipsw
 *.dmg
 *.cdr
@@ -20,5 +25,12 @@
 *.dSYM/
 *.o
 *.a
+*.dylib
+*.metallib
+*.air
+*.kc
+*.kernelcache
+*.log
+.DS_Store
 __pycache__/
 *.py[cod]

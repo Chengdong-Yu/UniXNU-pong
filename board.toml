@@ -4,7 +4,7 @@ soc = "SM8475"
 description = "Nothing Phone (2): UniXNU UEFI bring-up"
 kit = "pong"
 
-# Apple component source for the iOS 16 port, selected from the BuildManifest.
+# Apple component source for the iOS 16 port, selected from BuildManifest.
 [ipsw]
 url = "https://updates.cdn-apple.com/2023SummerFCS/fullrestores/042-44385/366890C4-D9B5-4938-B399-C19FB58DBEE0/iPad_Pro_HFR_16.6.1_20G81_Restore.ipsw"
 product = "iPad7,1"
@@ -13,7 +13,7 @@ build = "20G81"
 device_class = "j120ap"
 chip_id = 0x8011
 board_id = 12
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1", "Cryptex1,SystemTrustCache", "OS"]
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
 
 [kernel]
 defconfig = "pong_defconfig"

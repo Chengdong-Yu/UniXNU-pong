@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.unixnu.pong.NativeAdreno</string>
+  <key>CFBundleName</key><string>PongAdreno</string>
+  <key>CFBundleExecutable</key><string>NativeAdreno</string>
+  <key>CFBundlePackageType</key><string>KEXT</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>OSBundleRequired</key><string>Root</string>
+  <key>IOKitPersonalities</key><dict><key>Pong SM8475 Adreno</key><dict>
+    <key>IOClass</key><string>NativeAdrenoGpuService</string>
+    <key>IOProviderClass</key><string>IOPlatformDevice</string>
+    <key>IOProbeScore</key><integer>1000</integer>
+  </dict><key>Pong SM8475 Adreno SMMU</key><dict>
+    <key>IOClass</key><string>NativeAdrenoSmmuService</string>
+    <key>IOProviderClass</key><string>IOPlatformDevice</string>
+    <key>IOProbeScore</key><integer>1000</integer>
+  </dict><key>Pong SM8475 Adreno GMU</key><dict>
+    <key>IOClass</key><string>NativeAdrenoGmuService</string>
+    <key>IOProviderClass</key><string>IOPlatformDevice</string>
+    <key>IOProbeScore</key><integer>1000</integer>
+  </dict></dict>
+</dict></plist>

@@ -2,10 +2,75 @@
 
 This is SM8475 platform support with an **optional cold GMU/CP startup attempt**.
 The native BO client is registered only after real authenticated CP fences.
-Metal discovery/presentation is not registered; UI still uses software
-rendering. `CONFIG_XNU_PONG_ADRENO_PLATFORM=y` links the implementation;
+The optional20G81 Metal entry and framebuffer handoff require real CP fences;
+runtime GPU rendering has not yet been confirmed. `CONFIG_XNU_PONG_ADRENO_PLATFORM=y` links the implementation;
 `pong_adreno_start=1` explicitly requests one asynchronous startup attempt.
 Absent that argument, this entry performs no GPU MMIO.
+
+## Sheng activation chain / Pong20G81
+
+Pong uses Nothing's SM8475 bootstrap ordering: CP initialization packets,
+real RPTR drain plus RBBM idle, authenticated ZAP, an unfenced nonsecure
+switch, then a real CP memory write and timestamp fence. Sheng's ordinary
+fence-before-ZAP startup must not replace this board sequence. IRQ/timer,
+native user clients and system Metal discovery follow actual CP execution. `NativeAdrenoPwrupList` packs Pong's
+register list; `NativeAdrenoIrq` owns and acknowledges Pong SPI300/INTID332.
+The former ACK-clear wait at GBIF release has been removed: ACK indicates
+halt completion and is not Sheng's release prerequisite.
+
+Pong's Cape GPUCC also needs its two LUCID_OLE PLL configurations before
+GMU rate requests: PLL0 L/alpha `0x1d/0xb000`, PLL1 `0x34/0x1555`, with
+the Cape calibration/configuration values. Running PLLs are preserved;
+stopped PLLs are left in STANDBY for firmware rate control. Initial GMU/HUB
+clocks still use GPLL0. CX GBIF halt is released before CM3 boot as in
+Nothing's gen7 driver. The GPU SMMU is QSMMU V500, so its ACTLR remains
+Pong's DT value `0x32b`, rather than borrowing Sheng's MMU-500 workaround.
+Fence timeouts now also latch real SMMU faults and retain DMA memory.
+
+Pong's live DT also declares `gfx3d_lpac` at SID1/mask0x400, in addition
+to `gfx3d_user` at SID0/mask0x400. The A730 firmware starts its BR/BV/LPAC
+engines before processing PM4; BR at PC0xa2 waits for their THREAD_SYNC
+semaphore. Lease exact SIDs0/0x400/1/0x401 in the same single GPU context
+so all engines can read the uploaded firmware and shared BOs. The secure
+SID2/0x402 remains outside this lease. Include the vendor's terminal dynamic
+restore triplet `PIPE_NONE, RBBM_PERFCTR_CNTL, 1` even with counters disabled.
+
+A 256MiB BO pool is requested before fragmentation (halving on allocation
+failure). The CPU uses WC buffers and the submit path reasserts real pmap
+attributes, matching Sheng. GPU fence waits sleep on IRQ wakeups with bounded
+timeouts. The render server retains its own 1GiB GPU address window.
+
+`--metal-accelerator` includes the original20G81 base implementation in the
+prelink. Only its empty IOAcceleratorES metaclass is initialized; the original
+Apple IOSurface/AGX providers do not replace Pong's working services. The
+Pong accelerator class is initialized afterwards and routes native clients
+to the same real CP backend. Board clock, GMEM, SID, ZAP and firmware values
+remain those of SM8475 rather than the A740 board.
+
+## v99: actual v98 failure and scanout handoff
+
+The v98 pmsg confirms GMU native4K context setup succeeded, then GPU/SQE
+preparation returned `0xe00002c2`. SQE is75920 payload bytes, while
+`NativeAdrenoMemory::publishForDevice` owns full4096-byte pages. Publish the
+owned0x13000 backing, not the short payload; likewise publish the full restore
+list page. Buffer budgets remain allocation budgets, not alignments.
+
+`PongAdrenoScanout.cpp` adapts NativeMobileDisplay's offer/wait/complete
+transport to Pong's existing Mini framebuffer. A separate backboardd connection
+(`0x4148`) exposes only the actual framebuffer and offered IOSurface pages.
+It leaves the BO/submission connection available while the worker waits.
+`pong_gpu_scanout=1` enables the path. The20G81 Metal plugin imports the real
+pages and uses NativeMetal's GPU blit presenter; only real command completion
+retires an offered frame. Timeout/error after delivery retains DMA backing and
+the previous screen. Before delivery, CPU scanout remains available. Reopening
+a rejected scanout connection does not disconnect an existing owner.
+
+Initial supported layout: one full-panel, unscaled, plain BGRA surface with
+the panel pitch. Multi-layer/scaled/other-format swaps retain existing CPU
+composition. No synthetic workload, readback validation, fake completion,
+arbitrary physical-memory API or A740 board profile is introduced.
+This source/compiled path alone does not establish hardware acceleration;
+actual CP/Metal/scanout results must come from the next device log.
 
 ## Sources and differences
 
@@ -69,11 +134,12 @@ not Sheng's 0x14220/0x14224. The supplied DT declares 21 context banks and
   image hash, image readback audit or benchmark is introduced.
 - `PongAdrenoSmmu.c` / `ArmSmmu4K/`: leased native4K GPU/GMU context and
   exact stream attachment, physical table checks, observation and fault-first
-  stop. GPU SID0/0x400 and GMU SID5/0x405 are separate exact routes. Capacity
+  stop. GPU SID0/0x400/1/0x401 and GMU SID5/0x405 are separate exact routes. Capacity
   does not establish ownership. The v94 adapter leases only cold GMU routes,
   applies Pong's actual ACTLR policy and uses explicit synchronous fault
   polling. The CP now has a separate owned bank0 lower-region context in
-  `PongAdrenoCp.cpp`; secure/LPAC/GMU routes are not stolen.
+  `PongAdrenoCp.cpp`; user/LPAC routes are leased while GX is stopped;
+  secure and GMU routes are excluded.
   The local fork no longer silently accepts TBI/ASIDPNE readback differences
   observed only on Sheng. A Pong exception requires actual Pong evidence.
 - `PongAdrenoPower.c`: reads actual retained command-db aux data and builds
@@ -116,11 +182,21 @@ copying a firmware file or setting a software flag does not establish them.
 
 ## Build artifacts and phone state
 
-Generated kernel archives, firmware inputs and build reports belong in local
-output directories and are not part of this source repository. The v95
-bring-up fixed RAM-helper boot-argument inheritance and the polled completion
-path. Adreno hardware startup remains unqualified; the software-rendering and
-touch path is the known working baseline.
+Local development artifacts are under
+`/Volumes/PongDev/build/Pong-iOS16-adreno-development/`. `platform/` contains
+the current kernel archive and its exact compiler commands; `metal/` and
+`turnip/` contain the iOS16.6.1 userspace bridge and Vulkan library. See
+`../PongMetal/README.md` for the remaining private iOS ABI work.
+
+v93 used the saved v92 kernel with an inactive GMU/HFI foundation. v94
+attempted startup but recorded `FAIL parent votes`; no CX clock, SMMU or
+firmware stage ran. Its later panic was PID1 exiting because a packager
+dropped the RAM helper boot argument and ran the old console-stdout helper.
+v95 fixes that argument inheritance and the polled completion logic. See
+`/Volumes/PongDev/build/Pong-iOS16-v95-adreno-panic-fix/NOTES.md` for the
+actual evidence, construction and boot command/result. The software UI,
+touch and saved v92/v93 kernels are retained. The userspace Metal/Turnip
+libraries are not installed by v94.
 
 ## v96 CP and native user client
 
@@ -128,7 +204,7 @@ touch path is the known working baseline.
 facts generated from Nothing's matching source. It uses2MiB GMEM and
 uche_gmem_alignment0, not Sheng's3MiB/16MiB window. SQE skips its vendor
 header dword. DMS/IFPC/preemption remain disabled; CP init keeps DMS bit11.
-GPU SID0/0x400, ACTLR0x32b and bank0 are leased while masters are stopped.
+GPU SID0/0x400/1/0x401, ACTLR0x32b and bank0 are leased while masters are stopped.
 GMU OOB_GPU and START10 require fresh real ACKs; GX power/clock status is
 checked before any GX MMIO. The ring then submits CP init, waits for its
 real timestamp, authenticates Pong's b01 code/b02 metadata through PAS13,

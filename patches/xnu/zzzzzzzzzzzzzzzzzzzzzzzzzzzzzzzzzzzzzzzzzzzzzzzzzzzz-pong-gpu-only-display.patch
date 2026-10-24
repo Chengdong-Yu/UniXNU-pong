@@ -1,0 +1,87 @@
+--- a/iokit/Kernel/MiniIOSurface.cpp
++++ b/iokit/Kernel/MiniIOSurface.cpp
+@@ -1917,12 +1917,12 @@
+ 		MiniAppleKeyStoreStart();
+ 	}
+ 	uint32_t enable = 0;
+-	if (!PE_parse_boot_argn("pong_software_ui", &enable, sizeof(enable)) || !enable) {
++	if (!PE_parse_boot_argn("pong_display", &enable, sizeof(enable)) || !enable) {
+ 		return;
+ 	}
+ 	IOService * provider = IOService::getPlatform();
+ 	if (provider == NULL) {
+-		IOLog("Pong UI: no platform provider; software display startup skipped\n");
++		IOLog("Pong UI: no platform provider; native display startup skipped\n");
+ 		return;
+ 	}
+ 	if (!MiniIOSurfaceStart(provider)) {
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -242,6 +242,7 @@
+ 	uint32_t        fFrameTimes[FRAME_TIMES + 1], fFramePauses, fFrameLongest;
+ 	/* boot-arg fb_diff=1: which pixels of the panel each frame changed (it costs: the panel's memory is slow to read) */
+ 	bool            fDiff;
++	bool            fGpuOnly;              /* explicit bring-up policy, never the default */
+ 	uint64_t        fDiffPixels;
+ 	uint32_t        fDiffLeft, fDiffTop, fDiffRight, fDiffBottom;
+ 	/* the screen recording, if one was asked for */
+@@ -351,6 +352,9 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
++	uint32_t gpuOnly = 0;
++	PE_parse_boot_argn("pong_gpu_only", &gpuOnly, sizeof(gpuOnly));
++	fGpuOnly = gpuOnly != 0;
+ 	if (vinfo.v_baseaddr == 0 || vinfo.v_width == 0 || vinfo.v_height == 0 || vinfo.v_depth != 32) {
+ 		IOLog("MiniIOMobileFramebuffer: no usable boot framebuffer (%ux%u, depth %u)\n", vinfo.v_width, vinfo.v_height,
+ 		    vinfo.v_depth);
+@@ -868,7 +872,7 @@
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
+ 	/* The firmware scanout is linear BGRA. Hand off only one full-size,
+-	 * unscaled layer; other layouts keep the existing CPU composition path.
++	 * unscaled layer; other layouts use CPU composition unless explicitly disabled.
+ 	 * No CPU writes may race an outstanding GPU copy after a timeout. */
+ 	bool gpuFrame=false;
+ 	if(pong_scanout_quarantined()){IOLockUnlock(fLock);return;}
+@@ -889,8 +893,17 @@
+ 			PE_initialize_console(NULL,kPEGraphicsMode);
+ 			PE_initialize_console(NULL,kPEReleaseScreen);
+ 		}
+-		gpuFrame=pong_scanout_frame(memory,offset,fRowBytes,fPanelWidth,fPanelHeight)!=0;
+-	}
++		gpuFrame=pong_scanout_frame(memory,offset,fRowBytes,fPanelWidth,fPanelHeight)==1;
++	}
++	/* A delivered GPU copy whose completion is uncertain must never race a
++	 * CPU write. Result 2 poisons the handoff; result 0 permits CPU fallback. */
++	if(pong_scanout_quarantined()){IOLockUnlock(fLock);return;}
++	if(fGpuOnly && !gpuFrame) {
++		static unsigned missed=0;
++		if(missed++<4)IOLog("PONG GPU ONLY: no completed GPU frame; CPU composition disabled\n");
++		IOLockUnlock(fLock);return;
++	}
++
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 		int32_t src[4], dst[4];
+@@ -906,9 +919,9 @@
+ 		}
+ 		if (sid == 0) {
+ 			/* the bottom layer taken away: nothing is shown, the screen is black */
+-			if (layer == 0 && (set & 1) && fGraphics) {
++			if (!gpuFrame && layer == 0 && (set & 1) && fGraphics) {
+ 				for (uint32_t y = 0; y < fPanelHeight; y++) {
+-					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
++					bzero(fBase + (size_t)y * fRowBytes, (size_t)fPanelWidth * 4);
+ 				}
+ 			}
+ 			continue;
+@@ -937,7 +950,7 @@
+ 				 * frame, otherwise vcputc continues painting over it. */
+ 				PE_initialize_console(NULL, kPEReleaseScreen);
+ 			}
+-			if(!gpuFrame)drawLayer(s, src, dst);
++			if (!gpuFrame) drawLayer(s, src, dst);
+ 		}
+ 	}
+ 	drawn = mach_absolute_time();

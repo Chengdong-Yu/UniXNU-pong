@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assemble the v98 SHNGROOT userdata payload from locally fetched 20G81 disks.
+"""Assemble the Pong SHNGROOT userdata payload from locally fetched 20G81 disks.
 
 Apple OS and SystemOS components are inputs fetched by fetch-ios16-assets.py.
-The SHA-256 fields are part of the native UFS v98 on-disk protocol and are
+The SHA-256 fields are part of the native UFS on-disk protocol and are
 generated during the one streaming copy pass; there is no second image read,
 source checksum comparison, image audit, or readback step.
 """

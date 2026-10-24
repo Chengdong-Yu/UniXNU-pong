@@ -1,0 +1,54 @@
+diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
+index 4d208553..8faa8248 100644
+--- a/BootShim/BootShim.S
++++ b/BootShim/BootShim.S
+@@ -7,7 +7,7 @@ _StackBase:
+   .quad FD_BASE         /* Text Offset */
+ 
+ _StackSize:
+-  .quad FD_SIZE         /* Image Size */
++  .quad FD_SIZE + (_Payload - _Head) /* ARM64 image includes shim and firmware */
+   .quad 0               /* Flags */
+   .quad 0               /* Reserved */
+   .quad 0               /* Reserved */
+diff --git a/Platforms/Nothing/pongPkg/pong.dsc b/Platforms/Nothing/pongPkg/pong.dsc
+index d7e52ccb..64d735fe 100644
+--- a/Platforms/Nothing/pongPkg/pong.dsc
++++ b/Platforms/Nothing/pongPkg/pong.dsc
+@@ -68,6 +68,9 @@
+   gQcomPkgTokenSpaceGuid.PcdPlatformType|"LA"
+ 
+ [LibraryClasses]
++  # UniXNU boot manager core; DarwinBoot provides the XNU loader protocol.
++  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++
+   #
+   # Memory Libraries
+   #
+@@ -79,6 +82,10 @@
+   ConfigurationMapLib|pongPkg/Library/ConfigurationMapLib/ConfigurationMapLib.inf
+ 
+ [Components]
++  UniXNUPkg/Application/UniXNU/UniXNU.inf
++  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++  DarwinBootPkg/Driver/DarwinBoot.inf
++
+   #
+   # ACPI Tables
+   #
+diff --git a/Platforms/Nothing/pongPkg/pong.fdf b/Platforms/Nothing/pongPkg/pong.fdf
+index b6f6a984..e78cbeb8 100644
+--- a/Platforms/Nothing/pongPkg/pong.fdf
++++ b/Platforms/Nothing/pongPkg/pong.fdf
+@@ -83,6 +83,11 @@ READ_LOCK_STATUS   = TRUE
+   !include Include/DXE.inc
+   !include Include/RAW.inc
+ 
++  # UniXNU application, firmware boot registrar and XNU loader.
++  INF UniXNUPkg/Application/UniXNU/UniXNU.inf
++  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++  INF DarwinBootPkg/Driver/DarwinBoot.inf
++
+   # RAM Manager
+   INF SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
+ 

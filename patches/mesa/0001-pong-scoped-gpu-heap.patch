@@ -1,0 +1,15 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1090,7 +1090,11 @@
+    device->sync_types[1] = &device->timeline_type.sync;
+    device->sync_types[2] = NULL;
+ 
+-   device->heap.size = tu_get_system_heap_size(device);
++   /* All BOs must fit this connection's scoped GPU IOVA window. System RAM
++    * is shared backing, not extra addressable device-local heap capacity.
++    * Reporting the whole RAM budget made CA's caches exceed the 170 MiB
++    * non-render-server aperture even when physical pages were available. */
++   device->heap.size = MIN2(tu_get_system_heap_size(device), info->va_size);
+    device->heap.used = 0u;
+    device->heap.flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+ 

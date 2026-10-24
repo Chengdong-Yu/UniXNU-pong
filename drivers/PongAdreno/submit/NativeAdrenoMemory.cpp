@@ -126,7 +126,13 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
     }
     IOOptionBits options=static_cast<IOOptionBits>(kIODirectionInOut)|static_cast<IOOptionBits>(kIOMemoryMapperNone);
     if(contiguous)options|=kIOMemoryPhysicallyContiguous;
-    descriptor_=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options,bytes,(limit-1)&~UINT64_C(4095));
+    /* No physical-address restriction is needed to obtain ordinary pages:
+     * validate each resulting span below before any GPU mapping is exposed.
+     * This avoids the restricted allocator/compaction path for normal BOs.
+     * Firmware/ring/table objects still request contiguous masked memory. */
+    descriptor_=contiguous?
+        IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options,bytes,(limit-1)&~UINT64_C(4095)):
+        IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,options,bytes,4096);
     if(!descriptor_)return kIOReturnNoMemory;
     status=descriptor_->prepare();
     if(status!=kIOReturnSuccess) {descriptor_->release();descriptor_=nullptr;return status;}

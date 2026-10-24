@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -18,11 +19,10 @@ def main():
     p.add_argument('--reference-dir',type=Path,
         help='regenerate hardware facts from the matching vendor gen7_reg.h')
     p.add_argument('--output-dir',required=True,type=Path)
-    p.add_argument('--tree',type=Path,required=True,help='UniXNU kernel build tree')
-    p.add_argument('--firmware-dir',type=Path,required=True,
-        help='locally obtained SM8475 firmware directory; do not commit firmware blobs')
+    p.add_argument('--tree',type=Path,default=Path('/Volumes/PongDev/build/Pong-iOS16-v45-high-scratch/tree'))
+    p.add_argument('--firmware-dir',type=Path,default=Path('/Volumes/PongDev/build/Pong-iOS16-v92-settings-adreno/firmware'))
     p.add_argument('--developer-dir',type=Path,
-        help='optional Xcode developer directory; defaults to xcode-select')
+        default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
     a=p.parse_args();out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     source=ROOT/'drivers/PongAdreno'
     regs=(a.reference_dir/'gen7_reg.h').read_text() if a.reference_dir else (source/'PongAdrenoCpProfile.h').read_text()
@@ -35,8 +35,7 @@ def main():
     header='/* Register facts from NothingOSS SM8475 gen7_reg.h. Dword offsets. */\n'
     header+='\n'.join('#define '+name+' '+hex(value)+'u' for name,value in values.items())+'\n'
     (out/'PongAdrenoRegisters.h').write_text(header)
-    env=dict(os.environ)
-    if a.developer_dir: env['DEVELOPER_DIR']=str(a.developer_dir)
+    env=dict(os.environ,DEVELOPER_DIR=str(a.developer_dir))
     sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
     commands=[];objects=[]
     sources=['AdrenoFirmware','PongAdrenoHfi','PongAdrenoGmu','PongAdrenoSmmu',
@@ -81,8 +80,8 @@ def main():
         '-c',str(source/'PongAdrenoPlatform.cpp'),'-o',str(obj)]
     subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(obj)
     cpp_template=cmd.copy()
-    names=['PongAdrenoCp','PongAdrenoClient']+['submit/'+n for n in [
-        'NativeAdrenoRing','NativeAdrenoCpInit','NativeAdrenoTimer',
+    names=['PongAdrenoCp','PongAdrenoNativeGlue','PongAdrenoScanout','PongAdrenoAccelerator']+['submit/'+n for n in [
+        'NativeAdrenoBoard','NativeAdrenoClient','NativeAdrenoPublish','NativeAdrenoRing','NativeAdrenoCpInit','NativeAdrenoTimer','NativeAdrenoIrq','NativeAdrenoPwrup',
         'NativeAdrenoCpu','NativeAdrenoMemory','NativeAdrenoSmmuMemory',
         'NativeAdrenoSmmuContext','NativeAdrenoVm','NativeAdrenoSubmit','NativeAdrenoUserClient']]
     for name in names:
@@ -90,7 +89,57 @@ def main():
         cmd[cmd.index('-c')+1]=str(source/(name+'.cpp'));cmd[-1]=str(obj)
         cmd+=['-I'+str(source/'submit')]
         subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(obj)
+    # Sheng's late accelerator class: bind its genuine 20G81 IOAcceleratorES
+    # ancestry, and defer its constructor until IOGPUFamily is loaded.
+    abi=json.loads((ROOT/'configs/pong-iogpu-20G81.json').read_text())
+    fixed=json.loads((ROOT/'mac-build/native-ufs/bindings.json').read_text())
+    slide=int(fixed['fixed_prelink_base'],16)-int(abi['original_prelink_base'],16)
+    bindings={'__ZN15IOAcceleratorESC2EPK11OSMetaClass':'constructor',
+              '__ZN15IOAcceleratorESD2Ev':'destructor',
+              '__ZN15IOAcceleratorES10gMetaClassE':'metaclass',
+              '_PongIOAcceleratorMetaConstruct':'metaclass_constructor'}
+    assembly=out/'PongIOAcceleratorBindings.S'
+    assembly.write_text(''.join('.globl '+symbol+'\n.set '+symbol+', '+hex(int(abi[key],16)+slide)+'\n'
+        for symbol,key in bindings.items()))
+    binding_object=out/'PongIOAcceleratorBindings.o'
+    cmd=['xcrun','clang','-target','arm64-apple-ios16.0','-isysroot',sdk,'-c',str(assembly),'-o',str(binding_object)]
+    subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(binding_object)
+    accelerator=out/'NativeAdrenoAccelerator.o';cmd=cpp_template.copy()
+    cmd[cmd.index('-c')+1]=str(source/'submit/NativeAdrenoAccelerator.cpp');cmd[-1]=str(accelerator)
+    cmd+=['-I'+str(source/'submit')]
+    subprocess.run(cmd,env=env,check=True);commands.append(cmd)
+    symbols=subprocess.check_output(['xcrun','nm','-j',str(accelerator)],env=env,text=True).splitlines()
+    initializer=next(s for s in symbols if s.startswith('__GLOBAL__sub_I_'))
+    # LLVM18 cannot globalize Mach-O symbols. Change only this owned object's
+    # initializer registration and symbol linkage; keep all code/relocations.
+    raw=bytearray(accelerator.read_bytes());offset=32;symbol_command=None
+    for _ in range(struct.unpack_from('<I',raw,16)[0]):
+        command,length=struct.unpack_from('<II',raw,offset)
+        if command==0x19:
+            sections=struct.unpack_from('<I',raw,offset+64)[0]
+            for index in range(sections):
+                section=offset+72+80*index
+                if raw[section:section+16].rstrip(b'\0')==b'__mod_init_func':
+                    raw[section:section+16]=b'__pong_init'.ljust(16,b'\0')
+                    flags=struct.unpack_from('<I',raw,section+64)[0]
+                    struct.pack_into('<I',raw,section+64,flags&~255)
+        elif command==2:symbol_command=offset
+        offset+=length
+    if symbol_command is None:raise RuntimeError('Owned accelerator has no symbol table')
+    symoff,count,stroff,strsize=struct.unpack_from('<4I',raw,symbol_command+8)
+    if stroff+strsize!=len(raw):raise RuntimeError('Unexpected owned-object string table layout')
+    for index in range(count):
+        at=symoff+16*index;name_at=stroff+struct.unpack_from('<I',raw,at)[0]
+        end=raw.index(0,name_at)
+        if raw[name_at:end].decode()==initializer:
+            struct.pack_into('<I',raw,at,strsize);raw[at+4]|=1
+            new_name=b'_PongAdrenoAcceleratorStaticInit\0';raw.extend(new_name)
+            struct.pack_into('<I',raw,symbol_command+20,strsize+len(new_name));break
+    else:raise RuntimeError('Owned accelerator initializer not found')
+    late=out/'NativeAdrenoAccelerator.late.o';late.write_bytes(raw);objects.append(late)
     archive=out/'libPongAdrenoPlatform.a'
+    # ar rcs otherwise retains stale members from the replaced client wrapper.
+    archive.unlink(missing_ok=True)
     subprocess.run(['xcrun','ar','rcs',str(archive),*[str(x) for x in objects]],env=env,check=True)
     report=dict(archive=str(archive),commands=commands,
         chip_id='0x07030002',gmem_bytes=0x200000,gmu_firmware='gmu_gen70000.bin',
@@ -98,10 +147,11 @@ def main():
         hfi_table_words=210,hfi_queue_offset_bytes=848,active_queues=3,
         cpu_page_bytes=4096,registers=values,automatic_boot_entry=False,
         startup_boot_argument='pong_adreno_start=1',accelerator_published=False,
-        cp_ring_compiled=True,cp_board_connected=True,dms_default=False,
-        native_user_client='NativeAdrenoGpuPublished',metal_publication=False,
+        cp_ring_compiled=True,cp_board_connected=True,cp_init='SM8475 bootstrap drain, PAS13/ZAP, nonsecure timestamp fence',
+        native_user_client='NativeAdrenoGpuPublished',metal_publication='upstream AGXAccelerator/NativeAdrenoPublish on real20G81 IOAcceleratorES',
+        metal_parent_abi=abi,metal_parent_bindings={s:hex(int(abi[k],16)+slide) for s,k in bindings.items()},
         timestamp_gmu_offsets=[0x16220,0x16224],
-        gpu_streams=[0,0x400],gmu_streams=[5,0x405],
+        gpu_streams=[0,0x400,1,0x401],gmu_streams=[5,0x405],
         smmu_physical='0x03da0000',smmu_context_limits=[21,24],
         boot_link_status='controlled by CONFIG_XNU_PONG_ADRENO_PLATFORM',
         hardware_qualified=False,image_verification='skipped by request')

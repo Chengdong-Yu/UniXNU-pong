@@ -13,7 +13,9 @@
  * pointer values. A mapping is retirable only through freeBo, which unmaps
  * first and then releases the backing object; both steps must succeed.
  * Up to NativeAdrenoClientMaxObjects live objects and the execbuf's own eight-job limit apply. */
-enum : size_t {NativeAdrenoClientMaxObjects=4096,NativeAdrenoClientContiguousFirstBytes=65536};
+enum : size_t {NativeAdrenoClientMaxObjects=4096};
+/* Pong: one isolated VA/queue window for each selected Metal process. */
+enum : unsigned {NativeAdrenoMaxClients=8};
 class NativeAdrenoUserClient final {
     struct Queue {uint32_t id=0;bool active=false;};
     struct Entry {

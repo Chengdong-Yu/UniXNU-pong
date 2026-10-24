@@ -1,0 +1,646 @@
+diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
+index 4d208553..8faa8248 100644
+--- a/BootShim/BootShim.S
++++ b/BootShim/BootShim.S
+@@ -7,7 +7,7 @@ _StackBase:
+   .quad FD_BASE         /* Text Offset */
+ 
+ _StackSize:
+-  .quad FD_SIZE         /* Image Size */
++  .quad FD_SIZE + (_Payload - _Head) /* ARM64 image includes shim and firmware */
+   .quad 0               /* Flags */
+   .quad 0               /* Reserved */
+   .quad 0               /* Reserved */
+diff --git a/Platforms/Nothing/pongPkg/pong.dsc b/Platforms/Nothing/pongPkg/pong.dsc
+index d7e52ccb..24090797 100644
+--- a/Platforms/Nothing/pongPkg/pong.dsc
++++ b/Platforms/Nothing/pongPkg/pong.dsc
+@@ -68,6 +68,9 @@
+   gQcomPkgTokenSpaceGuid.PcdPlatformType|"LA"
+ 
+ [LibraryClasses]
++  # UniXNU boot manager core; DarwinBoot provides the XNU loader protocol.
++  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++
+   #
+   # Memory Libraries
+   #
+@@ -79,6 +82,13 @@
+   ConfigurationMapLib|pongPkg/Library/ConfigurationMapLib/ConfigurationMapLib.inf
+ 
+ [Components]
++  UniXNUPkg/Application/UniXNU/UniXNU.inf
++  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++  DarwinBootPkg/Driver/DarwinBoot.inf
++  pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.inf
++  pongPkg/Test/PongPayloadProbe/PongPayloadProbe.inf
++  pongPkg/Test/PongInitrdTest/PongInitrdTest.inf
++
+   #
+   # ACPI Tables
+   #
+diff --git a/Platforms/Nothing/pongPkg/pong.fdf b/Platforms/Nothing/pongPkg/pong.fdf
+index b6f6a984..c519890a 100644
+--- a/Platforms/Nothing/pongPkg/pong.fdf
++++ b/Platforms/Nothing/pongPkg/pong.fdf
+@@ -83,6 +83,14 @@ READ_LOCK_STATUS   = TRUE
+   !include Include/DXE.inc
+   !include Include/RAW.inc
+ 
++  # UniXNU application, firmware boot registrar and XNU loader.
++  INF UniXNUPkg/Application/UniXNU/UniXNU.inf
++  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++  INF DarwinBootPkg/Driver/DarwinBoot.inf
++!if $(PONG_INITRD_DISK_ENABLED) == 1
++  INF pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.inf
++!endif
++
+   # RAM Manager
+   INF SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
+ 
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+index 0c05ffa3..e38268f2 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
++++ b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+@@ -13,6 +13,10 @@
+ .set CTRL_SPAN_BIT, BIT23
+ 
+ ASM_FUNC (_ModuleEntryPoint)
++  // Preserve the bootloader's FDT before platform initialization clobbers x0.
++  adr   x1, ASM_PFX (gSecEntryArg0)
++  str   x0, [x1]
++
+   // Do Platform Specific Initialization
+   bl    ASM_PFX (PlatformAssemblyInitialize)
+ 
+@@ -61,3 +65,8 @@ ASM_PFX (MainEntryPoint):
+ 
+   // Do Infinite Spin
+   b     .
++
++  .align 3
++  .global ASM_PFX (gSecEntryArg0)
++ASM_PFX (gSecEntryArg0):
++  .quad 0
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+index 8d586b35..7e4a932b 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+@@ -18,6 +18,8 @@
+ 
+ #include "Sec.h"
+ 
++extern UINT64  gSecEntryArg0;
++
+ #ifndef MDEPKG_NDEBUG
+ STATIC
+ VOID
+@@ -130,6 +132,9 @@ SecMain (VOID)
+     return;
+   }
+ 
++  // Pass the bootloader's runtime FDT to the initrd disk driver.
++  BuildGuidDataHob (&gSiliciumEntryArgHobGuid, &gSecEntryArg0, sizeof (gSecEntryArg0));
++
+   // Run Library Cconstructors
+   ProcessLibraryConstructorList ();
+ 
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+index 79afd196..3a0a8a97 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+@@ -52,6 +52,7 @@
+ 
+ [Guids]
+   gArmMpCoreInfoGuid
++  gSiliciumEntryArgHobGuid
+ 
+ [Pcd]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
+diff --git a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+index 99cd6975..b3786173 100644
+--- a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
++++ b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+@@ -8,6 +8,7 @@
+   Include                              # Root Include for the Package
+ 
+ [Guids]
++  gSiliciumEntryArgHobGuid            = { 0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 } }
+   gSiliciumPkgTokenSpaceGuid          = { 0x055720A6, 0xA739, 0x0047, { 0xBE, 0xC1, 0x67, 0xFC, 0x38, 0x34, 0x54, 0x53 } }
+ 
+ [Protocols]
+diff --git a/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.c b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.c
+new file mode 100644
+index 00000000..60076bbb
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.c
+@@ -0,0 +1,183 @@
++/** @file
++  Publish the Pong bootloader initrd's tagged FAT payload as a read-only disk.
++
++  The x0/HOB handoff follows UniXNU's ShengBootMemoryDxe. Unlike its raw FAT
++  assumption, scan a bounded initrd for a length/CRC-checked PONGFAT1 envelope:
++  Android v4 can concatenate the vendor ramdisk before the boot ramdisk.
++  Copy the FAT to owned reserved pages before publishing it. This first-stage
++  driver does not expand the firmware memory map or access physical disks.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++#include <Uefi.h>
++#include <Guid/Fdt.h>
++#include <Guid/EventGroup.h>
++#include <Library/ArmMmuLib.h>
++#include <Library/BaseLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/DebugLib.h>
++#include <Library/FdtLib.h>
++#include <Library/HobLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiLib.h>
++#include <Protocol/BlockIo.h>
++#include <Protocol/DevicePath.h>
++#include "PongInitrd.h"
++
++STATIC UINT8 *mRamBase;
++STATIC EFI_BLOCK_IO_MEDIA mMedia;
++STATIC VOID *mEntryFdt;
++
++// A bootloader-owned buffer need not be covered by the firmware's static map.
++// AT reports a translation fault without dereferencing an unmapped pointer.
++STATIC EFI_STATUS MakeReadable (UINT64 Address, UINTN Size) {
++  UINT64 Base, End, Page, El, Par;
++  if (Address < SIZE_1MB || Size == 0 || Size > PONG_FAT_MAX_INITRD ||
++      Address >= LShiftU64 (1, 48) || Size > LShiftU64 (1, 48) - Address) { return EFI_INVALID_PARAMETER; }
++  Base = Address & ~((UINT64)EFI_PAGE_SIZE - 1);
++  End = ALIGN_VALUE (Address + Size, EFI_PAGE_SIZE);
++  __asm__ volatile ("mrs %0, CurrentEL" : "=r" (El));
++  for (Page = Base; Page < End; Page += EFI_PAGE_SIZE) {
++    if (El == 4) { __asm__ volatile ("at s1e1r, %1; isb; mrs %0, par_el1" : "=r" (Par) : "r" (Page) : "memory"); }
++    else if (El == 8) { __asm__ volatile ("at s1e2r, %1; isb; mrs %0, par_el1" : "=r" (Par) : "r" (Page) : "memory"); }
++    else { return EFI_UNSUPPORTED; }
++    if ((Par & 1) != 0) { return ArmSetMemoryAttributes (Base, End - Base, EFI_MEMORY_WB | EFI_MEMORY_XP, 0); }
++  }
++  return EFI_SUCCESS;
++}
++
++STATIC EFI_STATUS EFIAPI Reset (EFI_BLOCK_IO_PROTOCOL *This, BOOLEAN Extended) { return EFI_SUCCESS; }
++STATIC EFI_STATUS EFIAPI Flush (EFI_BLOCK_IO_PROTOCOL *This) { return EFI_SUCCESS; }
++STATIC EFI_STATUS EFIAPI Write (EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId, EFI_LBA Lba, UINTN Size, VOID *Buffer) {
++  return EFI_WRITE_PROTECTED;
++}
++STATIC EFI_STATUS EFIAPI Read (EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId, EFI_LBA Lba, UINTN Size, VOID *Buffer) {
++  if (MediaId != mMedia.MediaId) { return EFI_MEDIA_CHANGED; }
++  if (Size == 0) { return EFI_SUCCESS; }
++  if (Buffer == NULL) { return EFI_INVALID_PARAMETER; }
++  if (Size % 512 != 0) { return EFI_BAD_BUFFER_SIZE; }
++  if (Lba > mMedia.LastBlock || Size / 512 > mMedia.LastBlock + 1 - Lba) { return EFI_INVALID_PARAMETER; }
++  CopyMem (Buffer, mRamBase + Lba * 512, Size);
++  return EFI_SUCCESS;
++}
++STATIC EFI_BLOCK_IO_PROTOCOL mBlock = {
++  EFI_BLOCK_IO_PROTOCOL_REVISION, &mMedia, Reset, Read, Write, Flush
++};
++#pragma pack(1)
++STATIC struct {
++  VENDOR_DEVICE_PATH Vendor;
++  EFI_DEVICE_PATH_PROTOCOL End;
++} mPath = {
++  {{HARDWARE_DEVICE_PATH, HW_VENDOR_DP, {sizeof (VENDOR_DEVICE_PATH), 0}},
++   {0x7B27B767, 0x94A4, 0x4A47, {0x99, 0xDD, 0x28, 0x1F, 0x7C, 0x60, 0x4F, 0xAA}}},
++  {END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE, {sizeof (EFI_DEVICE_PATH_PROTOCOL), 0}}
++};
++#pragma pack()
++
++STATIC BOOLEAN InitrdRange (VOID *Fdt, UINT64 *Start, UINT64 *End) {
++  INT32 Node, ASize, BSize;
++  CONST VOID *A, *B;
++  Node = FdtPathOffset (Fdt, "/chosen");
++  if (Node < 0) { return FALSE; }
++  A = FdtGetProp (Fdt, Node, "linux,initrd-start", &ASize);
++  B = FdtGetProp (Fdt, Node, "linux,initrd-end", &BSize);
++  if (A == NULL || B == NULL || (ASize != 4 && ASize != 8) || (BSize != 4 && BSize != 8)) { return FALSE; }
++  *Start = ASize == 8 ? Fdt64ToCpu (ReadUnaligned64 (A)) : Fdt32ToCpu (ReadUnaligned32 (A));
++  *End = BSize == 8 ? Fdt64ToCpu (ReadUnaligned64 (B)) : Fdt32ToCpu (ReadUnaligned32 (B));
++  return *Start != 0 && *End > *Start && *End <= MAX_UINTN && *End - *Start <= PONG_FAT_MAX_INITRD;
++}
++
++STATIC EFI_STATUS Publish (UINT64 Start, UINT64 End) {
++  CONST UINT8 *Bytes, *Header, *Fat;
++  UINTN Span, Index, FatBytes;
++  UINT64 Size;
++  UINT32 Crc, Sectors;
++  EFI_STATUS Status;
++  EFI_PHYSICAL_ADDRESS Copy;
++  EFI_HANDLE Handle;
++  Bytes = (CONST UINT8 *)(UINTN)Start;
++  Span = (UINTN)(End - Start);
++  if (Span < PONG_FAT_HEADER_BYTES + 512) { return EFI_NOT_FOUND; }
++  for (Index = 0; Index <= Span - PONG_FAT_HEADER_BYTES - 512; ++Index) {
++    Header = Bytes + Index;
++    if (Header[0] != 'P' || CompareMem (Header, PONG_FAT_MAGIC, 8) != 0) { continue; }
++    if (ReadUnaligned32 ((CONST UINT32 *)(Header + 8)) != 1 ||
++        ReadUnaligned32 ((CONST UINT32 *)(Header + 12)) != PONG_FAT_HEADER_BYTES) { continue; }
++    Size = ReadUnaligned64 ((CONST UINT64 *)(Header + 16));
++    if (Size < 512 || Size % 512 != 0 || Size > Span - Index - PONG_FAT_HEADER_BYTES) { continue; }
++    FatBytes = (UINTN)Size;
++    Fat = Header + PONG_FAT_HEADER_BYTES;
++    if (Fat[510] != 0x55 || Fat[511] != 0xAA || ReadUnaligned16 ((CONST UINT16 *)(Fat + 11)) != 512) { continue; }
++    Sectors = ReadUnaligned16 ((CONST UINT16 *)(Fat + 19));
++    if (Sectors == 0) { Sectors = ReadUnaligned32 ((CONST UINT32 *)(Fat + 32)); }
++    if (Sectors != FatBytes / 512) { continue; }
++    Status = gBS->CalculateCrc32 ((VOID *)Fat, FatBytes, &Crc);
++    if (EFI_ERROR (Status) || Crc != ReadUnaligned32 ((CONST UINT32 *)(Header + 24))) { continue; }
++    Copy = 0;
++    Status = gBS->AllocatePages (AllocateAnyPages, EfiReservedMemoryType, EFI_SIZE_TO_PAGES (FatBytes), &Copy);
++    if (EFI_ERROR (Status)) { return Status; }
++    mRamBase = (UINT8 *)(UINTN)Copy;
++    CopyMem (mRamBase, Fat, FatBytes);
++    mMedia.MediaId = 1;
++    mMedia.MediaPresent = TRUE;
++    mMedia.ReadOnly = TRUE;
++    mMedia.BlockSize = 512;
++    mMedia.IoAlign = 1;
++    mMedia.LastBlock = FatBytes / 512 - 1;
++    Handle = NULL;
++    Status = gBS->InstallMultipleProtocolInterfaces (&Handle, &gEfiDevicePathProtocolGuid, &mPath,
++                                                     &gEfiBlockIoProtocolGuid, &mBlock, NULL);
++    if (EFI_ERROR (Status)) { gBS->FreePages (Copy, EFI_SIZE_TO_PAGES (FatBytes)); mRamBase = NULL; }
++    // UniXNU connects controllers at application TPL before discovering config.
++    DEBUG ((DEBUG_ERROR, "PONGMEM: FAT at initrd+0x%lx, %lu bytes, %r\n", (UINT64)Index, Size, Status));
++    return Status;
++  }
++  return EFI_NOT_FOUND;
++}
++
++STATIC EFI_STATUS ProcessFdt (VOID *Fdt, BOOLEAN Show) {
++  UINT64 Start, End;
++  EFI_STATUS Status;
++  if (Show) { Print (L"\r\nPONG INITRD: FDT at 0x%lx\r\n", (UINT64)(UINTN)Fdt); }
++  Status = MakeReadable ((UINT64)(UINTN)Fdt, 40);
++  if (EFI_ERROR (Status)) { return Status; }
++  if (FdtCheckHeader (Fdt) != 0 || FdtTotalSize (Fdt) > SIZE_2MB) { return EFI_COMPROMISED_DATA; }
++  Status = MakeReadable ((UINT64)(UINTN)Fdt, FdtTotalSize (Fdt));
++  if (EFI_ERROR (Status)) { return Status; }
++  if (!InitrdRange (Fdt, &Start, &End)) { return EFI_NOT_FOUND; }
++  if (Show) { Print (L"PONG INITRD: source 0x%lx-0x%lx\r\n", Start, End); }
++  Status = MakeReadable (Start, (UINTN)(End - Start));
++  if (EFI_ERROR (Status)) { return Status; }
++  return Publish (Start, End);
++}
++
++STATIC VOID EFIAPI ReadyToBoot (EFI_EVENT Event, VOID *Context) {
++  EFI_STATUS Status;
++  gBS->CloseEvent (Event);
++  Status = ProcessFdt (mEntryFdt, TRUE);
++  Print (L"PONG INITRD: %r\r\n", Status);
++  if (EFI_ERROR (Status)) { gBS->Stall (20 * 1000000); }
++}
++
++EFI_STATUS EFIAPI PongBootMemoryEntry (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
++  EFI_HOB_GUID_TYPE *Hob;
++  VOID *Fdt;
++  UINT64 Address;
++  EFI_EVENT Event;
++  EFI_STATUS Status;
++  Fdt = NULL;
++  Hob = GetFirstGuidHob (&gSiliciumEntryArgHobGuid);
++  if (Hob != NULL && GET_GUID_HOB_DATA_SIZE (Hob) >= sizeof (Address)) {
++    CopyMem (&Address, GET_GUID_HOB_DATA (Hob), sizeof (Address));
++    if (Address != 0 && Address <= MAX_UINTN && (Address & 3) == 0) {
++      mEntryFdt = (VOID *)(UINTN)Address;
++      return gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, ReadyToBoot, NULL, &gEfiEventReadyToBootGuid, &Event);
++    }
++  }
++  // Standard configuration-table fallback also permits testing this exact DXE in QEMU.
++  if (Fdt == NULL) { EfiGetSystemConfigurationTable (&gFdtTableGuid, &Fdt); }
++  Status = Fdt == NULL ? EFI_NOT_FOUND : ProcessFdt (Fdt, FALSE);
++  DEBUG ((DEBUG_ERROR, "PONGMEM: initrd: %r\n", Status));
++  // A missing diagnostic payload must not break normal firmware boot.
++  return EFI_SUCCESS;
++}
+diff --git a/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.inf b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.inf
+new file mode 100644
+index 00000000..ac52fbf2
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongBootMemoryDxe.inf
+@@ -0,0 +1,41 @@
++[Defines]
++  INF_VERSION = 0x0001001B
++  BASE_NAME = PongBootMemoryDxe
++  FILE_GUID = 7B27B767-94A4-4A47-99DD-281F7C604FAA
++  MODULE_TYPE = DXE_DRIVER
++  VERSION_STRING = 0.1
++  ENTRY_POINT = PongBootMemoryEntry
++
++[Sources]
++  PongBootMemoryDxe.c
++  PongInitrd.h
++
++[Packages]
++  MdePkg/MdePkg.dec
++  ArmPkg/ArmPkg.dec
++  UefiCpuPkg/UefiCpuPkg.dec
++  SiliciumPkg/SiliciumPkg.dec
++
++[LibraryClasses]
++  BaseLib
++  ArmMmuLib
++  ArmLib
++  BaseMemoryLib
++  DebugLib
++  FdtLib
++  HobLib
++  UefiLib
++  UefiBootServicesTableLib
++  UefiDriverEntryPoint
++
++[Guids]
++  gSiliciumEntryArgHobGuid
++  gFdtTableGuid
++  gEfiEventReadyToBootGuid
++
++[Protocols]
++  gEfiBlockIoProtocolGuid
++  gEfiDevicePathProtocolGuid
++
++[Depex]
++  TRUE
+diff --git a/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongInitrd.h b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongInitrd.h
+new file mode 100644
+index 00000000..8b0162d6
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Drivers/PongBootMemoryDxe/PongInitrd.h
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#ifndef PONG_INITRD_H
++#define PONG_INITRD_H
++#define PONG_FAT_MAGIC "PONGFAT1"
++#define PONG_FAT_HEADER_BYTES 4096
++#define PONG_FAT_MAX_INITRD SIZE_128MB
++#define PONG_PAYLOAD_MARKER "PONG-INITRD-PROBE-20261020"
++#endif
+diff --git a/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.c b/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.c
+new file mode 100644
+index 00000000..2820adf9
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.c
+@@ -0,0 +1,126 @@
++/** SPDX-License-Identifier: BSD-2-Clause-Patent
++  QEMU integration harness: use the actual Pong DXE and FAT driver, not a mock.
++  Supply a deliberately unaligned vendor prefix before the tagged initrd.
++**/
++#include <Uefi.h>
++#include <Guid/Fdt.h>
++#include <Library/ArmMmuLib.h>
++#include <Library/BaseLib.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/FdtLib.h>
++#include <Library/MemoryAllocationLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
++#include <Protocol/BlockIo.h>
++#include <Protocol/SimpleFileSystem.h>
++#include <Protocol/LoadedImage.h>
++#include <Protocol/DevicePath.h>
++#include "../../Drivers/PongBootMemoryDxe/PongInitrd.h"
++
++STATIC EFI_STATUS ReadFile (EFI_FILE_PROTOCOL *Root, CHAR16 *Name, VOID *Bytes, UINTN *Size) {
++  EFI_FILE_PROTOCOL *File;
++  EFI_STATUS Status = Root->Open (Root, &File, Name, EFI_FILE_MODE_READ, 0);
++  if (EFI_ERROR (Status)) { return Status; }
++  Status = File->Read (File, Size, Bytes);
++  File->Close (File);
++  return Status;
++}
++
++EFI_STATUS EFIAPI PongInitrdTestEntry (EFI_HANDLE Image, EFI_SYSTEM_TABLE *Table) {
++  EFI_LOADED_IMAGE_PROTOCOL *Loaded;
++  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Fs;
++  EFI_FILE_PROTOCOL *Root;
++  EFI_STATUS Status;
++  UINT8 *Ramdisk, *Driver, *Fdt, Sector[512];
++  UINTN Size, DriverSize, Count, Index;
++  EFI_HANDLE DriverHandle, *Handles;
++  EFI_BLOCK_IO_PROTOCOL *Block;
++  UINT64 Cell;
++  INT32 Chosen;
++  BOOLEAN Found = FALSE;
++  Status = gBS->HandleProtocol (Image, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  Status = gBS->HandleProtocol (Loaded->DeviceHandle, &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  Status = Fs->OpenVolume (Fs, &Root);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  Ramdisk = AllocatePages (EFI_SIZE_TO_PAGES (SIZE_16MB));
++  Driver = AllocatePool (SIZE_1MB);
++  Fdt = AllocatePages (EFI_SIZE_TO_PAGES (SIZE_64KB));
++  if (Ramdisk == NULL || Driver == NULL || Fdt == NULL) { Status = EFI_OUT_OF_RESOURCES; goto Fail; }
++  ZeroMem (Ramdisk, SIZE_16MB);
++  Size = SIZE_16MB - 37;
++  Status = ReadFile (Root, L"\\payload.ramdisk", Ramdisk + 37, &Size);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  // Corrupt the envelope CRC on the negative run; its presence must not publish a disk.
++  {
++    EFI_FILE_PROTOCOL *Flag;
++    if (!EFI_ERROR (Root->Open (Root, &Flag, L"\\negative.flag", EFI_FILE_MODE_READ, 0))) {
++      Flag->Close (Flag);
++      Ramdisk[37 + 24] ^= 1;
++    }
++  }
++  DriverSize = SIZE_1MB;
++  Status = ReadFile (Root, L"\\PongBootMemoryDxe.efi", Driver, &DriverSize);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  FdtCreateEmptyTree (Fdt, SIZE_64KB);
++  Chosen = FdtAddSubnode (Fdt, 0, "chosen");
++  Cell = CpuToFdt64 ((UINT64)(UINTN)Ramdisk);
++  FdtSetProp (Fdt, Chosen, "linux,initrd-start", &Cell, sizeof (Cell));
++  Cell = CpuToFdt64 ((UINT64)(UINTN)Ramdisk + Size + 37);
++  FdtSetProp (Fdt, Chosen, "linux,initrd-end", &Cell, sizeof (Cell));
++  gBS->InstallConfigurationTable (&gFdtTableGuid, Fdt);
++  Status = gBS->LoadImage (FALSE, Image, NULL, Driver, DriverSize, &DriverHandle);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  {
++    EFI_FILE_PROTOCOL *Flag;
++    if (!EFI_ERROR (Root->Open (Root, &Flag, L"\\unmapped.flag", EFI_FILE_MODE_READ, 0))) {
++      Flag->Close (Flag);
++      Status = ArmSetMemoryAttributes ((UINTN)Fdt, SIZE_64KB, EFI_MEMORY_RP, EFI_MEMORY_RP);
++      if (EFI_ERROR (Status)) { goto Fail; }
++      Status = ArmSetMemoryAttributes ((UINTN)Ramdisk, SIZE_16MB, EFI_MEMORY_RP, EFI_MEMORY_RP);
++      if (EFI_ERROR (Status)) { goto Fail; }
++    }
++  }
++  Status = gBS->StartImage (DriverHandle, NULL, NULL);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
++  if (EFI_ERROR (Status)) { goto Fail; }
++  for (Index = 0; Index < Count; ++Index) {
++    gBS->HandleProtocol (Handles[Index], &gEfiBlockIoProtocolGuid, (VOID **)&Block);
++    if (Block->Media->ReadOnly && Block->Media->BlockSize == 512 && Block->Media->LastBlock == 16383) {
++      Status = Block->ReadBlocks (Block, Block->Media->MediaId, 0, sizeof (Sector), Sector);
++      if (EFI_ERROR (Status) || Sector[510] != 0x55 || Sector[511] != 0xAA) { goto Fail; }
++      if (Block->WriteBlocks (Block, Block->Media->MediaId, 0, sizeof (Sector), Sector) != EFI_WRITE_PROTECTED ||
++          Block->ReadBlocks (Block, Block->Media->MediaId + 1, 0, sizeof (Sector), Sector) != EFI_MEDIA_CHANGED ||
++          Block->ReadBlocks (Block, Block->Media->MediaId, 16384, sizeof (Sector), Sector) != EFI_INVALID_PARAMETER ||
++          Block->ReadBlocks (Block, Block->Media->MediaId, 0, 511, Sector) != EFI_BAD_BUFFER_SIZE) {
++        Status = EFI_DEVICE_ERROR; goto Fail;
++      }
++      gBS->ConnectController (Handles[Index], NULL, NULL, TRUE);
++      Status = gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs);
++      if (EFI_ERROR (Status)) { goto Fail; }
++      Status = Fs->OpenVolume (Fs, &Root);
++      if (EFI_ERROR (Status)) { goto Fail; }
++      Size = sizeof (Sector);
++      Status = ReadFile (Root, L"\\PONG-PROBE.TXT", Sector, &Size);
++      if (EFI_ERROR (Status) || Size != sizeof (PONG_PAYLOAD_MARKER) - 1 || CompareMem (Sector, PONG_PAYLOAD_MARKER, Size) != 0) { Status = EFI_COMPROMISED_DATA; goto Fail; }
++      Found = TRUE;
++    }
++  }
++  {
++    EFI_FILE_PROTOCOL *Flag;
++    BOOLEAN Negative = !EFI_ERROR (Root->Open (Root, &Flag, L"\\negative.flag", EFI_FILE_MODE_READ, 0));
++    if (Negative) { Flag->Close (Flag); }
++    if (Found == !Negative) {
++      Print (L"PONG-INITRD-TEST: %s PASS\r\n", Negative ? L"negative CRC refusal" : L"FAT mount, marker, read-only and bounds");
++      gRT->ResetSystem (EfiResetShutdown, EFI_SUCCESS, 0, NULL);
++    }
++  }
++  Status = EFI_NOT_FOUND;
++Fail:
++  Print (L"PONG-INITRD-TEST: FAIL %r\r\n", Status);
++  gRT->ResetSystem (EfiResetShutdown, EFI_ABORTED, 0, NULL);
++  return Status;
++}
+diff --git a/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.inf b/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.inf
+new file mode 100644
+index 00000000..76e56ccf
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Test/PongInitrdTest/PongInitrdTest.inf
+@@ -0,0 +1,36 @@
++[Defines]
++  INF_VERSION = 0x0001001B
++  BASE_NAME = PongInitrdTest
++  FILE_GUID = D59A187E-8A5C-440F-940A-5DAC5F441680
++  MODULE_TYPE = UEFI_APPLICATION
++  VERSION_STRING = 0.1
++  ENTRY_POINT = PongInitrdTestEntry
++
++[Sources]
++  PongInitrdTest.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++  ArmPkg/ArmPkg.dec
++  UefiCpuPkg/UefiCpuPkg.dec
++
++[LibraryClasses]
++  BaseLib
++  ArmLib
++  ArmMmuLib
++  BaseMemoryLib
++  FdtLib
++  MemoryAllocationLib
++  UefiApplicationEntryPoint
++  UefiBootServicesTableLib
++  UefiRuntimeServicesTableLib
++  UefiLib
++
++[Guids]
++  gFdtTableGuid
++
++[Protocols]
++  gEfiLoadedImageProtocolGuid
++  gEfiSimpleFileSystemProtocolGuid
++  gEfiDevicePathProtocolGuid
++  gEfiBlockIoProtocolGuid
+diff --git a/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.c b/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.c
+new file mode 100644
+index 00000000..125965cd
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.c
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#include <Uefi.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Protocol/LoadedImage.h>
++#include <Protocol/SimpleFileSystem.h>
++#include <Protocol/BlockIo.h>
++#include "../../Drivers/PongBootMemoryDxe/PongInitrd.h"
++
++EFI_STATUS EFIAPI PongPayloadProbeEntry (EFI_HANDLE Image, EFI_SYSTEM_TABLE *SystemTable) {
++  EFI_LOADED_IMAGE_PROTOCOL *Loaded;
++  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Fs;
++  EFI_BLOCK_IO_PROTOCOL *Block;
++  EFI_FILE_PROTOCOL *Root, *File;
++  EFI_STATUS Status;
++  CHAR8 Marker[64];
++  UINTN Size, Index;
++  EFI_EVENT Timer;
++  EFI_EVENT Events[2];
++  if (gST->ConOut != NULL) { gST->ConOut->ClearScreen (gST->ConOut); }
++  Print (L"PONG PAYLOAD PROBE\r\n");
++  Status = gBS->HandleProtocol (Image, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
++  if (EFI_ERROR (Status)) { return Status; }
++  Status = gBS->HandleProtocol (Loaded->DeviceHandle, &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs);
++  if (EFI_ERROR (Status)) { return Status; }
++  Status = gBS->HandleProtocol (Loaded->DeviceHandle, &gEfiBlockIoProtocolGuid, (VOID **)&Block);
++  if (EFI_ERROR (Status) || !Block->Media->ReadOnly) { Print (L"PONG PAYLOAD FAIL: disk is not read-only\r\n"); return EFI_DEVICE_ERROR; }
++  Status = Fs->OpenVolume (Fs, &Root);
++  if (EFI_ERROR (Status)) { return Status; }
++  Status = Root->Open (Root, &File, L"\\PONG-PROBE.TXT", EFI_FILE_MODE_READ, 0);
++  if (!EFI_ERROR (Status)) {
++    Size = sizeof (Marker);
++    Status = File->Read (File, &Size, Marker);
++    File->Close (File);
++    if (!EFI_ERROR (Status) && (Size != sizeof (PONG_PAYLOAD_MARKER) - 1 ||
++        CompareMem (Marker, PONG_PAYLOAD_MARKER, Size) != 0)) { Status = EFI_COMPROMISED_DATA; }
++  }
++  Root->Close (Root);
++  if (EFI_ERROR (Status)) { Print (L"PONG PAYLOAD FAIL: marker %r\r\n", Status); return Status; }
++  Print (L"PONG PAYLOAD PASS\r\nRead-only initrd FAT loaded this ARM64 EFI application.\r\n");
++  Print (L"Disk: %lu bytes\r\nNo XNU kernel or iPadOS has been started.\r\n", (Block->Media->LastBlock + 1) * 512);
++  Print (L"Press a key to return; automatic return in 120 seconds.\r\n");
++  if (gST->ConIn != NULL && !EFI_ERROR (gBS->CreateEvent (EVT_TIMER, TPL_CALLBACK, NULL, NULL, &Timer))) {
++    gBS->SetTimer (Timer, TimerRelative, 120 * 10000000ULL);
++    Events[0] = gST->ConIn->WaitForKey;
++    Events[1] = Timer;
++    gBS->WaitForEvent (2, Events, &Index);
++    gBS->CloseEvent (Timer);
++  }
++  return EFI_SUCCESS;
++}
+diff --git a/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.inf b/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.inf
+new file mode 100644
+index 00000000..52ae8d33
+--- /dev/null
++++ b/Platforms/Nothing/pongPkg/Test/PongPayloadProbe/PongPayloadProbe.inf
+@@ -0,0 +1,27 @@
++[Defines]
++  INF_VERSION = 0x0001001B
++  BASE_NAME = PongPayloadProbe
++  FILE_GUID = 68758577-332C-4B6D-820D-ADCAEE8350FB
++  MODULE_TYPE = UEFI_APPLICATION
++  VERSION_STRING = 0.1
++  ENTRY_POINT = PongPayloadProbeEntry
++
++[Sources]
++  PongPayloadProbe.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++
++[LibraryClasses]
++  BaseMemoryLib
++  UefiApplicationEntryPoint
++  UefiBootServicesTableLib
++  UefiLib
++
++[Guids]
++  gEfiFileInfoGuid
++
++[Protocols]
++  gEfiLoadedImageProtocolGuid
++  gEfiSimpleFileSystemProtocolGuid
++  gEfiBlockIoProtocolGuid

@@ -186,6 +186,13 @@ static IOReturn hostScsiDir (uint8_t lun, const uint8_t *cdb, unsigned cdbLength
                  (cdb[0] == 0x1b && !direction && cdbLength == 6 && lun == 0xd0 && cdb[4] == 0x10) ||
                  (cdb[0] == 0x25 && direction == 2 && cdbLength == 10 && dataBytes == 8 && lun == 0) ||
                  (cdb[0] == 0x28 && direction == 2 && cdbLength == 10 && lun == 0) ||
+                 // APFS commits issue doSynchronize/barrier after their writes.
+                 // Accept the exact whole-LUN, non-IMMED CDB produced below;
+                 // rejecting 0x35 here makes tx_flush return ENOTSUP (45),
+                 // which prevents every subsequent APFS transaction.
+                 (cdb[0] == 0x35 && !direction && cdbLength == 10 && lun == 0 &&
+                  !cdb[1] && !cdb[2] && !cdb[3] && !cdb[4] && !cdb[5] &&
+                  !cdb[6] && !cdb[7] && !cdb[8] && !cdb[9]) ||
                  (cdb[0] == 0x2a && direction == 1 && cdbLength == 10 &&
                   cdb[1] == 0x08 && cdb[6] == 0 && cdb[9] == 0 && lun == 0 &&
                   ((unsigned(cdb[7]) << 8) | cdb[8]) != 0 &&
@@ -305,5 +312,18 @@ static IOReturn hostWrite4kLocked (uint8_t lun, uint64_t lba, uint32_t blocks)
                       0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
   uint32_t scsi = 0;
   return hostScsiDir (lun, cdb, 10, 1, blocks * 4096U, 1000000, &scsi);
+}
+
+// Sheng's durable store issues the real SYNCHRONIZE CACHE(10), rather than
+// reporting success from the host-ready flag. Serialize with every FUA write.
+static IOReturn hostSyncCache (void)
+{
+  if (!gHost.lock || !gHost.ready || gHost.poisoned) return kIOReturnNotReady;
+  IOLockLock (gHost.lock);
+  uint8_t cdb[10] = { 0x35 };
+  uint32_t scsi = 0;
+  IOReturn status = hostScsiDir (0, cdb, 10, 0, 0, 10000000, &scsi);
+  IOLockUnlock (gHost.lock);
+  return status;
 }
 

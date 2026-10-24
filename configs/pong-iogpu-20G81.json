@@ -1,0 +1,17 @@
+{
+  "guest": "20G81",
+  "instance_bytes": 136,
+  "virtual_entries": 168,
+  "metaclass": "0xfffffff007a575c8",
+  "vptr": "0xfffffff006d30278",
+  "get_meta_class": "0xfffffff00598b2b4",
+  "constructor": "0xfffffff00598b228",
+  "metaclass_constructor": "0xfffffff00598b1f0",
+  "destructor": "0xfffffff00598b26c",
+  "operational_overrides": [],
+  "constructor_aliases": [
+    "0xfffffff00598b228",
+    "0xfffffff00598b248"
+  ],
+  "original_prelink_base": "0xfffffff004fbc000"
+}

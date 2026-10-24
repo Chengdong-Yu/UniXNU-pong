@@ -1,0 +1,64 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7176,18 +7176,22 @@
+ 
+ #if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+ #if !defined(XNU_OWNER_BOOT_MANIFEST) || !XNU_OWNER_BOOT_MANIFEST
+-#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL || !defined(XNU_PONG_APFS_DEBUG) || !XNU_PONG_APFS_DEBUG || !defined(XNU_OWNER_CACHE_MOUNT) || !XNU_OWNER_CACHE_MOUNT || !defined(XNU_NATIVE_RAM_BLOCK) || !XNU_NATIVE_RAM_BLOCK
+-#error Scratch Data requires the Pong development NativeRamBlock and SystemOS mount path
++#if !defined(PONG) || !(DEVELOPMENT || DEBUG) || SECURE_KERNEL || !defined(XNU_PONG_APFS_DEBUG) || !XNU_PONG_APFS_DEBUG || !defined(XNU_OWNER_CACHE_MOUNT) || !XNU_OWNER_CACHE_MOUNT
++#error Data requires the Pong development SystemOS mount path
++#endif
++#if (!defined(XNU_NATIVE_RAM_BLOCK) || !XNU_NATIVE_RAM_BLOCK) && (!defined(XNU_OWNER_DATA_UFS) || !XNU_OWNER_DATA_UFS)
++#error Select NativeRamBlock or a persistent UFS Data backend
+ #endif
+ #if (!defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS) && (!defined(XNU_OWNER_CRYPTEX_FILES) || !XNU_OWNER_CRYPTEX_FILES)
+ #error Scratch Data requires mounted SystemOS via union or Cryptex files
+ #endif
+ #endif
+-#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
++#if (defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK) || (defined(XNU_OWNER_DATA_UFS) && XNU_OWNER_DATA_UFS)
+ #ifndef XNU_OWNER_DATA_VOLUME_UUID
+ #error Supply the observed scratch volume UUID for the IOKit backend
+ #endif
+ extern int native_ram_block_volume_seed(const char *, dev_t *, char *, size_t, uint64_t *, uint64_t *, uint8_t *);
++extern int native_pong_ufs_data_volume_device(const char *, dev_t *, char *, size_t, uint64_t *);
+ #endif
+ extern dev_t mdevlookup(int);
+ extern int mdevgetrange(int, uint64_t *, uint64_t *);
+@@ -7208,13 +7212,24 @@
+ 		native_owner_data_status = ENXIO;
+ 		return ENXIO;
+ 	}
+-	printf("PONG APFS: scratch Data prepare enter uuid=%s\n", XNU_OWNER_DATA_VOLUME_UUID);
++	printf("PONG APFS: Data prepare enter uuid=%s\n", XNU_OWNER_DATA_VOLUME_UUID);
+ 	uint64_t base = 0, size = 0;
+ 	dev_t device = NODEV;
+ 	int error = EINVAL;
+ 	vnode_t data_root = NULLVP;
+ 	char device_path[64] = "/dev/md0";
+-#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
++#if defined(XNU_OWNER_DATA_UFS) && XNU_OWNER_DATA_UFS
++	/* Persistent APFS Data is a real IOMedia beneath the dedicated writable
++	 * SHNGROOT Data window. No md device, seed mapping or RAM fallback. */
++	if (!native_pong_ufs_data_volume_device(XNU_OWNER_DATA_VOLUME_UUID, &device,
++	    device_path, sizeof(device_path), &size)) {
++		printf("PONG APFS: writable UFS Data UUID unavailable\n");
++		error = ENXIO;
++		goto done;
++	}
++	if (!size || (size & 4095)) goto done;
++	bzero(native_owner_data_seed_sha256, sizeof(native_owner_data_seed_sha256));
++#elif defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+ 	/* The typed provider supplies logical seed identity for both dense and
+ 	 * sparse media. A sparse disk has no contiguous logical-byte address. */
+ 	if (!native_ram_block_volume_seed(XNU_OWNER_DATA_VOLUME_UUID, &device, device_path,
+@@ -7437,7 +7452,7 @@
+ 	int data_error = native_owner_data_prepare(p, (user_addr_t)scratch_addr);
+ 	if (data_error) printf("PONG DEVELOPMENT: scratch Data mount SKIP error=%d stage=%d\n",
+ 	    data_error, native_owner_data_stage);
+-	else printf("PONG APFS: scratch Data mount PASS path=/private/var device=%s rw=%d bytes=%llu\n",
++	else printf("PONG APFS: Data mount PASS path=/private/var device=%s rw=%d bytes=%llu\n",
+ 	    native_owner_data_device_path, !native_owner_data_readonly,
+ 	    (unsigned long long)native_owner_data_seed_size);
+ #endif

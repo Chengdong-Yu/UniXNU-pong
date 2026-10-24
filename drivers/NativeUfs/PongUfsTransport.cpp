@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Pong/SM8475 UFS transport. Writes are boot-arg gated and limited to the
-// two validated SHNGROOT windows. Shared queue/protocol code derives
+// declared SHNGROOT windows, including the independent persistent APFS Data.
+// Shared queue/protocol code derives
 // from Sheng; board addresses and stream ID come from Pong's live DT.
 #include <IOKit/IOService.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -56,7 +57,7 @@ struct RootDiskWindow {
   uint64_t baseByte;
   uint64_t size;
 };
-static RootDiskWindow gRootWindows[2];
+static RootDiskWindow gRootWindows[3];
 static unsigned gRootWindowCount;
 static uint32_t read32(uintptr_t base, unsigned offset) {
   return *reinterpret_cast<volatile uint32_t *>(base + offset);
@@ -202,7 +203,7 @@ static bool hostBringUp() {
   uint32_t last = loadBe32(gHost.virt + kDataOffset), blockSize = loadBe32(gHost.virt + kDataOffset + 4);
   if (!last || last == 0xffffffff || blockSize != 4096) return transportFailure("unsupported LUN geometry");
   gHost.blocks = uint64_t(last) + 1;
-  IOLog("PONG_UFS: transport ready LUN=0 block=4096 blocks=%llu; WRITE(10) FUA=%s; writes stay inside OS/SystemOS windows\n",
+  IOLog("PONG_UFS: transport ready LUN=0 block=4096 blocks=%llu; WRITE(10) FUA=%s; writes stay inside declared SHNGROOT windows\n",
         gHost.blocks, gHost.writable ? "enabled" : "disabled");
   return true;
 }
@@ -234,7 +235,7 @@ public:
     return kIOReturnSuccess;
   }
   IOReturn reportMediaState(bool *v, bool *changed) override { *v = online && gHost.ready; if (changed) *changed = false; return kIOReturnSuccess; }
-  IOReturn doSynchronizeCache() override { return gHost.ready ? kIOReturnSuccess : kIOReturnNotReady; }
+  IOReturn doSynchronizeCache() override { return hostSyncCache(); }
   IOReturn doSynchronize(UInt64, UInt64, IOOptionBits) override { return doSynchronizeCache(); }
   IOReturn getWriteCacheState(bool *v) override { *v = false; return kIOReturnSuccess; }
   IOReturn setWriteCacheState(bool) override { return kIOReturnNotWritable; }
@@ -290,9 +291,11 @@ static unsigned native_pong_log_ufs_window_media(const char *windowKey) {
 // Development APFS handoff: resolve a unique APFS IOMedia by its observed
 // volume UUID and prove that it descends from the matching SHNGROOT UFS window.
 // This is device ancestry, not cryptographic image authentication.
-extern "C" int native_pong_ufs_volume_device(const char *uuid, int systemOS,
+extern "C" int native_pong_ufs_volume_device(const char *uuid, int kind,
                                                dev_t *device, char *path, size_t pathSize) {
-  if (!uuid || strlen(uuid) != 36 || !device || !path || pathSize < 8) return 0;
+  if (!uuid || strlen(uuid) != 36 || !device || !path || pathSize < 8 || kind<0 || kind>2) return 0;
+  const char *windowName=kind==2?"Data":kind==1?"SystemOS":"OS";
+  const char *windowKey=kind==2?"PongDataWindow":kind==1?"PongSystemOSWindow":"PongRootWindow";
   *device = NODEV;
   path[0] = 0;
 
@@ -309,22 +312,24 @@ extern "C" int native_pong_ufs_volume_device(const char *uuid, int systemOS,
       matching->setObject("IOPropertyMatch", properties);
   wanted->release();
   properties->release();
-  OSIterator *iterator = ready ? IOService::getMatchingServices(matching) : nullptr;
-  if (!iterator && ready && systemOS) {
-    IOLog("PONG APFS: wait for SystemOS UUID %.36s, timeout=5s\n", uuid);
+  OSIterator *iterator = nullptr;
+  if (ready && kind) {
+    IOLog("PONG APFS: wait for %s UUID %.36s, timeout=5s\n", windowName,uuid);
     auto published = IOService::waitForMatchingService(matching, 5ULL * 1000000000ULL);
     if (published) {
-      IOLog("PONG APFS: SystemOS UUID appeared; rechecking IOMedia\n");
+      IOLog("PONG APFS: %s UUID appeared; rechecking IOMedia\n",windowName);
       iterator = IOService::getMatchingServices(matching);
     } else {
-      IOLog("PONG APFS: SystemOS UUID wait timed out\n");
+      IOLog("PONG APFS: %s UUID wait timed out\n",windowName);
     }
+  } else if (ready) {
+    iterator = IOService::getMatchingServices(matching);
   }
   matching->release();
   if (!iterator) {
     IOLog("PONG APFS: UUID lookup unavailable uuid=%.36s window=%s\n", uuid,
-          systemOS ? "SystemOS" : "OS");
-    if (systemOS) native_pong_log_ufs_window_media("PongSystemOSWindow");
+          windowName);
+    if (kind) native_pong_log_ufs_window_media(windowKey);
     return 0;
   }
 
@@ -358,15 +363,18 @@ extern "C" int native_pong_ufs_volume_device(const char *uuid, int systemOS,
       PongUfsBlock *block = OSDynamicCast(PongUfsBlock, provider);
       if (!block) continue;
       foundUfsWindow = true;
-      const char *windowKey = systemOS ? "PongSystemOSWindow" : "PongRootWindow";
       validWindow = block->getProperty(windowKey) == kOSBooleanTrue &&
           block->getProperty("PongUfsWindow") == kOSBooleanTrue;
+      if(kind==2) {
+        validWindow=validWindow && block->getProperty("PongWritable")==kOSBooleanTrue &&
+            media->getProperty(kIOMediaWritableKey)==kOSBooleanTrue;
+      }
       break;
     }
     if (!validWindow) {
       IOLog("PONG APFS: UUID candidate rejected uuid=%.36s bsd=%s ufs-window=%d depth=%u window=%s\n",
             uuid, name->getCStringNoCopy(), foundUfsWindow, depth,
-            systemOS ? "SystemOS" : "OS");
+            windowName);
       continue;
     }
 
@@ -377,15 +385,26 @@ extern "C" int native_pong_ufs_volume_device(const char *uuid, int systemOS,
   iterator->release();
   if (!accepted || matches != 1) {
     IOLog("PONG APFS: UUID lookup miss wanted=%.36s matches=%u accepted=%d window=%s\n",
-          uuid, matches, accepted, systemOS ? "SystemOS" : "OS");
-    if (systemOS) native_pong_log_ufs_window_media("PongSystemOSWindow");
+          uuid, matches, accepted, windowName);
+    if (kind) native_pong_log_ufs_window_media(windowKey);
     return 0;
   }
   *device = selected;
   strlcpy(path, selectedPath, pathSize);
   IOLog("PONG APFS: UUID %.36s bound to %s UFS window %s\n", uuid,
-        systemOS ? "SystemOS" : "OS", selectedPath);
+        windowName, selectedPath);
   return 1;
+}
+
+extern "C" int native_pong_ufs_data_volume_device(const char *uuid,dev_t *device,
+    char *path,size_t pathSize,uint64_t *bytes) {
+  if(!bytes)return 0;
+  *bytes=0;
+  if(!native_pong_ufs_volume_device(uuid,2,device,path,pathSize))return 0;
+  for(unsigned i=0;i<gRootWindowCount;++i)if(!strcmp(gRootWindows[i].name,"Data")) {
+    *bytes=gRootWindows[i].size;return 1;
+  }
+  return 0;
 }
 
 bool PongUfsBlock::init(OSDictionary *properties, const RootDiskWindow &selected) {
@@ -414,6 +433,7 @@ bool PongUfsBlock::start(IOService *provider) {
   setProperty("PongUfsWindow", true);
   setProperty("PongRootWindow", !strcmp(window.name, "OS"));
   setProperty("PongSystemOSWindow", !strcmp(window.name, "SystemOS"));
+  setProperty("PongDataWindow", !strcmp(window.name, "Data"));
   setProperty("Physical Interconnect", "UFS");
   online = true; registerService();
   char detail[96];
@@ -521,13 +541,16 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   static const struct { const char *name, *product, *signature; unsigned offset; } wanted[] = {
     {"OS", "iOS 16 OS root", "EFI PART", 512},
     {"SystemOS", "iOS 16 SystemOS", "NXSB", 32},
+#if XNU_PONG_UFS_DATA
+    {"Data", "iOS 16 persistent Data", "EFI PART", 512},
+#endif
   };
   gRootWindowCount = 0;
   for (const auto &item : wanted) {
     bool found = false;
     for (uint32_t index = 0; index < layout.windows; ++index) {
       if (strcmp(layout.window[index].name, item.name)) continue;
-      if (gRootWindowCount >= 2) return transportFailure("too many SHNGROOT disks");
+      if (gRootWindowCount >= 3) return transportFailure("too many SHNGROOT disks");
       gRootWindows[gRootWindowCount++] = {item.name, item.product, item.signature, item.offset,
         layout.userdataFirst * 4096ULL + layout.window[index].offset, layout.window[index].size};
       found = true;

@@ -200,6 +200,21 @@ IOReturn NativeAdrenoRing::submit(const uint32_t *words,size_t word_count,uint32
 {
     return submitWords(words,word_count,fence,false);
 }
+IOReturn NativeAdrenoRing::submitBootstrap(const uint32_t *words,size_t word_count,uint32_t *writePointer)
+{
+    if(!writePointer)return kIOReturnBadArgument;*writePointer=0;
+    if(!attached_ || poisoned_ || seqno_ || submissions_)return kIOReturnNotReady;
+    const uint32_t size_words=(uint32_t)(ring_bytes_/4),mask=size_words-1;
+    if(!words || !word_count || word_count>size_words-8)return kIOReturnBadArgument;
+    uint32_t rptr=0;IOReturn status=readRptr(&rptr);
+    if(status)return status;
+    if(rptr!=next_)return kIOReturnBusy;
+    for(size_t i=0;i<word_count;++i)ring_[(next_+i)&mask]=words[i];
+    const uint32_t end=(next_+(uint32_t)word_count)&mask;
+    if(cache_.publish(cache_.cookie,ring_,ring_bytes_) || io_.barrier(io_.cookie) ||
+       io_.write32(io_.cookie,RingWptr,end))return poison();
+    next_=end;*writePointer=end;return kIOReturnSuccess;
+}
 IOReturn NativeAdrenoRing::submitFramed(const uint32_t *words,size_t word_count,uint32_t *fence)
 {
     return submitWords(words,word_count,fence,true);

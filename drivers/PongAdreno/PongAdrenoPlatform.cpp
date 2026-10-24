@@ -42,7 +42,7 @@ static unsigned parents_ready,attempted;
 static void record(const char *phase,unsigned result,uint64_t a=0,uint64_t b=0)
 {
     char text[240];int n=snprintf(text,sizeof(text),
-        "PONG ADRENO v98: %s result=%u a=0x%llx b=0x%llx\n",phase,result,a,b);
+        "PONG ADRENO: %s result=%u a=0x%llx b=0x%llx\n",phase,result,a,b);
     if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n<(int)sizeof(text)?n:(int)sizeof(text)-1);}
 }
 static bool map(Mapping &m,uint64_t physical,size_t bytes)
@@ -257,7 +257,7 @@ static bool start_smmu()
     // The old context has no other live stream and its sole master is reset.
     wr(m,bank_offset,0);if(rd(m,bank_offset)!=0)return false;
     wr(m,bank_offset+0x618,0);wr(m,bank_offset+0x7f0,0);
-    if(!poll(m,bank_offset+0x7f4,1,0,2000)||rd(m,bank_offset+0x58))return false;
+    if(!poll(m,bank_offset+0x7f4,1,0,2000)||(rd(m,bank_offset+0x58)&0xc00001feu))return false;
     wr(m,bank_offset+4,0x32b); // Pong qcom,actlr mask0/0x7ff from actual DT.
     if(rd(m,bank_offset+4)!=0x32b)return false;
     uint32_t scr=(rd(m,0)&~13u)|0x402u|(ex?8u:0u);wr(m,0,scr);
@@ -349,6 +349,9 @@ static void run(void *,wait_result_t)
     PongClockResult cr={};auto cs=PongAdrenoEnableCxClocks(&clock_ops,&clocks,&cr);
     record("CX clocks",cs,(uint64_t(cr.offset)<<32)|cr.value,cr.phase);
     if(cs)return;
+    record("Cape GPU PLL configuration",0,
+        (uint64_t(rd(windows[PongGpuClock],0x10))<<32)|rd(windows[PongGpuClock],0x1010),
+        (uint64_t(rd(windows[PongGpuClock],0))<<32)|rd(windows[PongGpuClock],0x1000));
     for(unsigned i=0;i<PongGpuWindowCount;i++)if(i!=PongGpuClock &&
         !map(windows[i],PongAdrenoWindows[i].physical,PongAdrenoWindows[i].bytes))
         {record("SKIP GPU window map",1,i);return;}
@@ -372,6 +375,9 @@ static void run(void *,wait_result_t)
     if(ps)return;
     auto cp_status=PongAdrenoCpStart(&gmu);
     record("CP/user-client startup",cp_status,gr.core_version,gr.hfi_version);
+    if(cp_status)record("GX clock state after CP failure",rd(windows[PongGpuClock],0x90a8),
+        (uint64_t(rd(windows[PongGpuClock],0))<<32)|rd(windows[PongGpuClock],0x1000),
+        (uint64_t(rd(windows[PongGpuClock],4))<<32)|rd(windows[PongGpuClock],0x1004));
 }
 static void worker(void *parameter,wait_result_t result)
 {

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoUserClient.h"
 extern "C" volatile uint32_t native_adreno_trace_stage;
-/* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
+/* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); Pong may select write-combined BOs with pong_gpu_wc. */
 extern "C" {volatile uint32_t native_adreno_wc_enabled=1;}
 /* BoImport record: [0] calls, [1] refused, [2..5] last refusal (status, stage, bytes, address), [6..9] first refusal. Stages 1..3 are this file's
  * checks, 10..19 NativeAdrenoMemory::importTask's. */
@@ -31,7 +31,7 @@ static void noteImport(IOReturn status,uint32_t stage,uint64_t bytes,uint64_t ad
 }
 #include <IOKit/IOLib.h>
 #include <string.h>
-extern "C" {volatile uint32_t native_adreno_window_overflow[4][3];}   /* {count, last size KiB, last end MiB} per client window */
+extern "C" {volatile uint32_t native_adreno_window_overflow[NativeAdrenoMaxClients][3];}   /* {count, last size KiB, last end MiB} per client window */
 NativeAdrenoUserClient::Entry *NativeAdrenoUserClient::find(uint64_t handle)
 {
     if(handle)for(size_t i=0;i<entry_count_;++i)if(entries_[i].used && entries_[i].handle==handle)return &entries_[i];
@@ -144,13 +144,13 @@ IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
     params->flags=NativeAdrenoParamsHostImport;params->max_bo_bytes=UINT64_C(1)<<NativeAdrenoAbiMaxBoBytesShift;
     return kIOReturnSuccess;
 }
-/* Per client slot (4, the kernel's own client last): [0] live objects now, [1] their peak, [2] refused BoAllocs, [3] last refusal status,
+/* Per client slot (kernel's own client last): [0] live objects now, [1] their peak, [2] refused BoAllocs, [3] last refusal status,
  * [4] bytes of the last refused request, [5] the window's highest mapped end in MiB above its start. Turnip turns any refusal into
  * VK_ERROR_OUT_OF_DEVICE_MEMORY, which its command streams do not check (int-237: backboardd wrote through a NULL stream pointer). */
-extern "C" {volatile uint32_t native_adreno_client_stats[5][6];}
+extern "C" {volatile uint32_t native_adreno_client_stats[NativeAdrenoMaxClients+1][6];}
 static volatile uint32_t *clientStats(uint32_t queue_base,uint64_t window_bytes) {
-    const uint32_t slot=window_bytes?queue_base/NativeAdrenoAbiMaxQueues:4;
-    return native_adreno_client_stats[slot<4?slot:4];
+    const uint32_t slot=window_bytes?queue_base/NativeAdrenoAbiMaxQueues:NativeAdrenoMaxClients;
+    return native_adreno_client_stats[slot<NativeAdrenoMaxClients?slot:NativeAdrenoMaxClients];
 }
 static void noteLive(uint32_t queue_base,uint64_t window_bytes,size_t live) {
     volatile uint32_t *stats=clientStats(queue_base,window_bytes);
@@ -178,17 +178,13 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
         return kIOReturnBadArgument;
     Entry *entry=free();
     if(!entry)return kIOReturnNoResources;
-    /* A scattered allocation costs one VM span per physical page (int-030: 16 MiB came back as 4096 single-page spans, the
-     * whole span table), so larger objects try one contiguous run first and fall back to scattered pages unless the
-     * caller demanded contiguity. */
-    IOReturn status=kIOReturnUnsupported;
-    const bool prefer_contiguous=request->contiguous==0 && request->bytes>=NativeAdrenoClientContiguousFirstBytes;
-    if(prefer_contiguous) {
-        status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes,true);
-        if(status && !entry->memory.quarantined() && entry->memory.release()==kIOReturnSuccess)status=kIOReturnUnsupported;
-    }
-    if(status)
-        status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes,true);
+    /* The reserved BO pool is already contiguous. Once it is full, ordinary
+     * Turnip BOs use scattered pages behind the GPU's contiguous IOVA. A
+     * speculative 64MiB physical allocation repeatedly compacted/scanned the
+     * whole VM during desktop transitions. Only an explicit ABI request may
+     * require physically contiguous backing. */
+    IOReturn status=entry->memory.allocate((size_t)request->bytes,output_bits_,
+        request->contiguous!=0,(size_t)request->bytes,true);
     /* User BOs are write-combined for the CPU, as the GPU maps them non-cacheable: no per-submission cache maintenance.
      * int-147 kept them cacheable under IO coherence and mapped the GPU side write-back: the first Turnip IB executed zeros and the GPU hung
      * (the kernel's cacheable alias read zeros past the first line too). Turnip maps every BO asking kIOMapWriteCombineCache, the user's
@@ -254,7 +250,7 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
     if(window_bytes_ && (request->iova<window_start_ || end<request->iova || end>window_start_+window_bytes_)) {
         /* Per window: how often a mapping fell outside it, and the last one's size and end (MiB), for the boot log's [gpu windows] row. */
         const uint32_t slot=queue_base_/NativeAdrenoAbiMaxQueues;
-        if(slot<4) {
+        if(slot<NativeAdrenoMaxClients) {
             native_adreno_window_overflow[slot][0]=native_adreno_window_overflow[slot][0]+1;
             native_adreno_window_overflow[slot][1]=uint32_t(entry->memory.bytes()>>10);
             native_adreno_window_overflow[slot][2]=uint32_t(end>>20);

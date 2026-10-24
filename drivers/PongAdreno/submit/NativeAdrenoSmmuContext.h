@@ -30,8 +30,8 @@ public:
     ~NativeAdrenoSmmuContext()=default;
     NativeAdrenoSmmuContext(const NativeAdrenoSmmuContext &)=delete;
     NativeAdrenoSmmuContext &operator=(const NativeAdrenoSmmuContext &)=delete;
-    /* A 2 GiB lower aperture, the GMU's, is 524288 leaves. */
-    enum : size_t {MaxLeaves=size_t(1)<<19};
+    /* Full 32-bit GPU aperture; the GMU still requests its original 2 GiB. */
+    enum : size_t {MaxLeaves=size_t(1)<<20};
     /* iova/bytes describe the aperture in the chosen region; the pool must be contiguous. */
     /* output_bits: the context's output size, at most the SMMU's ID2.OAS (Linux uses OAS for stage 1). */
     IOReturn prepare(NativeAdrenoMemory *tables,unsigned upper,uint64_t iova,size_t bytes,

@@ -1,0 +1,92 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -193,6 +193,7 @@
+ }
+ 
+ static VkResult darwin_collect_retired(struct tu_device *dev);
++static VkResult darwin_reclaim_for_allocation(struct tu_device *dev);
+ 
+ static VkResult
+ dw_wait_fence_locked_free(struct tu_device *dev, uint32_t fence, uint64_t abs_timeout_ns)
+@@ -226,7 +227,7 @@
+ /* ---- GPU address space: the client picks addresses out of [va_start, va_start + va_size). ---- */
+ 
+ static VkResult
+-darwin_allocate_iova(struct tu_device *dev, uint64_t size, uint64_t client_iova,
++darwin_allocate_iova_once(struct tu_device *dev, uint64_t size, uint64_t client_iova,
+                      enum tu_bo_alloc_flags flags, uint64_t *iova)
+ {
+    *iova = 0;
+@@ -249,6 +250,24 @@
+    }
+    mtx_unlock(&dev->vma_mutex);
+    return *iova ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++}
++
++static VkResult
++darwin_allocate_iova(struct tu_device *dev, uint64_t size, uint64_t client_iova,
++                     enum tu_bo_alloc_flags flags, uint64_t *iova)
++{
++   VkResult result = darwin_allocate_iova_once(dev, size, client_iova, flags, iova);
++   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY)
++      return result;
++   /* A preview burst can fill the VA heap while deferred BOs are still waiting
++    * for real fences. Reclaim that finite snapshot before refusing allocation;
++    * do not wait for unrelated future submissions or reuse busy storage. */
++   result = darwin_reclaim_for_allocation(dev);
++   if (result == VK_TIMEOUT)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   if (result != VK_SUCCESS)
++      return result;
++   return darwin_allocate_iova_once(dev, size, client_iova, flags, iova);
+ }
+ 
+ static void
+@@ -321,6 +340,31 @@
+ }
+ 
+ static VkResult
++darwin_reclaim_for_allocation(struct tu_device *dev)
++{
++   struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
++   uint32_t fence = 0;
++   pthread_mutex_lock(&retire->lock);
++   VkResult result = darwin_reap_locked(dev, retire);
++   if (result == VK_SUCCESS && retire->count) {
++      const unsigned last = (retire->head + retire->count - 1) % DARWIN_RETIRED_BOS;
++      fence = retire->entries[last].fence;
++      ++retire->pressure_waits;
++   }
++   pthread_mutex_unlock(&retire->lock);
++   if (result != VK_SUCCESS)
++      return result;
++   /* No driver/retirement/VMA lock is held across the wait. A timeout preserves
++    * every allocation and remains an allocation failure, never a fake fence. */
++   if (fence) {
++      result = dw_wait_fence_raw(dev, fence, os_time_get_nano() + 250000000ull);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++   return darwin_collect_retired(dev);
++}
++
++static VkResult
+ darwin_map_failure(struct tu_device *dev, uint64_t handle, uint64_t iova,
+                    uint64_t size, kern_return_t map_error)
+ {
+@@ -365,6 +409,15 @@
+    NativeAdrenoAbiBoAlloc alloc = {.bytes = size, .align_log2 = 12, .contiguous = 0};
+    NativeAdrenoAbiBoAllocReply reply = {};
+    kern_return_t kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
++   if (kr == kIOReturnNoMemory || kr == kIOReturnNoResources || kr == kIOReturnNoSpace) {
++      VkResult reclaimed = darwin_reclaim_for_allocation(dev);
++      if (reclaimed == VK_SUCCESS)
++         kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
++      else if (reclaimed != VK_TIMEOUT) {
++         darwin_free_iova(dev, iova, size);
++         return reclaimed;
++      }
++   }
+    if (kr != KERN_SUCCESS) {
+       darwin_free_iova(dev, iova, size);
+       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "BoAlloc failed: 0x%x", kr);

@@ -2,17 +2,31 @@
 
 [简体中文](README.md) | **English**
 
-UniXNU device support for Nothing Phone (2), codename **Pong**, Qualcomm **SM8475**. This repository contains the device configuration, XNU patches, board drivers, userland adaptation, and build scripts for **iOS 16.6.1 (20G81)**.
+Device support for UniXNU on the Nothing Phone (2) (Pong, Qualcomm SM8475), targeting iOS 16.6.1 (20G81). This repository contains the Pong device tree, XNU patches, UFS/APFS, display and touch drivers, Metal/Adreno integration, and build scripts.
 
-The current source reflects the device state that reaches the iOS home screen. Display and touch work; Adreno 730 hardware acceleration and Metal integration are not yet confirmed.
+## Current status
 
-- Firmware: [uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
-- UniXNU core: [UniXNU](https://github.com/UniXNU/UniXNU)
-- Documentation: [UniXNU documentation](https://unixnu.com)
+- XNU has handed off to iOS through DarwinBoot on Pong; a previous build reached the iOS home screen.
+- Native UFS boot, APFS volume reads, and a writable Data window have device-side implementations. The Data image is built locally.
+- Pong display, touch, and physical keys have device-specific support.
+- Device logs show Adreno 730 command submission, Metal device discovery, and display scanout. The wallpaper picker still has a precompressed-image compatibility issue; the visual result of the latest decode fallback is awaiting device confirmation.
+- Consult local REC logs for the result of each boot and current issues. Device logs, photos, and build artifacts are not part of this repository.
+
+## Target hardware and system
+
+| Item | Configuration |
+| --- | --- |
+| Device | Nothing Phone (2) |
+| Codename / SoC | Pong / SM8475 |
+| GPU | Qualcomm Adreno 730 |
+| iOS restore | iPadOS 16.6.1 / 20G81 components |
+| XNU / Darwin | 8796.141.3 / 22.6.0 |
+| Page size | 4 KiB |
+| Data | APFS on a UFS window |
 
 ## Build
 
-Clone the UniXNU core, this device repository, and the UEFI repository as sibling directories. Cloning this repository requires `--recurse-submodules` so the NativeMetal submodule is included:
+Clone UniXNU, this device repository, and UEFI as sibling directories. Recursively clone NativeMetal submodules:
 
 ```sh
 git clone --recurse-submodules https://github.com/UniXNU/UniXNU
@@ -20,46 +34,24 @@ git clone --recurse-submodules https://github.com/Chengdong-Yu/UniXNU-pong
 git clone --recurse-submodules https://github.com/Chengdong-Yu/uefi-pong
 ```
 
-Run the following commands from the UniXNU core directory:
+Run defconfig, dependency fetching, and the device firmware build from the UniXNU core directory. Restore inputs for iOS 16 are read by the scripts specified in `board.toml`. Build outputs and Apple private components remain in local ignored directories and are not committed.
 
-```sh
-./unixnu defconfig pong_defconfig -D ../UniXNU-pong
-./unixnu fetch
-python3 ../UniXNU-pong/scripts/fetch-ios16-assets.py
-./unixnu build kernel
-./unixnu build package
-./unixnu build firmware --uefi ../uefi-pong
-```
+The Darwin/macOS kernel build entry point is `scripts/build-ios16-pong-macos.py`; the prelinked boot image entry point is `scripts/build-pong-prelinked-boot.py`. See each script's `--help` and `board.toml` for command arguments, Xcode paths, and output locations. The optional `scripts/build-userdata.py` packs locally prepared OS and SystemOS files into SHNGROOT windows without a separate checksum pass or output readback.
 
-The asset fetcher reads the IPSW BuildManifest according to the iOS 16.6.1 / 20G81 settings in `board.toml`, then uses HTTP Range requests to extract only the kernel, device tree, trust caches, OS, and SystemOS (Cryptex1) components needed for the build. Each member is checked against the ZIP CRC-32 in the IPSW central directory as it is written. It does not download a complete IPSW archive. Extracted components are saved under UniXNU's `out/ipsw/20G81` directory.
+The device tree uses the `drivers/DarwinBoot22` package path. Restore preparation extracts components declared in its manifest without downloading or committing a complete IPSW. Image builds skip additional full-image digest and readback passes.
 
-After fetching the components, build the Pong userdata root image separately:
+## Layout
 
-```sh
-python3 ../UniXNU-pong/scripts/build-userdata.py
-```
+- `drivers/`: Pong UFS, APFS, touch, keys, CPU, display, Adreno, and Metal integration for SM8475.
+- `patches/xnu/`: XNU patches for iOS 16.6.1 / Darwin 22.
+- `configs/`: Pong kernel configuration.
+- `scripts/`: restore-component, kernel, boot image, and userdata build scripts.
+- `docs/`: development documents such as the local log collection plan.
 
-The image is written locally under `UniXNU-pong/out/`. The builder generates the window and header digest fields required by the SHNGROOT format during a single streaming copy. It does not perform an extra image verification or readback pass. Apple restore files, generated userdata images, the system-volume authentication data, and GPU firmware are not included in this repository. Required system components are extracted from locally fetched restore inputs; GPU firmware is supplied as a local input.
+## Local-only inputs
 
-The generated JSON includes the report-only field `write_target` (`/dev/block/sda13`). It names the Pong userdata partition for reference and must not be flashed blindly.
-
-The restore identity selects iPad7,1 / J120 / 20G81 components, while the board drivers and boot configuration target Nothing Phone (2), Pong / SM8475 hardware.
-
-## Device support
-
-| Feature | State | Notes |
-| --- | --- | --- |
-| iOS 16.6.1 boot | ✅ | Reaches the iOS home screen |
-| Display | ✅ | System UI is visible |
-| Touch | ✅ | Pong touch path works |
-| Physical buttons | ✅ | Pong power and volume key paths are included |
-| UFS / APFS | ⚠️ | Native UFS and APFS boot paths are connected; some mount capabilities remain in progress |
-| Writable Data | ⚠️ | A local userdata root image builder is included; the image is generated locally |
-| Adreno 730 / Metal | ⚠️ | Driver and Metal adaptation sources are included; hardware acceleration is not confirmed |
-| Wi-Fi, Bluetooth, camera, audio, sensors | ❌ | Device support is not yet implemented |
-
-✅ available, ⚠️ partial or unconfirmed, ❌ unavailable.
+Apple IPSWs, system volumes and Cryptexes, trust caches, private firmware, userdata images, kernel images, boot logs, and device photos are local inputs or outputs. Prepare required components with the scripts; do not commit these files.
 
 ## License
 
-Device-level code is licensed under BSD-2-Clause-Patent. Imported components retain their SPDX identifiers and original licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Device-level code follows the repository license and per-file SPDX notices. Imported component license details are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
