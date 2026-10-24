@@ -51,7 +51,7 @@ python3 ../UniXNU-pong/scripts/build-userdata.py
 | 屏幕显示 | ✅ | 系统界面可显示 |
 | 触摸 | ✅ | Pong 触摸路径可用 |
 | 实体按键 | ✅ | 保留 Pong 电源键和音量键路径 |
-| UFS / APFS | ⚠️ | 原生 UFS 和 APFS 启动路径已接通，Data 在 UFS 上正常挂载，部分挂载能力仍在完善 |
+| UFS / APFS | ✅ | 原生 UFS 和 APFS 启动路径已接通，Data 在 UFS 上正常挂载，部分挂载能力仍在完善 |
 | 可写 Data | ✅ | Data 在 UFS 上正常挂载 |
 | Adreno 730 / Metal | ✅ | 硬件加速可用 |
 | Wi-Fi、蓝牙、相机、音频、传感器 | ❌ | 尚未完成设备适配 |
