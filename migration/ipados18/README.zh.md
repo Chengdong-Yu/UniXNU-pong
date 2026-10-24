@@ -1,8 +1,8 @@
 # Pong → iPadOS 18 迁移准备
 
-本地分支：`ipados18`。独立工作目录：`/Users/desktop/Downloads/UniXNU-pong-ipados18`。
+本地分支：`ipados18`。工作目录：`/Volumes/PongDev/source/UniXNU-pong-ipados18`；Downloads 下的同名路径是指向该目录的快捷链接。
 
-本分支保存当前 Pong iOS 16.6.1 / 20G81 源码，供后续迁移使用。当前状态为**准备阶段**，尚未生成 iPadOS 18 内核或启动镜像。
+本分支保存 Pong iOS 16.6.1 / 20G81 适配基线，供后续迁移使用。当前状态为**准备阶段**，尚未生成 Pong 的 iPadOS 18 内核或启动镜像。
 
 ## 基线
 
@@ -16,13 +16,15 @@
 
 ## 目标固件
 
-“iPad7”暂按**第七代 iPad**理解，具体 ProductType、Wi-Fi / 蜂窝版本、18.x 版本和 BuildManifest 尚待选择。Apple 的 [iPadOS 18 兼容列表](https://support.apple.com/en-gb/104986)包含第七代 iPad。
+目标是**第七代 iPad（2019）**。iPadOS 18.7.10（22H374）同一份 restore 支持 Wi-Fi 型号 `iPad7,11`（`j171ap`）及蜂窝型号 `iPad7,12`（`j172ap`）；芯片 ID 为 `0x8010`，板号分别为 `0x1c` 和 `0x1e`。固件、BuildManifest 和设备组件清单保存在忽略目录 `apple/ipados18-22H374` 对应的本机输入目录。
 
-旧 `board.toml` 的 `iPad7,1 / j120ap` 是 iOS 16 基线的组件来源，不代表第七代 iPad。新目标元数据单独放在 [target.toml](target.toml)，未确定的值留空。现有 `board.toml`、`feeds.toml` 和构建脚本仍对应 iOS 16，不能据此生成 iPadOS 18 镜像。
+原始 `kernelcache.release.ipad7c` 已从 BuildManifest 对应的目标 restore identity 提取。内核字符串为 `Darwin Kernel Version 24.6.0 ... xnu-11417.140.69.706.66~1/RELEASE_ARM64_T8010`，因此公开 XNU 源码基准选择 `xnu-11417.140.69`，不是当前下载的 GitHub `main`。该匹配源码位于忽略目录 `refer/ipados18/xnu-11417.140.69`；用户已下载的 xnu、libplatform、libdispatch 和 AvailabilityVersions 源码也保存在该目录供比对。restore identity 组件路径和大小见 [Wi‑Fi 型号清单](baseline/22H374-j171ap-components.json) 与 [蜂窝型号清单](baseline/22H374-j172ap-components.json)。
+
+旧 `board.toml` 的 `iPad7,1 / j120ap` 是 iOS 16 基线的组件来源，不代表第七代 iPad。新目标元数据单独放在 [target.toml](target.toml)。现有 `board.toml`、`feeds.toml` 和构建脚本仍对应 iOS 16，不能据此生成 iPadOS 18 镜像。
 
 ## 后续适配顺序
 
-1. 选择确切的第七代 iPad iPadOS 18 restore 输入，从同一个 BuildManifest 记录 OS、Cryptex、DeviceTree、内核及相关组件；选择与该版本匹配的公开 XNU 源码。
+1. 已选定 iPad7,11 / iPad7,12 的 18.7.10（22H374）restore；内核及 DeviceTree、Cryptex、TrustCache、Multitouch 和启动固件等组件路径记录在本机 BuildManifest 清单中。
 2. 建立独立的 Darwin 24 构建配置、缓存和输出目录，再逐项移植现有 XNU 补丁。检查 arm64 非 arm64e、4 KiB / Apple 子页 ABI、线程状态、启动参数和驱动链接接口。
 3. 适配 APFS 根卷、Cryptex / dyld 缓存、可写 Data、launchd 及启动服务。重新选择卷 UUID、设备身份和用户态挂载路径。
 4. 重做用户态修补中绑定 20G81 的偏移、符号、对象大小及服务策略；尤其检查 `ui_compat.c`、Settings、SpringBoard、keybag 和 sandbox 相关逻辑。
@@ -31,4 +33,4 @@
 
 ## 输入与输出
 
-固件、IPSW、Apple 私有二进制、构建缓存和生成镜像继续作为本机输入或输出，不纳入源代码提交。当前只建立本地分支；源码记录本身不证明新系统已兼容或可启动。
+完整 IPSW 和 Apple 私有组件只保存在本机忽略目录，绝不提交到 Git。当前只建立本地迁移输入；源码记录本身不证明新系统已兼容或可启动。

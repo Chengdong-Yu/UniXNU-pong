@@ -1,0 +1,157 @@
+{
+  "version": "18.7.10",
+  "build": "22H374",
+  "product_types": [
+    "iPad7,11",
+    "iPad7,12"
+  ],
+  "device_class": "j171ap",
+  "board_id": "0x1C",
+  "chip_id": "0x8010",
+  "content_encoding": "aea",
+  "xnu_release": "11417.140.69.706.66~1",
+  "darwin": "24.6.0",
+  "xnu_source_tag": "xnu-11417.140.69",
+  "components": {
+    "AOP": {
+      "path": "Firmware/AOP/aopfw-ipad7caop.RELEASE.im4p",
+      "bytes": 604053
+    },
+    "AVE": {
+      "path": "Firmware/ave/AppleAVE2FW_H9.im4p",
+      "bytes": 1193549
+    },
+    "Ap,SystemVolumeCanonicalMetadata": {
+      "path": "Firmware/094-32804-038.dmg.aea.mtree",
+      "bytes": 27503124
+    },
+    "AppleLogo": {
+      "path": "Firmware/all_flash/applelogo@2160~ipad.im4p",
+      "bytes": 21587
+    },
+    "BatteryCharging0": {
+      "path": "Firmware/all_flash/batterycharging0@2160~ipad.im4p",
+      "bytes": 9450
+    },
+    "BatteryCharging1": {
+      "path": "Firmware/all_flash/batterycharging1@2160~ipad.im4p",
+      "bytes": 34594
+    },
+    "BatteryFull": {
+      "path": "Firmware/all_flash/batteryfull@2160~ipad.im4p",
+      "bytes": 98966
+    },
+    "BatteryLow0": {
+      "path": "Firmware/all_flash/batterylow0@2160~ipad.im4p",
+      "bytes": 119708
+    },
+    "BatteryLow1": {
+      "path": "Firmware/all_flash/batterylow1@2160~ipad.im4p",
+      "bytes": 3827
+    },
+    "BatteryPlugin": {
+      "path": "Firmware/all_flash/glyphplugin@2160~ipad-lightning.im4p",
+      "bytes": 33046
+    },
+    "Cryptex1,AppOS": {
+      "path": "094-32850-038.dmg",
+      "bytes": 16777216
+    },
+    "Cryptex1,AppTrustCache": {
+      "path": "Firmware/094-32850-038.dmg.trustcache",
+      "bytes": 767
+    },
+    "Cryptex1,AppVolume": {
+      "path": "Firmware/094-32850-038.dmg.root_hash",
+      "bytes": 229
+    },
+    "Cryptex1,SystemOS": {
+      "path": "094-33089-038.dmg.aea",
+      "bytes": 1610612736
+    },
+    "Cryptex1,SystemTrustCache": {
+      "path": "Firmware/094-33089-038.dmg.aea.trustcache",
+      "bytes": 2183
+    },
+    "Cryptex1,SystemVolume": {
+      "path": "Firmware/094-33089-038.dmg.aea.root_hash",
+      "bytes": 229
+    },
+    "DeviceTree": {
+      "path": "Firmware/all_flash/DeviceTree.j171ap.im4p",
+      "bytes": 33890
+    },
+    "KernelCache": {
+      "path": "kernelcache.release.ipad7c",
+      "bytes": 17218385
+    },
+    "LLB": {
+      "path": "Firmware/all_flash/LLB.ipad7c.RELEASE.im4p",
+      "bytes": 580320
+    },
+    "Multitouch": {
+      "path": "Firmware/J171_Multitouch.im4p",
+      "bytes": 2205551
+    },
+    "OS": {
+      "path": "094-32804-038.dmg.aea",
+      "bytes": 5905580032
+    },
+    "RecoveryMode": {
+      "path": "Firmware/all_flash/recoverymode@2160~ipad-lightning.im4p",
+      "bytes": 1938359
+    },
+    "RestoreDeviceTree": {
+      "path": "Firmware/all_flash/DeviceTree.j171ap.im4p",
+      "bytes": 33890
+    },
+    "RestoreKernelCache": {
+      "path": "kernelcache.release.ipad7c",
+      "bytes": 17218385
+    },
+    "RestoreLogo": {
+      "path": "Firmware/all_flash/applelogo@2160~ipad.im4p",
+      "bytes": 21587
+    },
+    "RestoreRamDisk": {
+      "path": "094-32014-038.dmg",
+      "bytes": 157286427
+    },
+    "RestoreSEP": {
+      "path": "Firmware/all_flash/sep-firmware.j171.RELEASE.im4p",
+      "bytes": 1432190
+    },
+    "RestoreTrustCache": {
+      "path": "Firmware/094-32014-038.dmg.trustcache",
+      "bytes": 7285
+    },
+    "SE,UpdatePayload": {
+      "path": "Firmware/SE/Stockholm5.RELEASE.sefw",
+      "bytes": 22019624
+    },
+    "SEP": {
+      "path": "Firmware/all_flash/sep-firmware.j171.RELEASE.im4p",
+      "bytes": 1432190
+    },
+    "StaticTrustCache": {
+      "path": "Firmware/094-32804-038.dmg.aea.trustcache",
+      "bytes": 67969
+    },
+    "SystemVolume": {
+      "path": "Firmware/094-32804-038.dmg.aea.root_hash",
+      "bytes": 229
+    },
+    "iBEC": {
+      "path": "Firmware/dfu/iBEC.ipad7c.RELEASE.im4p",
+      "bytes": 580320
+    },
+    "iBSS": {
+      "path": "Firmware/dfu/iBSS.ipad7c.RELEASE.im4p",
+      "bytes": 580320
+    },
+    "iBoot": {
+      "path": "Firmware/all_flash/iBoot.ipad7c.RELEASE.im4p",
+      "bytes": 580320
+    }
+  }
+}

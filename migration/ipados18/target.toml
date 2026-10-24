@@ -3,12 +3,24 @@
 os = "iPadOS"
 major_version = 18
 device_family = "iPad (7th generation)"
-product_type = ""
-device_class = ""
-version = ""
-build = ""
-ipsw_url = ""
+product_type = "iPad7,11"
+device_class = "j171ap"
+supported_product_types = ["iPad7,11", "iPad7,12"]
+version = "18.7.10"
+build = "22H374"
+ipsw_url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
 stage = "preparation"
+chip_id = 0x8010
+board_id = 0x1c
+content_encoding = "aea"
+inputs = "apple/ipados18-22H374"
+source_inputs = "refer/ipados18"
+kernelcache = "kernelcache.release.ipad7c"
+kernel_release = "RELEASE_ARM64_T8010"
+xnu_source_tag = "xnu-11417.140.69"
+device_tree = "Firmware/all_flash/DeviceTree.j171ap.im4p"
+component_manifest = "migration/ipados18/baseline/22H374-j171ap-components.json"
+download_state = "download-progress.json"
 
 [hardware]
 board = "pong"

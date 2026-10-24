@@ -37,3 +37,4 @@ __pycache__/
 *.kernelcache
 /BuildManifest.plist
 /Restore.plist
+.DS_Store
