@@ -844,7 +844,11 @@ jobs:
           from pathlib import Path
           header = Path('out/ipados18/ufs/shngroot-ipados18.bin').read_bytes()
           record = json.loads(Path('userdata-decision.json').read_text())
-          record['status'] = 'built'
+          # Not 'built': the directory exists, the image comes from the next step
+          # and overwrites this status. A run with userdata_image off ends here.
+          record['status'] = 'layout'
+          record['reason'] = ('SHNGROOT directory and ufs-layout.json written from the prepared '
+                              '22H374 userland; the whole-disk image is a separate step')
           record['header'] = 'out/ipados18/ufs/shngroot-ipados18.bin'
           record['header_bytes'] = len(header)
           record['magic'] = header[:8].decode('ascii', 'replace')
