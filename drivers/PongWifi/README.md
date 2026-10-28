@@ -1,8 +1,6 @@
 # Pong QCA6490 Wi-Fi
 
-Pong 的 SM8475 / QCA6490 使用 PCIe0、MHI 和 ath11k。不是 Sheng 的
-WCN7850 / ath12k。接口和网络集成参考 UniXNU 的 [Wi-Fi 文档](https://unixnu.com/zh/porting/network)，
-新增实现不使用 HackiOS。
+Pong 的 SM8475 / QCA6490 使用 PCIe0、MHI 和 ath11k。(https://unixnu.com/zh/porting/network)
 
 ## 接入
 
