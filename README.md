@@ -45,11 +45,60 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 ### 手动触发
 
 1. 打开仓库的 **Actions** 页面，左侧选 **Pong macOS build**。
-2. 点 **Run workflow**，在下拉里选要编的分支，确认。
-3. 等名字里带 `CI kernel` 的那个 job 跑完。旁边的 `disk probe` job 名字里就写着 not a kernel build，它只量磁盘。
-4. 在 run 页面底部 **Artifacts** 下载 `pong-macos-products`。
+2. 点 **Run workflow**，选要编的分支。
+3. 想编出货配置就把固件压缩包的下载地址填进 `firmware_url`（见下一节）；留空就只编 CI 配置。
+4. 等名字里带 `CI kernel` 的那个 job 跑完。旁边的 `disk probe` job 名字里就写着 not a kernel build，它只量磁盘。
+5. 在 run 页面底部 **Artifacts** 下载 `pong-macos-products`。
 
-推送到任意分支也会自动触发（`on: push`）。并发组是 `pong-macos-${{ github.ref }}` 且 `cancel-in-progress: true`，同一个分支上新推送会**取消**还在跑的那一轮：想保住某次结果，就别在它跑完前再推同一个分支。
+推送到任意分支也会自动触发（`on: push`），但 push 事件没有输入框，所以只会走不含 Wi-Fi、背光和 GPU 的 CI 配置。要完整配置就手动触发一次。
+
+并发组是 `pong-macos-${{ github.ref }}` 且 `cancel-in-progress: true`，同一个分支上新推送会**取消**还在跑的那一轮：想保住某次结果，就别在它跑完前再推同一个分支。
+
+### 固件压缩包
+
+Wi-Fi、背光和 Adreno 730 这三块需要一个只在这台手机上的固件，公开仓库里不带。做法是你自己把固件打成一个压缩包放到 CI 能下载的地方（对象存储、私有 release、任何能给出 https 链接的位置），再把链接填进 `firmware_url`。
+
+压缩包可以是 `.zip`、`.tar.gz`、`.tgz` 或 `.tar`，解压后至少要有下面四组文件（多一层外壳目录没关系，比如从文件夹压缩出来的 zip）：
+
+```
+wifi/                 # 也可以叫 qca6490/，两者等价
+  amss.bin
+  amss20.bin
+  m3.bin
+  regdb.bin
+  bdwlan.e01          # 至少一个 bdwlan* 板级数据
+  ...
+audio/
+  tfa98xx.cnt
+adreno730/
+  gmu_gen70000.bin
+  a730_sqe.fw
+  a730_zap.mdt
+  a730_zap.b01
+  a730_zap.b02
+power/
+  adsp.mbn
+```
+
+`wifi/` 建议整目录放进去：构建器会把目录里每个文件都嵌进内核的固件包，`Data.msc` 这类文件也在其中。`adreno730/` 和 `audio/` 只认上面列的名字，多放的文件会被忽略。
+
+填了 `firmware_sha256` 就先核对整个压缩包的 sha256，对不上直接失败，一个字节都不解压。链接必须是 https。
+
+压缩包放在公开可读的位置（或对象存储的带签名临时链接）就不用配任何东西。如果它挂在私有 GitHub release 上，工作流会用 `Authorization: Bearer` 去取，所以要加一个 secret `PONG_FIRMWARE_ARCHIVE_TOKEN`，只给那个仓库的 `Contents: Read`；`firmware_url` 填 API 形式，比如
+`https://api.github.com/repos/<owner>/<repo>/releases/assets/<asset id>`，请求头带上 `Accept: application/octet-stream` 由 curl 自动跟随重定向完成。
+
+本地打包可以用仓库里的脚本，它按上面的结构生成 zip 并打印 sha256：
+
+```sh
+python3 scripts/pack-pong-firmware.py \
+  --wifi ../private-inputs/pong-wifi-firmware \
+  --audio ../private-inputs/pong-audio-inputs \
+  --adreno730 out/ipados18/firmware/adreno730 \
+  --adsp ../private-inputs/pong-power \
+  --output ../private-inputs/pong-firmware.zip
+```
+
+固件不要提交进仓库。工作流只在校验通过后才用这些文件，并把压缩包的 sha256 和解压出来的路径写进 `ci-manifest.json`。
 
 ### 产物
 
@@ -65,14 +114,17 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 
 `kernel-ci-log`（保留 1 天）是内核构建日志，失败时先看这里。
 
-### 固件：Path A 与 Path B
+### 本地构建仍然从手机提取
 
-工作流按 secrets 里有没有 `PONG_FIRMWARE_TOKEN` 分两条路：
+本机构建不需要压缩包，还是从手机取固件。Wi-Fi 部分有现成脚本，在 REC 里跑：
 
-- **有 token（Path B）**：用 `configs/pong_ipados18_defconfig`，Wi-Fi、背光、Adreno 730 全开。token 需要能读私有固件仓库，工作流按固定 commit `c1695a31` 检出 `wifi/`、`audio/`、`adreno730/`、`power/` 四个目录。
-- **没有 token（Path A）**：退回 `configs/pong_ipados18_ci_defconfig`，Wi-Fi、背光、Adreno 730 全部关闭。这条路能编出内核，但不是出货配置。
+```sh
+python3 scripts/prepare-pong-wifi.py --serial <serial> --out ../private-inputs
+```
 
-所以 fork 之后直接跑就是 Path A，不需要配任何 secret。要用完整配置，在 **Settings → Secrets and variables → Actions** 加一个 fine-grained token，只给固件仓库的 `Contents: Read` 权限。固件本身不要提交进仓库，工作流只读取。
+它只读挂载 `modem_a`、拉取 `image/qca6490` 整个目录到 `<out>/qca6490`，再核对 `amss.bin`、`amss20.bin`、`m3.bin`、`regdb.bin` 和至少一个 `bdwlan*` 都在。`adsp.mbn`、`tfa98xx.cnt` 和 Adreno 730 的五个文件同样从这台手机的 modem / vendor 分区取出。构建器认的位置是：Wi-Fi 用 `PONG_WIFI_FIRMWARE`（默认 `$PONG_INPUTS/pong-wifi-firmware`），背光用 `PONG_AUDIO_INPUTS`（默认 `$PONG_INPUTS/pong-audio-inputs`，里面放 `tfa98xx.cnt`），Adreno 用 `PONG_ADRENO_FIRMWARE`（缺省是本次 guest 的 `out/ipados18/firmware/adreno730`）。路径解析都在 `scripts/pong_paths.py`。
+
+两份输入可以共用：本地把文件摆好后，用 `scripts/pack-pong-firmware.py` 打成 zip 就能直接喂给 Actions，省得再单独准备一遍。
 
 ### 它不做的事
 
