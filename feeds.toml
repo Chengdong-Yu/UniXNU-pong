@@ -32,15 +32,16 @@ git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
 ref = "AvailabilityVersions-143.7"
 commit = "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f"
 
-# Local versioned SoC source; replace this URL after the shared repository is published.
+# SM8475 public source is pinned independently within this repository.
 [[source]]
 name = "sm8475"
 kind = "soc"
-git = "../UniXNU-sm8475-common"
-commit = "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21"
+git = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
+path = "migration/format2/soc-seed"
+commit = "f62243e56a30472deed9112631b2480ab461df3e"
 
 [[source]]
 name = "PongPlatform24"
 kind = "kit"
 git = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
-commit = "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a"
+commit = "f62243e56a30472deed9112631b2480ab461df3e"

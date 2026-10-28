@@ -13,4 +13,7 @@ commit = "934ff27e48ab7a6ee799442c5f19ebbb990567e8"
 commit = "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f"
 
 [source."sm8475"]
-commit = "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21"
+commit = "f62243e56a30472deed9112631b2480ab461df3e"
+
+[source."PongPlatform24"]
+commit = "f62243e56a30472deed9112631b2480ab461df3e"

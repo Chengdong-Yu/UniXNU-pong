@@ -41,7 +41,18 @@ def install(unixnu, soc):
     custom = tomllib.loads((overlay / 'components.toml').read_text())['component'][0]
     existing = next((x for x in components if x['id'] == custom['id']), None)
     if existing and existing != custom:
-        raise RuntimeError('Existing Pong component catalog entry differs; review it before replacing')
+        # A reviewed source pin advances with the published device source.
+        # Permit only that change; preserve any independent recipe edits.
+        if ({k:v for k,v in existing.items() if k != 'revision'} !=
+                {k:v for k,v in custom.items() if k != 'revision'}):
+            raise RuntimeError('Existing Pong component recipe differs; review it before replacing')
+        blocks = catalog.read_text().split('[[component]]')
+        for i in range(1, len(blocks)):
+            entry = tomllib.loads('[[component]]' + blocks[i])['component'][0]
+            if entry['id'] == custom['id']:
+                blocks[i] = (overlay / 'components.toml').read_text().split('[[component]]', 1)[1]
+                break
+        catalog.write_text('[[component]]'.join(blocks))
     if existing is None:
         catalog.write_text(catalog.read_text() + (overlay / 'components.toml').read_text())
     # Machine-specific paths are kept in the ignored local.toml.

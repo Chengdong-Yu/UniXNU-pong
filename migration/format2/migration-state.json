@@ -4,7 +4,10 @@
   "device_base": "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a",
   "soc_revision": "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21",
   "os_profile": "ipados-18.7.10-22H374",
-  "local_unpublished_edits": true,
+  "local_unpublished_edits": false,
   "source_pins_preserved": true,
-  "image_hashes_used": false
+  "image_hashes_used": false,
+  "published_source_revision": "f62243e56a30472deed9112631b2480ab461df3e",
+  "published_soc_path": "migration/format2/soc-seed",
+  "soc_seed_commit": "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21"
 }

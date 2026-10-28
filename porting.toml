@@ -14,11 +14,11 @@ paths = ["board.toml", "feeds.toml", "unixnu.lock", "configs/**", "dts/**", "mig
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["选择 ARM64、SM8475、22H374 和 Pong 四层配置，数组完整列出。"]
-findings = ["格式2解析和DTS编译成功；源码、配置与可复现迁移输入准备发布。"]
+findings = ["格式2解析、DTS编译、Darwin24内核及启动镜像构建成功；公开源固定版本已补齐。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
 limits = ["SM8475公共层与Pong聚合源码分目录固定；平台组件进一步拆分待完成。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "格式2解析和DTS编译成功；源码、配置与可复现迁移输入准备发布。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "格式2解析、DTS、内核和启动镜像已构建；services73未安装或启动。"}]
 
 [[area]]
 id = "firmware"
@@ -70,11 +70,11 @@ paths = ["drivers/NativeUfs/**", "scripts/*ufs*", "scripts/*storage*", "scripts/
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["原生 UFS + 22H374 IOStorageFamily，独立 OS/SystemOS/Data 窗口。"]
-findings = ["8GiB可写UFS Data已有启动记录；本轮只更新OS窗口。"]
+findings = ["8GiB可写UFS Data已有启动记录；本轮只准备本机OS更新，未写入手机。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
 limits = ["分区与镜像输入本地保存。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "8GiB可写UFS Data已有启动记录；本轮只更新OS窗口。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "本机OS中init及音频策略已更新，设备仍保留services72。"}]
 
 [[area]]
 id = "display"
@@ -98,11 +98,11 @@ paths = ["userland/touch.c", "drivers/NativeHidInput/**", "drivers/GoodixTouch/*
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["Goodix Berlin-D，PM8350实体按键转HID/原生音量控制。"]
-findings = ["services64日志有两个音量键press/release，原单例访问失败已修补。"]
+findings = ["services72真实音量press/release到达SBVolumeControl，电源down到达Consumer HID；本轮核对22H374事件接口，未新增虚构设备。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
-limits = ["本轮音量UI动作尚待启动确认。"]
+limits = ["音量实际生效及独立电源按下/释放后的锁屏动作尚未确认。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "services64日志有两个音量键press/release，原单例访问失败已修补。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "services72已观察真实输入事件，系统动作仍需设备结果。"}]
 
 [[area]]
 id = "gpu"
@@ -126,11 +126,11 @@ paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "scripts/*wifi*
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["Pong PCIe0/QCA6490，82项PHY序列、GPIO80/94/95/96/204、RPMh。"]
-findings = ["services64为PHYready、PCIe训练超时；本轮增加确定的PCS停机再启动顺序。"]
+findings = ["services72 PCIe link/BAR及128MiB散页DMA建表成功，停在SMMU context readback；services73按SM8475实现修正先TCR2/TCR后TTBR，编译通过。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
-limits = ["PCIe DLL、QMI固件、扫描与联网尚待本轮日志确认。"]
+limits = ["本轮未启动；SMMU启用、QMI固件、扫描与联网仍未确认。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "services64为PHYready、PCIe训练超时；本轮增加确定的PCS停机再启动顺序。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "services72日志定位SMMU写序；services73复用ArmSmmu4K公共编程原语，未实机启动。"}]
 
 [[area]]
 id = "audio"
@@ -140,11 +140,11 @@ paths = ["drivers/PongPower/PongAudio*", "drivers/PongPower/ShengAudioReach*", "
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["ADSP/GPR/APM、TFA9873双扬声器、MI2S LPAIF0 tertiary/SD0。"]
-findings = ["services64识别两颗0x0b73，失败命令0x01001006；已修正端点选择并连接有Ready门控的HAL。"]
+findings = ["services72 APM、功放和现代HAL初始化成功；audiomxd因独立AirPlay路由RPC超时退出。services73在launchd前选择原生集成音频provider，运行时已编译。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
-limits = ["尚无本轮PCM完成或实际出声证据；不公开麦克风。"]
+limits = ["尚无StartIO、PCM完成或实际出声证据；不公开麦克风。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "services64识别两颗0x0b73，失败命令0x01001006；已修正端点选择并连接有Ready门控的HAL。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "services72的audiomxd堆栈定位CoreMedia路由等待，services73策略与launchd服务门控保持一致。"}]
 
 [[area]]
 id = "power"
@@ -168,11 +168,11 @@ paths = ["scripts/build-ipados18*", "scripts/make-pong-adt-ipados18.py", "script
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、pong_ipados18_defconfig 与对应板级配置"]
 procedure = ["Darwin24/XNU11417与22H374原始组件，格式2硬件输入与固定ABI。"]
-findings = ["预链接使用匹配的IOStorage/IOGPU导入，镜像组装沿用已可启动格式。"]
+findings = ["services73使用匹配22H374的IOStorage/IOGPU导入；内核43834376字节，启动镜像102514688字节，构建完成。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
 limits = ["Apple镜像、固件和ABI二进制均需本机准备。"]
 next_action = ["读取本轮启动日志并继续完成板级接口"]
-evidence = [{kind = "source", reference = "migration/format2/README.zh.md", result = "预链接使用匹配的IOStorage/IOGPU导入，镜像组装沿用已可启动格式。"}]
+evidence = [{kind = "source", reference = "migration/ipados18/services73-smmu-audio.md", result = "内核、运行时与启动镜像已构建，产物留在本机；未安装、未启动。"}]
 
 [[area]]
 id = "diagnostics"

@@ -22,3 +22,17 @@ REC console 及 pmsg 共 1126516 字节。本机选择性提取约 3.5 MiB Data 
 按官方格式2迁移说明整理四层配置、固定源、板级DTS、社区组件、CI和13项porting记录。AdrenoMetal使用规范源码身份；A730/QCA6490聚合保留PongPlatform24名称。Apple私有二进制、固件、IPSW和生成Data不进入仓库。
 
 本轮用户要求完成后不启动：只编译内核、运行时和启动镜像，未安装到手机或执行Fastboot。SMMU固件启动、Wi-Fi扫描、PCM发声及电源/音量动作仍须后续设备结果确认。
+
+## 主机构建结果
+
+| 步骤 | 结果 |
+| --- | --- |
+| 格式2解析、组装与板级DTS | 成功，配置为 `pong_ipados18` / `ipados-18.7.10-22H374` |
+| Darwin24内核与预链接 | 成功，`kernel/mach.development.pong` 为43834376字节 |
+| 用户态运行时 | init、UI兼容库和现代音频HAL编译成功；本机OS暂存匹配init及音频策略 |
+| 启动镜像打包 | 成功，`pong-xnu-initial.img` 为102514688字节 |
+| 公开源版本配置 | SoC子目录及PongPlatform24固定到提交 `f62243e56a30472deed9112631b2480ab461df3e` |
+| 结构化记录 | 13个区域通过检查；主机结果与设备结果分别记录 |
+| 本轮设备操作 | 未安装、未临时启动，手机保留上一轮系统 |
+
+本机构建日志为 `build-services73-format2.log`、`build-services73-boot.log` 和运行时构建日志，按发布边界保留在Git忽略目录。公开源元数据最后又执行了一次prepare-only解析；该次报告中的 `kernel_built=false` 仅表示没有重复构建，实际内核结果见前述成功构建记录。未执行镜像哈希或镜像回读比较。
