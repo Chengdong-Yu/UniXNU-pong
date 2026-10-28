@@ -862,6 +862,7 @@ jobs:
           echo "=== df after userdata layout ==="
           df -h | tee df-after-userdata-layout.txt
       - name: Userdata image parts
+        id: userdata-image
         if: always() && steps.kernel.outcome == 'success' && steps.userland.outputs.staged == 'true' && inputs.userdata_image
         # Writes about 19 GiB more. Same reasoning as above: bounded so the four
         # artifact uploads that follow still have time inside the six-hour job.
@@ -880,6 +881,7 @@ jobs:
             --max-parts 4 \
             --part-max-mib 8192 \
             --delete-sources \
+            --delete-root "$(cat ci-userland-path.txt)" \
             --json-out userdata-image.json
           mkdir -p ci-products
           cp -f userdata-image.json ci-products/userdata-image.json
@@ -958,7 +960,10 @@ jobs:
         # 5 GiB each for the 19.4 GiB layout, fewer files for a smaller userland.
         # Kept for 30 days because a device install needs it and a rebuild costs
         # the whole six-hour job; APFS windows barely compress, so store them.
-        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        # Requires the image step to have succeeded: the parts are named
+        # .partNN only after every byte is written, so a failed or cancelled
+        # build leaves nothing to upload rather than a truncated artifact.
+        if: steps.userdata-image.outcome == 'success' && inputs.userdata_image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pong-userdata-part0
@@ -967,7 +972,10 @@ jobs:
           if-no-files-found: ignore
           path: out/ipados18/ufs/pong-ipados18-userdata.img.part00
       - name: Upload userdata part 1
-        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        # Requires the image step to have succeeded: the parts are named
+        # .partNN only after every byte is written, so a failed or cancelled
+        # build leaves nothing to upload rather than a truncated artifact.
+        if: steps.userdata-image.outcome == 'success' && inputs.userdata_image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pong-userdata-part1
@@ -976,7 +984,10 @@ jobs:
           if-no-files-found: ignore
           path: out/ipados18/ufs/pong-ipados18-userdata.img.part01
       - name: Upload userdata part 2
-        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        # Requires the image step to have succeeded: the parts are named
+        # .partNN only after every byte is written, so a failed or cancelled
+        # build leaves nothing to upload rather than a truncated artifact.
+        if: steps.userdata-image.outcome == 'success' && inputs.userdata_image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pong-userdata-part2
@@ -985,7 +996,10 @@ jobs:
           if-no-files-found: ignore
           path: out/ipados18/ufs/pong-ipados18-userdata.img.part02
       - name: Upload userdata part 3
-        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        # Requires the image step to have succeeded: the parts are named
+        # .partNN only after every byte is written, so a failed or cancelled
+        # build leaves nothing to upload rather than a truncated artifact.
+        if: steps.userdata-image.outcome == 'success' && inputs.userdata_image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pong-userdata-part3

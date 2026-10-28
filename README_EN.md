@@ -105,7 +105,7 @@ Never commit the firmware. The workflow uses it only after the checks pass, and 
 
 CI can also produce the userdata layout and the whole image, but **the inputs can only come from you**. The workflow does not run `userland/build-ipados18.py` and does not download an Apple restore: that prepared userland exists only after prepare / apply / finish have run on a Mac that has the 22H374 restore, and this public repository has none of it. CI cannot invent it.
 
-Pack one prepared directory into an archive somewhere https can reach and put its URL in `userland_url`. The archive may be `.zip`, `.tar.gz`, `.tgz` or `.tar` and, once unpacked (1-4 wrapper directories are fine), must hold at least:
+Pack one prepared directory into an archive somewhere https can reach and put its URL in `userland_url`. The archive may be `.zip`, `.tar.gz`, `.tgz` or `.tar` and, once unpacked (1-4 wrapper directories are fine), must hold these five files:
 
 ```
 result.json                          # build must be 22H374
@@ -113,8 +113,9 @@ apply-complete.json
 pong-ipados18-system.cdr             # OS, a 4 KiB-aligned raw APFS disk
 pong-ipados18-systemos.cdr           # the output of build-systemos18.py
 pong-ipados18-data.cdr               # Data
-volume-layout.json                   # optional, see below
 ```
+
+A `volume-layout.json` (see below) may sit beside them; it is optional.
 
 `pong-ipados18-systemos.cdr` is not inside `prepared/`; locally it lives in `apple/ipados18-22H374/prepared/`. Put it in the same directory when packing. If `os-storage.json` says `ready: true` (the OS was switched to a tracked sparsebundle) the archive is refused: the layout script sizes the raw image and would disagree with what the installer streams.
 

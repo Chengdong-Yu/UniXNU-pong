@@ -114,17 +114,23 @@ def extract_tar(path, dest):
 
 
 def flatten_single_tops(dest):
-    """Descend while dest holds exactly one directory and no required file yet."""
+    """Descend while dest holds no required file and exactly one directory.
+
+    A top-level stray file, such as the manifest the local packer writes or a
+    README someone zipped by hand, must not stop the descent: only the presence
+    of a required file means this is the level holding the userland.
+    """
     stripped = []
     for _ in range(4):
         if any((dest / name).is_file() for name in REQUIRED):
             break
         entries = [entry for entry in dest.iterdir() if not entry.name.startswith('.')]
-        if len(entries) != 1 or not entries[0].is_dir():
+        directories = [entry for entry in entries if entry.is_dir()]
+        if len(directories) != 1:
             break
-        stripped.append(entries[0].name)
+        stripped.append(directories[0].name)
         inner = dest / '__flatten__'
-        entries[0].rename(inner)
+        directories[0].rename(inner)
         for child in inner.iterdir():
             child.rename(dest / child.name)
         inner.rmdir()

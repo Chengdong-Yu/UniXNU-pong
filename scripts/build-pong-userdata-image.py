@@ -64,11 +64,15 @@ class SplitStream:
     def _open(self):
         if self.part_bytes:
             name = '%s.part%02d' % (self.target.name, len(self.parts))
-            path = self.target.parent / name
         else:
-            path = self.target
+            name = self.target.name
+        path = self.target.parent / name
         self.parts.append(path)
-        self.handle = path.open('wb', buffering=0)
+        # Write under .partial and rename only after every byte is in place, so a
+        # run killed halfway cannot leave a file that looks like a finished part
+        # for the upload steps to pick up.
+        self.partial = path.with_name(path.name + '.partial')
+        self.handle = self.partial.open('wb', buffering=0)
 
     def write(self, data):
         position = 0
@@ -82,7 +86,7 @@ class SplitStream:
             position += take
             self.written += take
             if self.part_bytes and self.handle.tell() >= self.part_bytes:
-                self.close_part()
+                self.close_part(complete=True)
 
     def fill(self, count):
         zero = self.zeros
@@ -91,14 +95,16 @@ class SplitStream:
             self.write(zero[:amount])
             count -= amount
 
-    def close_part(self):
+    def close_part(self, complete=False):
         if self.handle is not None:
             os.fsync(self.handle.fileno())
             self.handle.close()
             self.handle = None
+            if complete:
+                os.replace(self.partial, self.parts[-1])
 
-    def close(self):
-        self.close_part()
+    def close(self, complete=False):
+        self.close_part(complete=complete)
         return self.parts
 
 
@@ -129,12 +135,21 @@ def main():
                         help='remove each window image once its bytes are in the output. A CI '
                              'runner holds the unpacked windows and the output at once; a local '
                              'build usually keeps the sources for the next run.')
+    parser.add_argument('--delete-root', type=Path, default=None,
+                        help='with --delete-sources, refuse to remove any image outside this '
+                             'directory. Point it at the unpacked userland so a layout naming '
+                             'some other path cannot delete that file.')
     args = parser.parse_args()
     layout_path = args.layout.expanduser().resolve()
     header_path = args.header.expanduser().resolve()
     output = args.output.expanduser().resolve()
     if args.part_mib < 0 or (args.part_mib and args.part_mib < 1024):
         parser.error('--part-mib must be 0 or at least 1024')
+    if args.delete_root is not None and not args.delete_sources:
+        parser.error('--delete-root only means something with --delete-sources')
+    if args.delete_sources and args.delete_root is None:
+        parser.error('--delete-sources needs --delete-root: name the directory the images live '
+                     'in, so a layout cannot point the removal at some other file')
     if args.max_parts < 0 or (args.max_parts and args.max_parts < 1):
         parser.error('--max-parts must be 0 or at least 1')
     if args.part_mib and args.max_parts:
@@ -181,6 +196,12 @@ def main():
         if source.stat().st_size != window['size']:
             fail('window %s is %d bytes but the layout records %d'
                  % (window['name'], source.stat().st_size, window['size']))
+        if args.delete_sources:
+            root = args.delete_root.expanduser().resolve()
+            if not source.is_relative_to(root) or source == root:
+                fail('window %s names %s, which is outside --delete-root %s; refusing to remove '
+                     'a file the layout pointed at from somewhere else'
+                     % (window['name'], source, root))
         sources.append((window['name'], source, window['offset'], window['size']))
     total = header['image_bytes']
     part_mib = args.part_mib
@@ -245,9 +266,17 @@ def main():
         if stream.written < total:
             print('tail: %d zero bytes to %d' % (total - stream.written, total), flush=True)
             stream.fill(total - stream.written)
-    finally:
-        parts = stream.close()
+    except BaseException:
+        # Leave nothing behind that a later step could mistake for a product.
+        stream.close(complete=False)
+        for path in stream.parts:
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + '.partial').unlink(missing_ok=True)
+        raise
+    parts = stream.close(complete=True)
     if stream.written != total:
+        for path in parts:
+            path.unlink(missing_ok=True)
         fail('wrote %d bytes, expected %d' % (stream.written, total))
     for part in parts:
         if part.stat().st_size == 0:

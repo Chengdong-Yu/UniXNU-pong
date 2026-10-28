@@ -107,7 +107,7 @@ python3 scripts/pack-pong-firmware.py \
 
 CI 也能把 userdata 布局和整张镜像做出来，但**输入只能由你提供**。工作流不会跑 `userland/build-ipados18.py`，也不会下载 Apple restore：那份 prepared userland 是在一台有 22H374 restore 的 Mac 上跑完 prepare / apply / finish 之后才有的，公开仓库里没有，CI 自己变不出来。
 
-把一个 prepared 目录打成压缩包放到 https 能取的地方，链接填进 `userland_url`。压缩包可以是 `.zip`、`.tar.gz`、`.tgz` 或 `.tar`，解压后（允许套 1–4 层外壳目录）至少要有：
+把一个 prepared 目录打成压缩包放到 https 能取的地方，链接填进 `userland_url`。压缩包可以是 `.zip`、`.tar.gz`、`.tgz` 或 `.tar`，解压后（允许套 1–4 层外壳目录）必须有这五个文件：
 
 ```
 result.json                          # build 必须是 22H374
@@ -115,8 +115,9 @@ apply-complete.json
 pong-ipados18-system.cdr             # OS，4 KiB 对齐的整盘 APFS
 pong-ipados18-systemos.cdr           # build-systemos18.py 的输出
 pong-ipados18-data.cdr               # Data
-volume-layout.json                   # 可选，见下
 ```
+
+另可放一个 `volume-layout.json`（见下），不是必需。
 
 `pong-ipados18-systemos.cdr` 不在 `prepared/` 里，本机它是 `apple/ipados18-22H374/prepared/` 那个；打包时把它放进同一个目录即可。`os-storage.json` 如果写着 `ready: true`（也就是 OS 换成了 tracked sparsebundle），这份压缩包会被拒绝：布局脚本按原始 raw 镜像算大小，跟实际流式写入的内容对不上。
 
