@@ -316,20 +316,40 @@ jobs:
           test -f "${GITHUB_WORKSPACE}/unixnu/package/UniXNUPkg/UniXNUPkg.dec"
           test -d "${GITHUB_WORKSPACE}/sheng/package"
           test -f "${GITHUB_WORKSPACE}/sheng/drivers/Ath12kWifi/include/nw_abi.h"
+          # Mu_Basecore is pinned to v2026080000.0.4, the exact tree
+          # uefi-pong builds against. Do not move this to another release:
+          # newer/older trees differ in where the assembly macro header lives
+          # (MdePkg/Include/AArch64/AsmMacroLib.h vs MdePkg/Include/AsmMacroIoLib.h).
+          MU_BASECORE_COMMIT=3c9c7b2e211e62d2a954ad760a36fe05adc43aa3
           dest="${RUNNER_TEMP}/Mu_Basecore"
           rm -rf "$dest"
           mkdir -p "$dest"
           git -C "$dest" init -q
           git -C "$dest" remote add origin https://github.com/microsoft/mu_basecore.git
-          if ! git -C "$dest" fetch --depth 1 origin 8a186c423a733b1e07b8813163f3f6110e9107c8; then
-            echo "Pinned Mu_Basecore commit was not fetched directly. Fetching release/202405 and checking the SHA."
-            git -C "$dest" fetch --depth 1 origin release/202405
+          if ! git -C "$dest" fetch --depth 1 origin refs/tags/v2026080000.0.4; then
+            echo "Pinned Mu_Basecore tag was not fetched. Fetching the commit directly."
+            git -C "$dest" fetch --depth 1 origin "$MU_BASECORE_COMMIT"
           fi
           git -C "$dest" checkout -q FETCH_HEAD
-          test "$(git -C "$dest" rev-parse HEAD)" = "8a186c423a733b1e07b8813163f3f6110e9107c8"
-          git -C "$dest" submodule update --init BaseTools/Source/C/BrotliCompress/brotli
+          test "$(git -C "$dest" rev-parse HEAD)" = "$MU_BASECORE_COMMIT"
+          test -f "$dest/MdePkg/Include/AArch64/AsmMacroLib.h"
+          # Two submodules are load-bearing: MdePkg.dec lists the mipisyst include
+          # path for every build, and BrotliCompress needs its own source tree.
+          git -C "$dest" submodule update --init --depth 1 \
+            MdePkg/Library/MipiSysTLib/mipisyst \
+            BaseTools/Source/C/BrotliCompress/brotli
+          test -f "$dest/MdePkg/Library/MipiSysTLib/mipisyst/library/include/mipi_syst.h.in"
           test -f "$dest/BaseTools/Source/C/BrotliCompress/brotli/c/common/constants.h"
           test -d "$dest/MdePkg"
+          # Microsoft ships prebuilt BaseTools for Windows and Linux only, so the
+          # host tools have to be compiled here. CLANGPDB output needs GenFw, and
+          # GenFw needs the Common library; nothing else in BaseTools is used.
+          export PYTHON_COMMAND="$(command -v python3)"
+          make -C "$dest/BaseTools/Source/C" Common
+          make -C "$dest/BaseTools/Source/C" GenFw
+          test -x "$dest/BaseTools/Source/C/bin/GenFw"
+          # A real invocation: a GenFw that cannot start would fail the build later anyway.
+          "$dest/BaseTools/Source/C/bin/GenFw" --version
           export IASL_PREFIX="$(brew --prefix acpica)/bin/"
           export NASM_PREFIX="$(brew --prefix nasm)/bin/"
           test -x "${IASL_PREFIX}iasl"
