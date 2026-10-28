@@ -1,0 +1,138 @@
+--- a/crates/metal2vulkan-runtime/src/metal_level.rs
++++ b/crates/metal2vulkan-runtime/src/metal_level.rs
+@@ -34,6 +34,8 @@
+     /// iOS16.6.1 build20G81. Format metadata comes from the guest's actual
+     /// exported Metal routine, not a measured newer macOS/Apple GPU row.
+     IOS16_6_1,
++    /// iPadOS18.7.10 build22H374; format metadata is read from this guest.
++    IOS18_7_10,
+     /// macOS 26.7 (build 25G229), measured on an Apple M3 Max (EVs XRR2-pfi1-m3 and
+     /// XRR2-pla1-m3).
+     MacOS26_7,
+@@ -138,6 +140,14 @@
+     compressed_blits: false,
+ };
+ 
++const IOS_18_7_10: Row = Row {
++    macos: "iPadOS18.7.10/22H374",
++    version: [18, 7, 10],
++    unknown: &THREE_CHANNEL,
++    heap_blocks: HeapBlocks { bc: None, etc: None, astc: None, gpu_rows: GpuRows::Own },
++    compressed_blits: false,
++};
++
+ impl MetalLevel {
+     /// Every level, oldest first.
+     pub const ALL: [MetalLevel; 2] = [MetalLevel::MacOS26_7, MetalLevel::MacOS27_0_1];
+@@ -149,6 +159,7 @@
+     const fn row(self) -> &'static Row {
+         match self {
+             MetalLevel::IOS16_6_1 => &IOS_16_6_1,
++            MetalLevel::IOS18_7_10 => &IOS_18_7_10,
+             MetalLevel::MacOS26_7 => &MACOS_26_7,
+             MetalLevel::MacOS27_0_1 => &MACOS_27_0_1,
+         }
+@@ -162,7 +173,7 @@
+     /// Whether the release's texture descriptor takes `pf` (`setPixelFormat:` stops the process
+     /// on a value it does not know, "not a valid MTLPixelFormat"). `Invalid` is known.
+     pub fn knows(self, pf: PixelFormat) -> bool {
+-        if self == MetalLevel::IOS16_6_1 {
++        if matches!(self, MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10) {
+             return pf == PixelFormat::Invalid || self.describes(pf);
+         }
+         !self.row().unknown.contains(&pf)
+@@ -227,6 +238,7 @@
+     /// `macOS 26.7`.
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         if *self == MetalLevel::IOS16_6_1 { return f.write_str("iOS16.6.1/20G81"); }
++        if *self == MetalLevel::IOS18_7_10 { return f.write_str("iPadOS18.7.10/22H374"); }
+         write!(f, "macOS {}", self.macos())
+     }
+ }
+--- a/crates/metal2vulkan-runtime/src/pixel_format_info.rs
++++ b/crates/metal2vulkan-runtime/src/pixel_format_info.rs
+@@ -74,14 +74,15 @@
+     /// Apple GPU (the module docs): the measured row for `raw`, else
+     /// [`PixelFormatInfo::INVALID`].
+     pub fn pixel_format_info(self, raw: u64) -> PixelFormatInfo {
+-        if self == MetalLevel::IOS16_6_1 { return ios16_format_info(raw); }
++        if self == MetalLevel::IOS16_6_1 { return ios_format_info(raw, 629); }
++        if self == MetalLevel::IOS18_7_10 { return ios_format_info(raw, 645); }
+         let Ok(index) = DESCRIBED.binary_search_by_key(&raw, |row| u64::from(row.format.as_raw()))
+         else {
+             return PixelFormatInfo::INVALID;
+         };
+         let row = &DESCRIBED[index];
+         let at = match self {
+-            MetalLevel::IOS16_6_1 => None,
++            MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10 => None,
+             MetalLevel::MacOS26_7 => row.macos_26_7,
+             MetalLevel::MacOS27_0_1 => Some(row.macos_27_0_1),
+         };
+@@ -97,18 +98,18 @@
+     }
+ }
+ 
+-// ABI read from supplied20G81: seven64-bit words, returned via ARM64 x8.
++// ABI read from supplied20G81 and22H374: seven64-bit words, returned via ARM64 x8.
+ // MTLPixelFormatGetInfo uses a null feature-set query internally, avoiding
+ // recursive device creation or pretending that Adreno is an Apple GPU.
+ // This is format metadata only; Vulkan format capabilities still decide
+ // whether the real device can create/use a texture.
+ #[cfg(target_os = "ios")]
+-fn ios16_format_info(raw: u64) -> PixelFormatInfo {
++fn ios_format_info(raw: u64, last: u64) -> PixelFormatInfo {
+     #[repr(C)]
+     struct Raw { name: *const std::ffi::c_char, flags: u64, class: u64, words: [u64;4] }
+     unsafe extern "C" { fn MTLPixelFormatGetInfo(format: u64) -> Raw; }
+-    if raw == 0 || raw > 629 { return PixelFormatInfo::INVALID; }
+-    // SAFETY: the exported guest function's exact20G81 ABI; static strings
++    if raw == 0 || raw > last { return PixelFormatInfo::INVALID; }
++    // SAFETY: the exported guest function's matching guest ABI; static strings
+     // reside in the loaded Metal framework for the lifetime of the process.
+     let info = unsafe { MTLPixelFormatGetInfo(raw) };
+     if info.name.is_null() { return PixelFormatInfo::INVALID; }
+@@ -121,7 +122,7 @@
+     }
+ }
+ #[cfg(not(target_os = "ios"))]
+-fn ios16_format_info(_: u64) -> PixelFormatInfo { PixelFormatInfo::INVALID }
++fn ios_format_info(_: u64, _: u64) -> PixelFormatInfo { PixelFormatInfo::INVALID }
+ 
+ impl Device {
+     /// `MTLPixelFormatGetInfoForDevice(device, raw)` (Apple SPI): Metal's description of the raw
+--- a/crates/metal2vulkan-runtime/src/private_properties.rs
++++ b/crates/metal2vulkan-runtime/src/private_properties.rs
+@@ -417,7 +417,7 @@
+ /// The index of `level`'s answer in a measured pair.
+ fn at(level: MetalLevel) -> usize {
+     match level {
+-        MetalLevel::IOS16_6_1 => unreachable!("iOS has no measured macOS properties row"),
++        MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10 => unreachable!("iOS has no measured macOS properties row"),
+         MetalLevel::MacOS26_7 => 0,
+         MetalLevel::MacOS27_0_1 => 1,
+     }
+@@ -431,20 +431,20 @@
+ impl MetalLevel {
+     /// Metal's measured answer for `property` at the level, on its Apple GPU (the module docs).
+     pub fn private_count(self, property: PrivateCount) -> u64 {
+-        if self == MetalLevel::IOS16_6_1 { return 0; }
++        if matches!(self, MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10) { return 0; }
+         property.measured().1[at(self)]
+     }
+ 
+     /// Metal's measured answer for `property` at the level, on its Apple GPU (the module docs).
+     pub fn private_flag(self, property: PrivateFlag) -> bool {
+-        if self == MetalLevel::IOS16_6_1 { return false; }
++        if matches!(self, MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10) { return false; }
+         property.measured().1[at(self)]
+     }
+ 
+     /// `supportsPrimitiveType:` (Apple SPI) as the level's release answers it on its Apple GPU:
+     /// yes for raw 0 to 8, Metal's five public primitive types and four private ones.
+     pub fn supports_primitive_type(self, raw: u64) -> bool {
+-        if self == MetalLevel::IOS16_6_1 { return raw < 5; }
++        if matches!(self, MetalLevel::IOS16_6_1 | MetalLevel::IOS18_7_10) { return raw < 5; }
+         raw < MEASURED_PRIMITIVE_TYPES[at(self)]
+     }
+ }

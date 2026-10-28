@@ -1,0 +1,19 @@
+
+[[component]]
+id = "PongPlatform24"
+kind = "kit"
+function = "Pong SM8475 platform aggregate, including A730, QCA6490, storage, input and power"
+scope = "device"
+repository = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
+revision = "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a"
+path = "kits/PongPlatform24"
+hardware = ["SM8475", "Adreno730", "QCA6490", "TFA9873", "Goodix Berlin-D"]
+os_abi = ["ipados-18.7.10-22H374"]
+board_dependencies = ["Pong Android DT", "Pong modem/vendor firmware", "22H374 kernelcache and dyld cache"]
+verified_devices = []
+dependencies = []
+source_files = ["drivers/ArmCpu/ArmCpu.cpp", "drivers/PongWifi/PongWifiPlatform.cpp", "drivers/PongPower/PongAudio.cpp"]
+runtime_identifiers = ["NativeAdreno", "PongAudioService", "PongAudioUserClient", "PongUfsBlock", "DarwinBoot24.efi"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pong-profile-kernel.py", "--source", "{component}", "--artifact-dir", "{out}/kernel"]
+outputs = ["kernel/mach.development.pong"]

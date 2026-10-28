@@ -1,32 +1,46 @@
-# Pong now targets Darwin 22 / iOS 16. These override the main repository feeds.
+# Darwin 24 source dependencies for the Pong iPadOS 18 branch.
+
 [[source]]
 name = "xnu"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/xnu.git"
-ref = "xnu-8796.141.3"
-commit = "1b191cb58250d0705d8a51287127505aa4bc0789"
-darwin = "22.6.0"
-version = "8796.141.3"
-driverkit_tag = "xnu-8796.101.5"
+ref = "xnu-11417.140.69"
+commit = "43a90889846e00bfb5cf1d255cdc0a701a1e05a4"
+darwin = "24.6.0"
+version = "11417.140.69"
+driverkit_tag = "xnu-10063.121.3"
 trustcache_tag = "xnu-8796.101.5"
 
 [[source]]
 name = "libplatform"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/libplatform.git"
-ref = "libplatform-292.100.1"
-commit = "1b2b22f2e37384af2c562bd95d5e93ce2e192451"
+ref = "libplatform-349.140.6"
+commit = "8b02fc711d41a40477bfe857dd39755f250d1d7e"
 
 [[source]]
 name = "libdispatch"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/libdispatch.git"
-ref = "libdispatch-1325.120.2"
-commit = "ca80d30399cf4854d3b970076f83dde4a6e74e78"
+ref = "libdispatch-1521.140.2"
+commit = "934ff27e48ab7a6ee799442c5f19ebbb990567e8"
 
 [[source]]
 name = "AvailabilityVersions"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
-ref = "AvailabilityVersions-121"
-commit = "f3b52ca75ee842a8ac593bd7b03f9f4768c15755"
+ref = "AvailabilityVersions-143.7"
+commit = "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f"
+
+# Local versioned SoC source; replace this URL after the shared repository is published.
+[[source]]
+name = "sm8475"
+kind = "soc"
+git = "../UniXNU-sm8475-common"
+commit = "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21"
+
+[[source]]
+name = "PongPlatform24"
+kind = "kit"
+git = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
+commit = "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a"

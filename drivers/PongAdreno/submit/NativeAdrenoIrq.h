@@ -41,11 +41,14 @@ public:
     /* The exact A7XX enable set: AHB, ATB async, GPC, CP_SW, CP_HW, PM4,
      * RB_DONE_TS, CACHE_FLUSH_TS, ATB bus, hang, UCHE OOB/trap, TSB, fuse. */
     IOReturn programMask(uint32_t *programmed);
-    /* Reads, acknowledges, then decodes. Acknowledgement precedes decoding so
-     * an error reported here cannot be hidden by a later clear failure. */
+    /* Capture and decode the cause before acknowledging. The snapshot stays
+     * available if acknowledgement fails, and the caller quarantines DMA. */
     IOReturn handle(NativeAdrenoIrqResult *);
     static uint32_t mask();
     static uint32_t cpErrorMask();
+    /* Shared by the interrupt owner and non-acknowledging health polling.
+     * CP_HW_ERROR is a summary: its CP substatus decides whether it is fatal. */
+    static uint32_t classify(uint32_t status,uint32_t cp_status);
     bool poisoned() const {return poisoned_;}
     uint32_t enabled() const {return enabled_;}
 };

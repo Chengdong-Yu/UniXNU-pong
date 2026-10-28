@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Pong Darwin 22 GICv3 CPU provider, with firmware PSCI secondary startup.
+// Pong Darwin 22/24 GICv3 CPU provider, with firmware PSCI secondary startup.
 #include <IOKit/IOCPU.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -9,6 +9,9 @@
 #include <libkern/c++/OSSymbol.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#if PONG_DARWIN_MAJOR >= 24
+#include "PongCpuPolicy.h"
+#endif
 
 extern "C" void rtclock_intr(unsigned int);
 extern "C" void psci_smp_init(void);
@@ -16,6 +19,10 @@ extern "C" kern_return_t psci_smp_start_cpu(int);
 extern "C" void psci_smp_cpu_running(void);
 extern "C" void psci_smp_cpu_off(void) __attribute__((noreturn));
 extern "C" void pong_cpu_startup_finished(IOCPUInterruptController *);
+#if PONG_DARWIN_MAJOR >= 24
+extern "C" void pong_cpu_first_boot(processor_t);
+extern "C" void pong_cpu_first_boot_wait(processor_t);
+#endif
 extern "C" {
 volatile uint32_t armcpu_registered, armcpu_gic_ready;
 volatile uint64_t armcpu_timer_interrupts, armcpu_ipi_interrupts;
@@ -30,7 +37,7 @@ static IOCPUInterruptController *gController;
 /* Published SPI owners, following Sheng's GIC integration. CPU topology,
  * PSCI and timer setup stay on the existing Pong path. */
 struct SpiOwner {uint32_t id;void (*handler)(void *);void *context;uint64_t count;};
-static SpiOwner gSpi[4];
+static SpiOwner gSpi[64];
 static uint32_t gSpiUsed,gSpiRegistering;
 static uintptr_t gDist;
 static uint64_t gBootAffinity;
@@ -331,6 +338,20 @@ bool ArmCpu::start(IOService *provider)
                                       &ArmCpu::dispatch, nullptr) != kIOReturnSuccess)
       panic("ArmCpu: IRQ handler registration failed for CPU %u", i);
   }
+#if PONG_DARWIN_MAJOR >= 24
+  // Darwin 24 separates first boot from processor_start(), and invokes
+  // initCPU() during processor_boot(). All vectors must exist beforehand.
+  psci_smp_init();
+  pong_cpu_first_boot(machProcessor);
+  for (unsigned i=0; i<ml_get_cpu_count(); i++) {
+    if (gCpus[i] != this) pong_cpu_first_boot(gCpus[i]->machProcessor);
+  }
+  for (unsigned i=0; i<ml_get_cpu_count(); i++) {
+    pong_cpu_first_boot_wait(gCpus[i]->machProcessor);
+    IOLog("ArmCpu: CPU %u first boot completed\n", i);
+  }
+  ml_cpu_init_completed();
+#else
   initCPU(true);
   psci_smp_init();
   // CPU_ON failure is returned through cpu_start/processor_start; an offline
@@ -341,6 +362,7 @@ bool ArmCpu::start(IOService *provider)
     IOLog("ArmCpu: CPU %u PSCI start %s result=%d\n", i,
         status == KERN_SUCCESS ? "PASS" : "FAIL (offline)", status);
   }
+#endif
   // IOKit may now expand its matching worker pool. A firmware-rejected
   // secondary remains offline; it must not leave the pool in bootstrap mode.
   pong_cpu_startup_finished(controller);
@@ -356,6 +378,9 @@ bool ArmCpu::start(IOService *provider)
   armcpu_cntv_state[4] = daif;
   IOLog("ArmCpu: boot CPU running with GICv3/CNTV ctl=%#llx cval=%#llx now=%#llx freq=%#llx daif=%#llx irq=%llu\n",
       ctl, cval, now, frequency, daif, armcpu_timer_interrupts);
+#if PONG_DARWIN_MAJOR >= 24
+  PongCpuPolicy::start();
+#endif
   return true;
 }
 
@@ -432,7 +457,7 @@ extern "C" IOReturn armcpu_spi_attach(uint32_t intid,bool edge,void (*handler)(v
   const uint32_t used=__atomic_load_n(&gSpiUsed,__ATOMIC_ACQUIRE);
   IOReturn result=kIOReturnSuccess;
   for(uint32_t i=0;i<used;i++)if(gSpi[i].id==intid)result=kIOReturnExclusiveAccess;
-  if(!result && used>=4)result=kIOReturnNoResources;
+  if(!result && used>=sizeof(gSpi)/sizeof(gSpi[0]))result=kIOReturnNoResources;
   if(!result) {
     const uint32_t word=(intid/32)*4,bit=1u<<(intid%32);
     write32(gDist,0x180+word,bit);

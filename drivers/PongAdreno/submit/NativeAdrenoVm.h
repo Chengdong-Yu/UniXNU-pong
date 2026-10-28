@@ -3,6 +3,7 @@
 #define NATIVE_ADRENO_VM_H
 #include "NativeAdrenoSmmuMemory.h"
 #include "ArmSmmu4KStreams.h"
+#include "NativeAdrenoHandleIndex.h"
 struct NativeAdrenoVmRegion {
     NativeAdrenoMemory *tables;
     ArmSmmu4KLiveArena *arena;
@@ -27,8 +28,9 @@ struct NativeAdrenoVmResult {
  * No VM may be advertised to apps until per-client isolation, submission
  * validation/protection, genuine IRQ fences and reset are implemented. */
 /* One table for every client's mappings: 1024 filled up once the render server primed its shaders (int-237: BoMap refused with
- * kIOReturnNoResources at objects=1024, Turnip wrote through a NULL command stream and backboardd crashed). */
-enum : size_t {NativeAdrenoVmMaxObjects=4096};
+ * kIOReturnNoResources at objects=1024, Turnip wrote through a NULL command stream and backboardd crashed), and 4096 after a few app
+ * switches (i567: both backboardd crashes came at objects=4096, after it held about 4000 for minutes). */
+enum : size_t {NativeAdrenoVmMaxObjects=16384};
 /* Board hook for sampleWord(): reads one aligned word of physical memory through a fresh uncached mapping; 0 on success. */
 extern "C" int (*native_adreno_dram_read32)(uint64_t physical,uint32_t *value);
 /* The board's reader through the kernel's cacheable physical aperture (null on the host: the BO's own mapping is read). */
@@ -45,6 +47,11 @@ class NativeAdrenoVm final {
         unsigned permissions=0,writeback=0,shareability=0,jobs=0;
     };
     Mapping *mappings_=nullptr;
+    NativeAdrenoHandleIndex<NativeAdrenoVmMaxObjects> index_;   /* live handle -> its mappings_ slot */
+    size_t free_hint_=0;   /* no free mappings_ slot below it */
+    size_t high_=0;   /* no live mappings_ slot at or above it: the walks over every mapping stop there */
+    size_t class_spans_[16]{};   /* ranges_ per alias class, so a map counts the other classes without a walk */
+    size_t import_spans_[16]{};   /* the imported mappings' ranges per alias class */
     NativeAdrenoVmRegion regions_[2]{};
     ArmSmmu4KLiveVisibility visibility_[2]{};
     ArmSmmu4KIo io_{};
@@ -65,9 +72,12 @@ class NativeAdrenoVm final {
     unsigned since_audit_=0;
     IOReturn fail(ArmSmmu4KStatus);
     Mapping *find(uint64_t);
+    const Mapping *find(uint64_t) const;
+    size_t rangeAt(uint64_t iova) const;
     void insert(size_t,unsigned);
     void erase(size_t,size_t,unsigned);
-    IOReturn preflight(const NativeAdrenoMemory *,unsigned,uint64_t,unsigned,unsigned,unsigned) const;
+    IOReturn preflight(const NativeAdrenoMemory *,unsigned,uint64_t,unsigned,unsigned,unsigned,bool exclusive) const;
+    bool exclusivePages(const NativeAdrenoMemory *,unsigned cls) const;
 public:
     NativeAdrenoVm()=default;
     ~NativeAdrenoVm()=default;
@@ -91,7 +101,7 @@ public:
     /* Cleans and invalidates the CPU caches over every mapped BO (whole objects; imported ones through their physical pages), so
      * no CPU cache line can hold data the GPU should see or hide what it wrote. Lines are physically tagged, so this also reaches
      * lines a user mapping of the same pages left behind. int-070 runs it before every submission. */
-    IOReturn publishMapped();
+    IOReturn publishMapped(uint64_t window_start=0,uint64_t window_bytes=0);
     /* The submit path saw a CPU-cached word that DRAM did not hold yet in a client's BO: from now on write-combined BOs are maintained
      * like any other (sticky; the safe behaviour of int-070..097). */
     void distrustWriteCombined() {distrust_write_combined_=true;}
@@ -99,7 +109,7 @@ public:
     /* After a submission completed: cleans and invalidates the CPU caches over every GPU-writable imported BO, so the owner's mapping
      * (an IOSurface) reads what the GPU wrote, not a line prefetched while the GPU ran. Jobs name only their IBs, so every such BO
      * is covered. int-071: an imported render target read back 672 of 4096 texels stale. */
-    IOReturn acquireImported();
+    IOReturn acquireImported(uint64_t window_start=0,uint64_t window_bytes=0);
     /* Diagnostic, never a proof of coherence: the 32-bit word at a mapped GPU address as the kernel's cacheable alias reads it
      * and, when the board installed native_adreno_dram_read32, as DRAM reads it through an uncached mapping (else ~0). */
     IOReturn sampleWord(uint64_t iova,uint32_t *cached,uint32_t *dram) const;
@@ -109,12 +119,20 @@ public:
      * before reading DRAM, so it could never see a dirty line. */
     /* Before a submission while write-combined BOs are trusted: every page of every mapped write-combined BO that XNU set back to the
      * default attribute is write-combined again (and its lines written back); *reset counts the pages. */
-    IOReturn reassertWriteCombined(uint32_t *reset) const;
+    IOReturn reassertWriteCombined(uint32_t *reset,uint64_t window_start=0,uint64_t window_bytes=0) const;
     IOReturn auditRange(uint64_t iova,size_t bytes,uint32_t *lines,uint32_t *dirty,uint32_t *stale) const;
     /* Read-only description of a live mapping; never pins or extends it. */
     IOReturn describe(uint64_t handle,uint64_t *iova,size_t *bytes,unsigned *permissions) const;
     /* Up to `count` dwords of a mapped kernel-owned BO at a GPU address (through the kernel's own mapping), for the board log. */
     IOReturn peekWords(uint64_t iova,uint32_t *out,size_t count) const;
+    /* The same after cleaning and invalidating the CPU cache lines over the words: a BO zeroed through the kernel's cacheable mapping keeps
+     * clean lines of those zeros there, which a plain read returns instead of what the client wrote through its own mapping since. */
+    IOReturn peekWordsUncached(uint64_t iova,uint32_t *out,size_t count) const;
+    /* The context bank's fault record for the board log: FSR, FAR (lo, hi) and FSYNR0. Reads only; never clears a fault. */
+    IOReturn faultState(uint32_t out[4]) const;
+    /* Map handles count up and are never reused, so they order mappings in time: the next one, and the one over a GPU address (0: none). */
+    uint64_t nextHandle() const {return next_handle_;}
+    uint64_t handleAt(uint64_t iova) const;
     /* Only a scheduler's actual successful GPU completion may call this.
      * A timeout, interrupt bit alone or CPU-written timestamp is insufficient. */
     IOReturn retireJobAfterCompletion(uint64_t handle);

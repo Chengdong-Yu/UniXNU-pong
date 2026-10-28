@@ -4,13 +4,13 @@
 #include <mach/vm_param.h>
 #include <kern/clock.h>
 #include <vm/memory_types.h>
-/* Darwin22 ARM exports the underscored routines, as arm/cpu_data.h uses. */
+/* Darwin ARM exports the underscored routines, as arm/cpu_data.h uses. */
 extern "C" void _disable_preemption(void);
 extern "C" void _enable_preemption(void);
 #define disable_preemption() _disable_preemption()
 #define enable_preemption() _enable_preemption()
 extern "C" vm_offset_t phystokv(uint64_t pa);
-extern "C" uint64_t gPhysBase,gPhysSize;   /* the physical range phystokv covers (the kernel's own DRAM); anything else panics in phystokv */
+extern "C" boolean_t pmap_valid_page(ppnum_t pn);
 extern "C" void pmap_set_cache_attributes(ppnum_t pn,unsigned int cacheattr);
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
 /* Time and bytes of every CPU cache maintenance pass (the board page shows them per submission), and the pages user BOs made
@@ -26,6 +26,18 @@ static void noteMaintenance(uint64_t began,size_t bytes)
     __atomic_fetch_add(&native_adreno_cache_stats[3],1,__ATOMIC_RELAXED);
     uint64_t longest=__atomic_load_n(&native_adreno_cache_stats[2],__ATOMIC_RELAXED);
     while(ticks>longest && !__atomic_compare_exchange_n(&native_adreno_cache_stats[2],&longest,ticks,true,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) {}
+}
+
+/* Darwin24 Pong owns discontiguous DRAM banks. gPhysSize describes only
+ * the primary aperture; pmap_valid_page uses the actual managed bank list.
+ * Validate every page before changing any attributes, including spans that
+ * might otherwise cross a physical hole or a firmware reservation. */
+static bool managedSpan(uint64_t physical,size_t bytes)
+{
+    if(!physical || !bytes || ((physical|bytes)&4095) || physical>UINT64_MAX-bytes)return false;
+    for(size_t offset=0;offset<bytes;offset+=4096)
+        if(!pmap_valid_page((ppnum_t)((physical+offset)>>12)))return false;
+    return true;
 }
 
 IOReturn NativeAdrenoQueryCpu4K(NativeAdrenoCpuState *out)
@@ -49,23 +61,33 @@ static IOReturn maintainOwnedPages(void *mapping,size_t bytes,NativeAdrenoCacheO
 {
     /* Whole owned pages avoid IVAC corruption of a neighbour's dirty line.
      * No Apple coherent-I/O shortcut is used for these noncoherent DMA paths.
-     * Pin this CPU while reading its CTR and issuing all cache operations. */
+     * Pin this CPU only for a bounded batch, with its own CTR and closing DSB.
+     * The 256 MiB BO pool must not keep preemption disabled for the entire
+     * maintenance pass (Darwin24's preemption watchdog caught that at boot).
+     * Owned pages remain live across batches; a subsequent batch can safely
+     * run on another CPU after the preceding core completes its operations. */
     if(!mapping || !bytes || (((uintptr_t)mapping|bytes)&4095) ||
         bytes>UINTPTR_MAX-(uintptr_t)mapping || op>NativeAdrenoInvalidate || op<NativeAdrenoClean)
         return kIOReturnBadArgument;
-    disable_preemption();
-    uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
-    size_t line=(size_t)4<<((ctr>>16)&15);
-    if(line>4096) {enable_preemption();return kIOReturnUnsupported;}
     uintptr_t address=(uintptr_t)mapping,end=address+bytes;
-    __asm__ volatile("dsb sy":::"memory");
-    for(;address<end;address+=line) {
-        if(op==NativeAdrenoClean)__asm__ volatile("dc cvac, %0"::"r"(address):"memory");
-        else if(op==NativeAdrenoCleanInvalidate)__asm__ volatile("dc civac, %0"::"r"(address):"memory");
-        else __asm__ volatile("dc ivac, %0"::"r"(address):"memory");
+    constexpr size_t batch_bytes=16*4096;
+    while(address<end) {
+        const size_t remaining=end-address;
+        const uintptr_t batch_end=address+(remaining<batch_bytes?remaining:batch_bytes);
+        disable_preemption();
+        uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
+        const size_t line=(size_t)4<<((ctr>>16)&15);
+        if(line>4096) {enable_preemption();return kIOReturnUnsupported;}
+        __asm__ volatile("dsb sy":::"memory");
+        for(;address<batch_end;address+=line) {
+            if(op==NativeAdrenoClean)__asm__ volatile("dc cvac, %0"::"r"(address):"memory");
+            else if(op==NativeAdrenoCleanInvalidate)__asm__ volatile("dc civac, %0"::"r"(address):"memory");
+            else __asm__ volatile("dc ivac, %0"::"r"(address):"memory");
+        }
+        __asm__ volatile("dsb sy":::"memory");
+        enable_preemption();
     }
-    __asm__ volatile("dsb sy":::"memory");
-    enable_preemption();return kIOReturnSuccess;
+    return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoMaintainOwnedPages(void *mapping,size_t bytes,NativeAdrenoCacheOperation op)
 {
@@ -92,7 +114,7 @@ IOReturn NativeAdrenoMaintainPhysicalPages(uint64_t physical,size_t bytes,Native
              * uncached (kIOMapInhibitCache), no cache line of it exists to maintain, and phystokv would panic on it (int-080: illegal PA
              * 0xb8000000). */
             const uint64_t page=physical+offset;
-            if(page<gPhysBase || page-gPhysBase>=gPhysSize)continue;
+            if(!pmap_valid_page((ppnum_t)(page>>12)))continue;
             const vm_offset_t alias=phystokv(page);
             if(!alias) {__asm__ volatile("dsb sy":::"memory");enable_preemption();return kIOReturnUnsupported;}
             for(uintptr_t address=alias,end=alias+4096;address<end;address+=line) {
@@ -119,8 +141,7 @@ IOReturn NativeAdrenoSetPagesCacheMode(const NativeAdrenoPhysicalSpan *spans,siz
     uint64_t pages=0;
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoPhysicalSpan &span=spans[i];
-        if(!span.bytes || ((span.physical|span.bytes)&4095) || span.physical>UINT64_MAX-span.bytes ||
-            span.physical<gPhysBase || span.physical+span.bytes-gPhysBase>gPhysSize)return kIOReturnBadArgument;
+        if(!managedSpan(span.physical,span.bytes))return kIOReturnBadArgument;
         pages+=span.bytes/4096;
     }
     for(size_t i=0;i<count;++i)
@@ -136,8 +157,7 @@ IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *spans
     const uint64_t began=mach_absolute_time();
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoPhysicalSpan &span=spans[i];
-        if(!span.bytes || ((span.physical|span.bytes)&4095) || span.physical>UINT64_MAX-span.bytes ||
-            span.physical<gPhysBase || span.physical+span.bytes-gPhysBase>gPhysSize)return kIOReturnBadArgument;
+        if(!managedSpan(span.physical,span.bytes))return kIOReturnBadArgument;
         for(uint64_t offset=0;offset<span.bytes;offset+=4096) {
             const ppnum_t pn=(ppnum_t)((span.physical+offset)>>12);
             /* From the default attribute the pmap also cleans and invalidates the page (pmap_sync_wimg), so lines a cacheable view

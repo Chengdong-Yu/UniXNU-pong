@@ -88,17 +88,9 @@ IOReturn NativeAdrenoIrq::programMask(uint32_t *programmed)
     if(programmed)*programmed=readback;
     return kIOReturnSuccess;
 }
-IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
+uint32_t NativeAdrenoIrq::classify(uint32_t status,uint32_t cp_status)
 {
-    if(!result)return kIOReturnBadArgument;
-    *result={};
-    if(!attached_ || poisoned_)return kIOReturnNotReady;
-    uint32_t status=0;
-    if(io_.read32(io_.cookie,IrqRbbmStatus,&status))return poison();
-    /* Linux acknowledges the whole read status before decoding it. */
-    if(io_.write32(io_.cookie,IrqRbbmClear,status))return poison();
-    if(io_.barrier(io_.cookie))return poison();
-    uint32_t flags=0,cp_status=0,protect=0;
+    uint32_t flags=0;
     if(status&IrqBitCpFence)flags|=NativeAdrenoIrqFence;
     if(status&IrqBitCpSw)flags|=NativeAdrenoIrqPreempt;
     if(status&(IrqBitIdle))flags|=NativeAdrenoIrqIdle;
@@ -106,19 +98,30 @@ IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
     if(status&(IrqBitUcheOob|IrqBitUcheTrap))flags|=NativeAdrenoIrqUche;
     if(status&(IrqBitAhb|IrqBitGpc|IrqBitAtbAsync|IrqBitAtbBus))flags|=NativeAdrenoIrqBusError;
     if(status&(IrqBitTsbWrite|IrqBitFuse))flags|=NativeAdrenoIrqSecurity;
-    if(status&IrqBitCpHw) {
-        if(io_.read32(io_.cookie,IrqCpStatus,&cp_status))return poison();
-        if(cp_status&kCpErrors) {
-            if(io_.read32(io_.cookie,IrqCpProtect,&protect))return poison();
-            flags|=NativeAdrenoIrqCpError;
-        }
-    }
+    if((status&IrqBitCpHw) && (cp_status&kCpErrors))flags|=NativeAdrenoIrqCpError;
     const uint32_t unknown=status&~kKnown;
     if(unknown)flags|=NativeAdrenoIrqUnknown;
     if(flags&(NativeAdrenoIrqHang|NativeAdrenoIrqCpError|NativeAdrenoIrqUche|
         NativeAdrenoIrqBusError|NativeAdrenoIrqSecurity|NativeAdrenoIrqUnknown))
         flags|=NativeAdrenoIrqFatal;
-    result->flags=flags;result->status=status;result->unknown=unknown;
+    return flags;
+}
+IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
+{
+    if(!result)return kIOReturnBadArgument;
+    *result={};
+    if(!attached_ || poisoned_)return kIOReturnNotReady;
+    uint32_t status=0,cp_status=0,protect=0;
+    if(io_.read32(io_.cookie,IrqRbbmStatus,&status))return poison();
+    /* Capture the CP cause before clearing its RBBM summary. Retain the
+     * snapshot even if acknowledgement fails; the owner quarantines DMA. */
+    if(status&IrqBitCpHw) {
+        if(io_.read32(io_.cookie,IrqCpStatus,&cp_status))return poison();
+        if((cp_status&kCpErrors) && io_.read32(io_.cookie,IrqCpProtect,&protect))return poison();
+    }
+    result->flags=classify(status,cp_status);result->status=status;result->unknown=status&~kKnown;
     result->cp_status=cp_status;result->protect_status=protect;
+    if(io_.write32(io_.cookie,IrqRbbmClear,status))return poison();
+    if(io_.barrier(io_.cookie))return poison();
     return kIOReturnSuccess;
 }

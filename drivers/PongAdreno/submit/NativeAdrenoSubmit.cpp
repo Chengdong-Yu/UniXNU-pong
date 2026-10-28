@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoABI.h"
 #include "AdrenoPM4.h"
 #include <IOKit/IOLib.h>
 
@@ -7,7 +8,7 @@
  * and IB_SIZE in dwords (bits 0..19), exactly as the pinned adreno_pm4.xml
  * domain states and Linux msm_gem_submit.c converts the userspace byte size. */
 enum : uint32_t {SubmitIndirectBuffer=0x3f,SubmitIbWords=3,SubmitMaxJobs=8,
-    SubmitMaxBuffers=16,SubmitMaxIbBytes=0xfffffu*4u,
+    SubmitMaxBuffers=128,SubmitMaxIbBytes=0xfffffu*4u,
     SubmitAuditBytes=256u*1024u};   /* IB bytes the write-combine audit compares per submission */
 extern "C" {volatile uint32_t native_adreno_coherence[8];}
 /* The submission (1-based count) at which the write-combine audit found a dirty IB line or failed; 0 = never. */
@@ -39,7 +40,7 @@ IOReturn NativeAdrenoSubmit::attach(NativeAdrenoVm *vm,NativeAdrenoRing *ring)
 {
     if(attached_ || poisoned_ || vm_ || ring_)return kIOReturnBusy;
     if(!vm || !ring || vm->poisoned() || ring->poisoned())return kIOReturnBadArgument;
-    vm_=vm;ring_=ring;attached_=true;stats_={};
+    vm_=vm;ring_=ring;attached_=true;stats_={};current_context_=UINT32_MAX;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoSubmit::release(Job &job)
@@ -50,7 +51,7 @@ IOReturn NativeAdrenoSubmit::release(Job &job)
         if(retired)status=retired;else ++stats_.references_retired;
     }
     if(status)return poison();
-    if(vm_->acquireImported())return poison();
+    if(vm_->acquireImported(job.window_start,job.window_bytes))return poison();
     job={};return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoSubmit::detach()
@@ -73,14 +74,15 @@ size_t NativeAdrenoSubmit::outstanding() const
     size_t count=0;for(const auto &job:jobs_)if(job.active)++count;return count;
 }
 IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size_t count,
-    uint32_t queue,uint32_t *fence)
+    uint32_t queue,uint32_t *fence,uint64_t window_start,uint64_t window_bytes)
 {
     if(!fence)return kIOReturnBadArgument;*fence=0;
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(!buffers || !count || count>SubmitMaxBuffers)return kIOReturnBadArgument;
+    if(window_bytes && window_start>UINT64_MAX-window_bytes)return kIOReturnBadArgument;
     /* Every buffer is validated against the live VM before any reference. */
-    uint64_t handles[SubmitMaxBuffers];size_t handle_count=0;
-    uint32_t words[SubmitMaxBuffers*(1+SubmitIbWords)];size_t word_count=0;
+    uint64_t *handles=scratch_handles_;size_t handle_count=0;
+    uint32_t *words=scratch_words_;size_t word_count=0;
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoSubmitBuffer &buffer=buffers[i];
         if(!buffer.handle || !buffer.bytes || (buffer.bytes&3) || buffer.bytes>SubmitMaxIbBytes)
@@ -88,6 +90,8 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         uint64_t iova=0;size_t bytes=0;unsigned permissions=0;
         IOReturn status=vm_->describe(buffer.handle,&iova,&bytes,&permissions);
         if(status)return status;
+        if(window_bytes && (iova<window_start || iova-window_start>=window_bytes ||
+            bytes>window_bytes-(iova-window_start)))return kIOReturnBadArgument;
         if(!(permissions&ArmSmmu4KRead) || buffer.iova<iova ||
             buffer.iova-iova>bytes || buffer.bytes>bytes-(buffer.iova-iova))return kIOReturnBadArgument;
         uint32_t header=0;
@@ -127,7 +131,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         /* int-100: the dirty IB page was back at XNU's default (cacheable) attribute. Write-combine every such page again first; the
          * pmap writes its lines back on the way, so the audit below should then find none. */
         uint32_t reset=0;
-        IOReturn audited=vm_->reassertWriteCombined(&reset);
+        IOReturn audited=vm_->reassertWriteCombined(&reset,window_start,window_bytes);
         native_adreno_wc_audit[5]=native_adreno_wc_audit[5]+reset;
         uint32_t lines=0,dirty=0,stale=0;size_t budget=SubmitAuditBytes;
         /* The re-assertion above is the correction and runs every time; the audit only detects, and found no dirty line in int-141's
@@ -152,7 +156,10 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         }
     }
     (void)vm_->sampleWord(buffers[0].iova,&cached,&before);
-    IOReturn status=vm_->publishMapped();
+    /* Only this client's IOVA window can be referenced by its validated
+     * command buffers. Maintaining every other process's IOSurfaces here
+     * was both expensive and outside this submission's ownership handoff. */
+    IOReturn status=vm_->publishMapped(window_start,window_bytes);
     if(!status) {
         (void)vm_->sampleWord(buffers[0].iova,&ignored,&after);
         native_adreno_coherence[0]=native_adreno_coherence[0]+1;
@@ -177,6 +184,13 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         for(unsigned i=0;i<28;++i)native_adreno_ib_log[slot][4+i]=head[i];
         native_adreno_ib_log_count=native_adreno_ib_log_count+1;
     }
+    /* The single hardware ring alternates Vulkan clients. Reset the BR/BV
+     * timestamps/resource table on each actual context change, as both
+     * Nothing's gen7_rb_context_switch and Linux a6xx_set_pagetable do.
+     * Queues within one client share that context. The prologue waits for
+     * the preceding real fence before resetting any synchronization state. */
+    const uint32_t context=queue/NativeAdrenoAbiMaxQueues;
+    if(context!=current_context_)ring_->requestContextReset();
     status=ring_->submitFramed(words,word_count,&value);
     if(status) {
         /* A poisoned ring may already have consumed the WPTR write, so the
@@ -185,6 +199,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
             *job=Job{};++stats_.poisoned_jobs;
             for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
             job->count=handle_count;job->queue=queue;job->active=true;
+            job->window_start=window_start;job->window_bytes=window_bytes;
             return poison();
         }
         while(handle_count) {vm_->retireJobAfterCompletion(handles[--handle_count]);++stats_.references_retired;}
@@ -192,6 +207,8 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
     }
     for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
     job->count=handle_count;job->fence=value;job->queue=queue;job->active=true;
+    job->window_start=window_start;job->window_bytes=window_bytes;
+    current_context_=context;
     ++stats_.submissions;
     if(outstanding()>stats_.peak_jobs)stats_.peak_jobs=outstanding();
     *fence=value;

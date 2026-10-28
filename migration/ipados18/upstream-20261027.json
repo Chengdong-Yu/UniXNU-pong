@@ -1,0 +1,512 @@
+{
+  "date_utc": "2026-10-27T08:30:03.281666+00:00",
+  "references": {
+    "UniXNU": "0fc0fc1f9ddd0fbd4787738afef38667df5e0a95",
+    "UniXNU-sheng": "08cde20edc3254ed6f7df8d0f5384fb887786e8f",
+    "Adreno740": "5c8c1453c67d6ef6b10ec43ab1f8fc570a2f33e1",
+    "AdrenoMetal": "ce5e19e33e05e1873d38d818e23cabfe0ac708c3",
+    "GopFramebuffer": "33e941a878dcf01b98dbd9160d798bd56e7551ea",
+    "ArmSmmu4K": "3ba92451bd44bb742d11758fbfcd3a446ecad685"
+  },
+  "target": {
+    "board": "Pong",
+    "soc": "SM8475",
+    "gpu": "Adreno730",
+    "guest": "22H374",
+    "darwin": "24.6.0",
+    "xnu": "11417.140.69"
+  },
+  "review_baseline": "16e592abee8a550dec8154ed1f38b5ebc4f16213",
+  "merged": [
+    {
+      "area": "GPU VM",
+      "changes": [
+        "16384 BO slots and handle index",
+        "free/high slot hints and alias-exclusive mapping",
+        "keep Pong 32-bit IOVA/client windows and physical firmware resources"
+      ]
+    },
+    {
+      "area": "SMMU",
+      "changes": [
+        "leaf range invalidation on small unmaps",
+        "ASID invalidation for large unmaps",
+        "preserve Pong polled_faults ABI",
+        "avoid per-submit TLB flush"
+      ]
+    },
+    {
+      "area": "Metal",
+      "changes": [
+        "return failing encoder object for rejected runtime encoder instead of null IMP in RenderBox",
+        "retain 22H374 device extent 600 and responsible task uint32 ABI"
+      ]
+    },
+    {
+      "area": "Darwin24",
+      "changes": [
+        "adapt work interval instance ops 6/7/8 to no performance-controller sink",
+        "preserve existing Cryptex namespace and 4K user/kernel pages with 16K signature-block conversion"
+      ]
+    },
+    {
+      "area": "RAM",
+      "changes": [
+        "DarwinBoot AllocatePages ownership list",
+        "dense PA/page indices for separate physical banks",
+        "no memory holes or reserved firmware/DSP/GOP/ramoops pages enter free lists",
+        "failed extra bank claims remain unowned instead of breaking primary boot"
+      ]
+    },
+    {
+      "area": "Display",
+      "changes": [
+        "1080x2412/4320 stride",
+        "60/90/120 requested policy",
+        "retain completed frame on fence timeout",
+        "GPU worker stays eligible between waits"
+      ]
+    },
+    {
+      "area": "Wi-Fi",
+      "changes": [
+        "reset SM8475 core and PHY before vendor sequence",
+        "remove nonexistent PIPE reset after PHY programming"
+      ]
+    },
+    {
+      "area": "Brightness",
+      "changes": [
+        "Pong NT37705 DCS FIFO writes and BTA readback",
+        "CoreBrightness brightness/FadePeriod service",
+        "Darwin24 metaclass getter compiled by name; no vtable slot patch",
+        "link/init independently of Wi-Fi",
+        "actual MiniIOMobileFramebuffer.cpo compile flag and mode rebuild"
+      ]
+    }
+  ],
+  "not_applied": [
+    {
+      "change": "default Darwin23/iPadOS17 profile",
+      "reason": "keep Darwin24/22H374 ABI and pinned Apple components"
+    },
+    {
+      "change": "Sheng dual DSI and direct DPU scanout",
+      "reason": "SM8550 register/CTL/SSPP arrangement differs from single DSI0 Pong"
+    },
+    {
+      "change": "Sheng KTZ8866 I2C brightness",
+      "reason": "Pong OLED brightness uses DCS"
+    },
+    {
+      "change": "Sheng Ath12k WCN7850 firmware and PCIe resource map",
+      "reason": "Pong is SM8475 QCA6490/ath11k"
+    },
+    {
+      "change": "SM8850 Oryon/SCMI and fixed CPU OPPs",
+      "reason": "Pong uses its EPSS LUT and 4/3/1 CPU domains"
+    },
+    {
+      "change": "additional unconditional launch-constraint bypass",
+      "reason": "current log supplies no matching new constraint failure; keep current 22H374 policy"
+    }
+  ],
+  "memory": {
+    "physical_bytes": 12884901888,
+    "dt_allocatable_before_uefi_bytes": 12072890368,
+    "ranges": 14,
+    "runtime_full_ram_confirmed": false
+  },
+  "docs": {
+    "root": "/Volumes/PongDev/source/UniXNU-upstream/docs",
+    "canonical_technical_inventory": [
+      {
+        "path": "docs/building.md",
+        "lines": 359
+      },
+      {
+        "path": "docs/concepts/boot-chain.md",
+        "lines": 121
+      },
+      {
+        "path": "docs/concepts/payload.md",
+        "lines": 125
+      },
+      {
+        "path": "docs/concepts/prelink.md",
+        "lines": 98
+      },
+      {
+        "path": "docs/concepts/security.md",
+        "lines": 91
+      },
+      {
+        "path": "docs/concepts/userdata.md",
+        "lines": 95
+      },
+      {
+        "path": "docs/contributing/documentation.md",
+        "lines": 118
+      },
+      {
+        "path": "docs/contributing/repository.md",
+        "lines": 91
+      },
+      {
+        "path": "docs/drivers/adreno-firmware.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/adreno-metal.md",
+        "lines": 36
+      },
+      {
+        "path": "docs/drivers/adreno-pm4.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/adreno740.md",
+        "lines": 142
+      },
+      {
+        "path": "docs/drivers/air-nir.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/apple-key-store-state.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/arm-cpu.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/arm-dt-platform.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/arm-smmu4k.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/arm-virt-platform.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/ath12k-wifi.md",
+        "lines": 18
+      },
+      {
+        "path": "docs/drivers/community-native-adreno-fuxi.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-adreno-myron.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-dwc3.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-emmc.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-msdc.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-ufs-alioth.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-native-ufs-myron.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-nativefocaltechtouch.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-unixnu-nativemobiledisplay.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-unixnu-nativeramblock.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/community-unixnu-nativeufs.md",
+        "lines": 15
+      },
+      {
+        "path": "docs/drivers/darwin-boot.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/device-tree-matching.md",
+        "lines": 159
+      },
+      {
+        "path": "docs/drivers/gop-framebuffer.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/kexts.md",
+        "lines": 166
+      },
+      {
+        "path": "docs/drivers/overview.md",
+        "lines": 80
+      },
+      {
+        "path": "docs/drivers/qcom-geni-spi.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/ram-block.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/repositories.md",
+        "lines": 76
+      },
+      {
+        "path": "docs/drivers/sheng-hid-input.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/sheng-novatek-touch.md",
+        "lines": 145
+      },
+      {
+        "path": "docs/drivers/sheng-preflight.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/sheng-ufs.md",
+        "lines": 30
+      },
+      {
+        "path": "docs/drivers/software-aes.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/uefi-drivers.md",
+        "lines": 221
+      },
+      {
+        "path": "docs/drivers/verified-root.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/virtio-mmio-block.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/drivers/virtio-mmio-console.md",
+        "lines": 17
+      },
+      {
+        "path": "docs/drivers/xnu-drivers.md",
+        "lines": 270
+      },
+      {
+        "path": "docs/drivers/xnu-prelink.md",
+        "lines": 19
+      },
+      {
+        "path": "docs/guide/boot.md",
+        "lines": 128
+      },
+      {
+        "path": "docs/guide/build-kernel.md",
+        "lines": 160
+      },
+      {
+        "path": "docs/guide/debugging.md",
+        "lines": 391
+      },
+      {
+        "path": "docs/guide/mobilegestalt.md",
+        "lines": 101
+      },
+      {
+        "path": "docs/guide/overview.md",
+        "lines": 16
+      },
+      {
+        "path": "docs/guide/requirements.md",
+        "lines": 122
+      },
+      {
+        "path": "docs/guide/skip-setup.md",
+        "lines": 127
+      },
+      {
+        "path": "docs/guide/userdata.md",
+        "lines": 122
+      },
+      {
+        "path": "docs/index.md",
+        "lines": 37
+      },
+      {
+        "path": "docs/porting/bring-up.md",
+        "lines": 155
+      },
+      {
+        "path": "docs/porting/device-repository.md",
+        "lines": 502
+      },
+      {
+        "path": "docs/porting/device-tree.md",
+        "lines": 300
+      },
+      {
+        "path": "docs/porting/display.md",
+        "lines": 130
+      },
+      {
+        "path": "docs/porting/drivers.md",
+        "lines": 120
+      },
+      {
+        "path": "docs/porting/dual-system-partition.md",
+        "lines": 197
+      },
+      {
+        "path": "docs/porting/gpu.md",
+        "lines": 132
+      },
+      {
+        "path": "docs/porting/index.md",
+        "lines": 31
+      },
+      {
+        "path": "docs/porting/input.md",
+        "lines": 102
+      },
+      {
+        "path": "docs/porting/log-capture.md",
+        "lines": 181
+      },
+      {
+        "path": "docs/porting/migration.md",
+        "lines": 466
+      },
+      {
+        "path": "docs/porting/network.md",
+        "lines": 121
+      },
+      {
+        "path": "docs/porting/platform.md",
+        "lines": 113
+      },
+      {
+        "path": "docs/porting/power.md",
+        "lines": 233
+      },
+      {
+        "path": "docs/porting/records.md",
+        "lines": 163
+      },
+      {
+        "path": "docs/porting/sm8550.md",
+        "lines": 16
+      },
+      {
+        "path": "docs/porting/soc-support.md",
+        "lines": 151
+      },
+      {
+        "path": "docs/porting/steps.md",
+        "lines": 182
+      },
+      {
+        "path": "docs/porting/uefi-firmware.md",
+        "lines": 266
+      },
+      {
+        "path": "docs/porting/ufs.md",
+        "lines": 150
+      },
+      {
+        "path": "docs/reference/boot-configuration.md",
+        "lines": 303
+      },
+      {
+        "path": "docs/reference/cli.md",
+        "lines": 151
+      },
+      {
+        "path": "docs/reference/components.md",
+        "lines": 77
+      },
+      {
+        "path": "docs/reference/configuration.md",
+        "lines": 259
+      },
+      {
+        "path": "docs/reference/glossary.md",
+        "lines": 43
+      },
+      {
+        "path": "docs/reference/index.md",
+        "lines": 59
+      },
+      {
+        "path": "docs/reference/output-layout.md",
+        "lines": 154
+      },
+      {
+        "path": "docs/reference/qemu.md",
+        "lines": 131
+      },
+      {
+        "path": "docs/reference/troubleshooting.md",
+        "lines": 100
+      },
+      {
+        "path": "docs/xnu/boot-arguments.md",
+        "lines": 120
+      },
+      {
+        "path": "docs/xnu/four-k-page-tables.md",
+        "lines": 196
+      },
+      {
+        "path": "docs/xnu/patch-reference.md",
+        "lines": 121
+      },
+      {
+        "path": "docs/xnu/source-and-patches.md",
+        "lines": 147
+      }
+    ],
+    "inventory_is_not_a_claim_every_device_page_was_read": true
+  },
+  "artifacts": {
+    "kernel": "out/ipados18/kernel-services58-backlight/mach.development.pong",
+    "planned_boot": "/Volumes/Untitled/Pong-iPadOS18/boot-services58-final/pong-xnu-initial.img",
+    "metal": "/Volumes/Untitled/Pong-iPadOS18/port-metal18/plugin-services58",
+    "os_install": "out/ipados18/install-services58/installation.json",
+    "boot": "/Volumes/Untitled/Pong-iPadOS18/boot-services58-final/pong-xnu-initial.img",
+    "build_log": "/Volumes/PongDev/build/Pong-iPadOS18-native/build-20261027T082901Z.log",
+    "os_install_complete": true
+  },
+  "hardware": {
+    "last_confirmed_boot": "services57a entered desktop (user)",
+    "services58_temporary_boot_performed": true,
+    "brightness_runtime_validated": false,
+    "wifi_link_validated": false,
+    "measured_120hz_confirmed": false,
+    "temporary_boot_receipt": "out/ipados18/temporary-boot-services58.json",
+    "fastboot_sending_and_booting": "OKAY",
+    "guest_runtime_result": "awaiting observation"
+  },
+  "image_verification": "skipped by request",
+  "tests_run": false,
+  "benchmarks_run": false
+}

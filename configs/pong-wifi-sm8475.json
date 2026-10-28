@@ -1,0 +1,755 @@
+{
+  "format": "pong-qca6490-board-v1",
+  "board": "pong",
+  "soc": "SM8475",
+  "pci": {
+    "vendor": 6091,
+    "device": 4355,
+    "subsystem_vendor": 6091,
+    "subsystem_device": 264,
+    "revision": 1,
+    "bar0": {
+      "base": 1612709888,
+      "bytes": 2097152
+    }
+  },
+  "radio": "QCA6490",
+  "driver_family": "ath11k",
+  "transport": "PCIe/MHI/QRTR",
+  "source": {
+    "wlan": "/soc/qcom,cnss-qca6490@b0000000",
+    "pcie": "/soc/qcom,pcie@1c00000",
+    "input": "REC /sys/firmware/fdt and PCI sysfs"
+  },
+  "pcie": {
+    "index": 0,
+    "regions": {
+      "parf": {
+        "base": 29360128,
+        "bytes": 12288
+      },
+      "phy": {
+        "base": 29384704,
+        "bytes": 8192
+      },
+      "dm_core": {
+        "base": 1610612736,
+        "bytes": 3869
+      },
+      "elbi": {
+        "base": 1610616608,
+        "bytes": 168
+      },
+      "iatu": {
+        "base": 1610616832,
+        "bytes": 4096
+      },
+      "conf": {
+        "base": 1611661312,
+        "bytes": 1048576
+      }
+    },
+    "gpio": {
+      "wlan-en-gpio": 80,
+      "qcom,bt-en-gpio": 81,
+      "qcom,sw-ctrl-gpio": 82,
+      "qcom,xo-clk-gpio": 204,
+      "perst": 94,
+      "wake": 96
+    },
+    "clock_names": [
+      "pcie_0_pipe_clk",
+      "pcie_0_ref_clk_src",
+      "pcie_0_aux_clk",
+      "pcie_0_cfg_ahb_clk",
+      "pcie_0_mstr_axi_clk",
+      "pcie_0_slv_axi_clk",
+      "pcie_0_ldo",
+      "pcie_0_slv_q2a_axi_clk",
+      "pcie_phy_refgen_clk",
+      "pcie_ddrss_sf_tbu_clk",
+      "pcie_aggre_noc_0_axi_clk",
+      "pcie_aggre_noc_1_axi_clk",
+      "pcie_pipe_clk_mux",
+      "pcie_pipe_clk_ext_src"
+    ],
+    "clock_specifiers": [
+      36,
+      54,
+      32,
+      0,
+      36,
+      47,
+      36,
+      49,
+      36,
+      51,
+      36,
+      56,
+      36,
+      50,
+      36,
+      57,
+      36,
+      52,
+      36,
+      26,
+      36,
+      8,
+      36,
+      9,
+      36,
+      55,
+      36,
+      1
+    ],
+    "reset_specifiers": [
+      36,
+      4,
+      36,
+      7
+    ],
+    "sid_map": [
+      0,
+      93,
+      7168,
+      1,
+      256,
+      93,
+      7169,
+      1
+    ],
+    "phy_sequence": [
+      [
+        576,
+        3,
+        0
+      ],
+      [
+        192,
+        1,
+        0
+      ],
+      [
+        204,
+        49,
+        0
+      ],
+      [
+        208,
+        1,
+        0
+      ],
+      [
+        96,
+        255,
+        0
+      ],
+      [
+        100,
+        6,
+        0
+      ],
+      [
+        0,
+        76,
+        0
+      ],
+      [
+        4,
+        6,
+        0
+      ],
+      [
+        224,
+        144,
+        0
+      ],
+      [
+        228,
+        130,
+        0
+      ],
+      [
+        244,
+        7,
+        0
+      ],
+      [
+        112,
+        2,
+        0
+      ],
+      [
+        16,
+        2,
+        0
+      ],
+      [
+        116,
+        22,
+        0
+      ],
+      [
+        20,
+        22,
+        0
+      ],
+      [
+        120,
+        54,
+        0
+      ],
+      [
+        24,
+        54,
+        0
+      ],
+      [
+        272,
+        8,
+        0
+      ],
+      [
+        188,
+        14,
+        0
+      ],
+      [
+        288,
+        66,
+        0
+      ],
+      [
+        128,
+        10,
+        0
+      ],
+      [
+        132,
+        26,
+        0
+      ],
+      [
+        32,
+        20,
+        0
+      ],
+      [
+        36,
+        52,
+        0
+      ],
+      [
+        136,
+        130,
+        0
+      ],
+      [
+        40,
+        104,
+        0
+      ],
+      [
+        144,
+        171,
+        0
+      ],
+      [
+        148,
+        234,
+        0
+      ],
+      [
+        152,
+        2,
+        0
+      ],
+      [
+        48,
+        171,
+        0
+      ],
+      [
+        52,
+        170,
+        0
+      ],
+      [
+        56,
+        2,
+        0
+      ],
+      [
+        320,
+        20,
+        0
+      ],
+      [
+        356,
+        52,
+        0
+      ],
+      [
+        60,
+        1,
+        0
+      ],
+      [
+        28,
+        4,
+        0
+      ],
+      [
+        372,
+        22,
+        0
+      ],
+      [
+        444,
+        15,
+        0
+      ],
+      [
+        368,
+        160,
+        0
+      ],
+      [
+        4516,
+        56,
+        0
+      ],
+      [
+        4316,
+        17,
+        0
+      ],
+      [
+        4448,
+        191,
+        0
+      ],
+      [
+        4452,
+        191,
+        0
+      ],
+      [
+        4456,
+        183,
+        0
+      ],
+      [
+        4460,
+        234,
+        0
+      ],
+      [
+        4444,
+        63,
+        0
+      ],
+      [
+        4468,
+        92,
+        0
+      ],
+      [
+        4472,
+        156,
+        0
+      ],
+      [
+        4476,
+        26,
+        0
+      ],
+      [
+        4480,
+        137,
+        0
+      ],
+      [
+        4464,
+        220,
+        0
+      ],
+      [
+        4488,
+        148,
+        0
+      ],
+      [
+        4492,
+        91,
+        0
+      ],
+      [
+        4496,
+        26,
+        0
+      ],
+      [
+        4500,
+        137,
+        0
+      ],
+      [
+        4300,
+        240,
+        0
+      ],
+      [
+        4104,
+        9,
+        0
+      ],
+      [
+        4116,
+        5,
+        0
+      ],
+      [
+        4172,
+        8,
+        0
+      ],
+      [
+        4176,
+        8,
+        0
+      ],
+      [
+        4312,
+        15,
+        0
+      ],
+      [
+        4376,
+        28,
+        0
+      ],
+      [
+        4344,
+        7,
+        0
+      ],
+      [
+        4600,
+        8,
+        0
+      ],
+      [
+        3716,
+        21,
+        0
+      ],
+      [
+        3728,
+        63,
+        0
+      ],
+      [
+        3812,
+        2,
+        0
+      ],
+      [
+        3648,
+        6,
+        0
+      ],
+      [
+        3644,
+        24,
+        0
+      ],
+      [
+        732,
+        5,
+        0
+      ],
+      [
+        904,
+        119,
+        0
+      ],
+      [
+        920,
+        11,
+        0
+      ],
+      [
+        992,
+        15,
+        0
+      ],
+      [
+        1548,
+        29,
+        0
+      ],
+      [
+        1556,
+        7,
+        0
+      ],
+      [
+        1568,
+        193,
+        0
+      ],
+      [
+        1684,
+        0,
+        0
+      ],
+      [
+        976,
+        140,
+        0
+      ],
+      [
+        5156,
+        1,
+        0
+      ],
+      [
+        5160,
+        1,
+        0
+      ],
+      [
+        512,
+        0,
+        0
+      ],
+      [
+        580,
+        3,
+        0
+      ]
+    ],
+    "phy_status_offset": 532,
+    "phy_status_bit": 6,
+    "analogue_rails": [
+      {
+        "supply": "vreg-1p8",
+        "resource": "ldoc10",
+        "microvolts": 1200000
+      },
+      {
+        "supply": "vreg-0p9",
+        "resource": "ldob5",
+        "microvolts": 880000
+      }
+    ],
+    "power_domain": {
+      "control": 1552388,
+      "collapse_vote": 1450280,
+      "collapse_bit": 0
+    },
+    "phy_power_down_offset": 576,
+    "max_clock_frequency_hz": [
+      0,
+      0,
+      0,
+      19200000,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      100000000,
+      0,
+      0,
+      0
+    ],
+    "aux_clock_mhz": 20,
+    "endpoint_latency_ms": 10,
+    "perst_delay_us": 1000,
+    "pinmux_source": "NothingOSS pinctrl-cape.h and Pong live Android DT; GPIO94 gpio, GPIO95 pcie0_clkreqn (mux1), GPIO96 gpio",
+    "target_link_speed": 2,
+    "target_link_speed_source": "Pong REC CNSS/msm_pcie IPC log: target_link_speed=2, negotiated Gen2x1; audit-services66/pcie0-long.txt",
+    "clock_sequence": "TCXO PIPE enabled during host reset/table setup, external PIPE selected before PCS reset release/start, following Sheng QMP power-on with Pong PHY table"
+  },
+  "dma": {
+    "iova_pool": [
+      2684354560,
+      268435456
+    ],
+    "msi_bytes": 4096,
+    "cache_policy": "coherent"
+  },
+  "msi": {
+    "map": [
+      0,
+      565,
+      22912,
+      1,
+      256,
+      565,
+      22913,
+      1
+    ],
+    "controller": "/soc/interrupt-controller@17100000/msi-controller@17140000",
+    "compatible": "arm,gic-v3-its",
+    "reg": [
+      387186688,
+      131072
+    ],
+    "legacy_spi_node_status": "disabled"
+  },
+  "rails": [
+    {
+      "supply": "vdd-wlan-aon",
+      "resource": "smpe2",
+      "regulator": "pmr735a_s2",
+      "request": [
+        1012000,
+        1040000,
+        0,
+        0,
+        1
+      ],
+      "physical": {
+        "spmi_slave": 4,
+        "peripheral": 158,
+        "type": 28,
+        "subtype": 14,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    },
+    {
+      "supply": "vdd-wlan-dig",
+      "resource": "smpb11",
+      "regulator": "pm8350_s11",
+      "request": [
+        966000,
+        1170000,
+        0,
+        0,
+        1
+      ],
+      "physical": {
+        "spmi_slave": 1,
+        "peripheral": 185,
+        "type": 3,
+        "subtype": 10,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    },
+    {
+      "supply": "vdd-wlan-io",
+      "resource": "smpb10",
+      "regulator": "pm8350_s10",
+      "request": [
+        1800000,
+        1800000,
+        0,
+        0,
+        1
+      ],
+      "physical": {
+        "spmi_slave": 1,
+        "peripheral": 182,
+        "type": 3,
+        "subtype": 10,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    },
+    {
+      "supply": "vdd-wlan-rfa1",
+      "resource": "smpc1",
+      "regulator": "pm8350c_s1",
+      "request": [
+        1900000,
+        2024000,
+        0,
+        0,
+        1
+      ],
+      "physical": {
+        "spmi_slave": 2,
+        "peripheral": 155,
+        "type": 3,
+        "subtype": 10,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    },
+    {
+      "supply": "vdd-wlan-rfa2",
+      "resource": "smpb12",
+      "regulator": "pm8350_s12",
+      "request": [
+        1350000,
+        2040000,
+        0,
+        0,
+        1
+      ],
+      "physical": {
+        "spmi_slave": 1,
+        "peripheral": 188,
+        "type": 3,
+        "subtype": 10,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    },
+    {
+      "supply": "wlan-ant-switch",
+      "resource": "ldoe7",
+      "regulator": "pmr735a_l7",
+      "request": [
+        2800000,
+        2800000,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "supply": "vdd-wlan-ipa",
+      "resource": "smpe3",
+      "regulator": "pmr735a_s3",
+      "request": [
+        2200000,
+        2200000,
+        0,
+        0,
+        0
+      ],
+      "physical": {
+        "spmi_slave": 4,
+        "peripheral": 161,
+        "type": 3,
+        "subtype": 10,
+        "source": "Pong REC SPMI observer/regmap, audit-services68/rec-pmic-regulator-types.txt and rec-pmic-rails.txt; AON request observed in rec-aon-request.txt"
+      }
+    }
+  ],
+  "nv_mac_required": true,
+  "firmware": {
+    "device_path": "/mnt/pong-wifi-firmware/image/qca6490",
+    "runtime_path": "/pong/firmware/qca6490",
+    "required": [
+      "amss.bin",
+      "amss20.bin",
+      "m3.bin",
+      "regdb.bin"
+    ],
+    "board_data": "select from actual QMI chip/board ID; no default variant"
+  },
+  "readiness": {
+    "board_inputs": true,
+    "ath11k_backend": true,
+    "darwin24_apple80211": true,
+    "firmware_boot_observed": false,
+    "scan_observed": false,
+    "link_observed": false,
+    "meaning": "backend/ABI flags describe source integration; firmware/scan/link flags require phone observations"
+  }
+}

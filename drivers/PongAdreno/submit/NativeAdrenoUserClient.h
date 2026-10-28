@@ -15,7 +15,7 @@
  * Up to NativeAdrenoClientMaxObjects live objects and the execbuf's own eight-job limit apply. */
 enum : size_t {NativeAdrenoClientMaxObjects=4096};
 /* Pong: one isolated VA/queue window for each selected Metal process. */
-enum : unsigned {NativeAdrenoMaxClients=8};
+enum : unsigned {NativeAdrenoMaxClients=16};
 class NativeAdrenoUserClient final {
     struct Queue {uint32_t id=0;bool active=false;};
     struct Entry {
@@ -53,6 +53,8 @@ class NativeAdrenoUserClient final {
     uint64_t window_start_=0,window_bytes_=0,window_peak_=0;
     uint64_t next_handle_=1;
     bool open_=false;
+    NativeAdrenoSubmitBuffer submit_buffers_[NativeAdrenoAbiMaxBatchBuffers]{};
+    IOReturn submitRecords(const void *,uint32_t,NativeAdrenoAbiSubmitReply *,const NativeAdrenoRingClock *);
     Entry *find(uint64_t);
     Entry *free();
     static void clear(Entry &);

@@ -135,8 +135,15 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         // SAFETY: the caller's contract.
         let (loader, cache) = unsafe { (CStr::from_ptr(loader), CStr::from_ptr(cache)) };
         let mut options = DeviceOptions::default();
+        // This frontend pins every no-copy buffer until its command/fence
+        // references retire and never rebinds the storage. Keep that contract
+        // explicit so the runtime need not retain a replay log per encoder.
+        options.refuse_rebinds = true;
         options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
-        options.metal_level = Some(MetalLevel::IOS16_6_1);
+        #[cfg(feature = "ipados18")]
+        { options.metal_level = Some(MetalLevel::IOS18_7_10); }
+        #[cfg(not(feature = "ipados18"))]
+        { options.metal_level = Some(MetalLevel::IOS16_6_1); }
         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
         options.messages = Some(MessageSink::new(observe_message));
         Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
@@ -778,6 +785,45 @@ pub extern "C" fn nmb_texture_set_purgeable_state(texture: *const NmbTexture, st
         let state = PurgeableState::from_raw(state).map_err(e("purgeable state"))?;
         Ok(get(texture)?.0.set_purgeable_state(state).map_err(e("purgeable state"))?.raw())
     })
+}
+
+// Preserve the runtime's real automatic/placement heap ownership. A view
+// shares its root's alias state; ordinary non-heap storage is unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_make_aliasable(texture: *const NmbTexture) -> bool {
+    guard(false, || { get(texture)?.0.make_aliasable().map_err(e("texture alias"))?; Ok(true) })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_is_aliasable(texture: *const NmbTexture) -> bool {
+    guard(false, || Ok(get(texture)?.0.is_aliasable()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_hazard_tracking_mode(texture: *const NmbTexture) -> u64 {
+    guard(0, || Ok(get(texture)?.0.hazard_tracking_mode().raw()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_parent_relative_level(texture: *const NmbTexture) -> u64 {
+    guard(0, || Ok(get(texture)?.0.parent_relative_level()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_parent_relative_slice(texture: *const NmbTexture) -> u64 {
+    guard(0, || Ok(get(texture)?.0.parent_relative_slice()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_hazard_tracking_mode(buffer: *const NmbBuffer) -> u64 {
+    guard(0, || Ok(get(buffer)?.0.hazard_tracking_mode().raw()))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_make_aliasable(buffer: *const NmbBuffer) -> bool {
+    guard(false, || { get(buffer)?.0.make_aliasable().map_err(e("buffer alias"))?; Ok(true) })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_is_aliasable(buffer: *const NmbBuffer) -> bool {
+    guard(false, || Ok(get(buffer)?.0.is_aliasable()))
 }
 
 /// `setPurgeableState:` on a buffer, as on a texture.

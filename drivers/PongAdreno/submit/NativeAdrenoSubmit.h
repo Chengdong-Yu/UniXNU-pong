@@ -33,8 +33,9 @@ class NativeAdrenoSubmit final {
     struct Job {
         uint32_t fence=0;
         size_t count=0;
-        uint64_t handles[16]{};
+        uint64_t handles[128]{};
         uint32_t queue=0;
+        uint64_t window_start=0,window_bytes=0;
         bool active=false;
     } jobs_[8];
     NativeAdrenoVm *vm_=nullptr;
@@ -42,6 +43,11 @@ class NativeAdrenoSubmit final {
     NativeAdrenoSubmitStats stats_{};
     bool attached_=false,poisoned_=false;
     uint32_t audit_tick_=0;   /* submissions since attach; every eighth one audits its IB lines */
+    uint32_t current_context_=UINT32_MAX;
+    /* Serialized by the owner; a 128-IB batch must not consume kernel stack
+     * with its 1 KiB handle list and 2 KiB packet list. */
+    uint64_t scratch_handles_[128]{};
+    uint32_t scratch_words_[128*4]{};
     Job *find(uint32_t fence);
     Job *free();
     IOReturn release(Job &);
@@ -55,10 +61,11 @@ public:
     /* Refuses while jobs are outstanding or poisoned; the caller must have
      * stopped the GPU and observed every fence before calling this. */
     IOReturn detach();
-    /* queue is bookkeeping for one shared ring; it never reorders or isolates
-     * submissions and is validated by the caller's open queue set. */
+    /* The queue identifies a client's context on the shared ring; no work is
+     * reordered. A nonzero IOVA window scopes CPU cache maintenance to that
+     * client's complete lease. The caller validates its open queue set. */
     IOReturn submit(const NativeAdrenoSubmitBuffer *,size_t,uint32_t queue,
-        uint32_t *fence);
+        uint32_t *fence,uint64_t window_start=0,uint64_t window_bytes=0);
     bool queueOutstanding(uint32_t queue) const;
     /* Queues [first, first+count): whether any of their jobs is outstanding, and a wait for every one of them (oldest first) that
      * leaves other queues' jobs alone. Each client of the shared ring owns one such range. */

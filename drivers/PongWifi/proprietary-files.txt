@@ -1,0 +1,12 @@
+# Extract from this Pong's modem_a, read-only. Keep these local, outside Git.
+# scripts/prepare-pong-wifi.py records the actual inventory and board inputs.
+image/qca6490/amss.bin
+image/qca6490/amss20.bin
+image/qca6490/m3.bin
+image/qca6490/regdb.bin
+image/qca6490/bdwlan.*
+image/qca6490/bdwlang.*
+
+# No fabricated MAC/calibration; the live DT requests use-nv-mac.
+# Select the BDF using the real firmware QMI chip/board ID, not an arbitrary
+# bdwlan file, a WCN7850 board-2.bin, or the PCI revision alone.

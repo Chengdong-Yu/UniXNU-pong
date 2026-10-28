@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <mach/mach_time.h>
+#include <notify.h>
 #include "touch.h"
 #define say(...) fprintf(stderr,__VA_ARGS__)
 /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
@@ -362,12 +363,33 @@ buttons_thread(void *unused)
     if (!keys) {say("Pong keys HID: event server unavailable; SKIP\n");close(fd);return NULL;}
     say("Pong keys HID: physical side/volume consumer opened\n");
     struct pong_touch sample;ssize_t n;unsigned held=0;
+    int ready=-1,volume_tokens[2]={-1,-1};uint64_t volume_counts[2]={0,0};
+    (void)notify_register_check("dev.unixnu.pong.volume18.ready",&ready);
+    (void)notify_register_check("dev.unixnu.pong.volume18.increase",&volume_tokens[0]);
+    (void)notify_register_check("dev.unixnu.pong.volume18.decrease",&volume_tokens[1]);
     const uint32_t usages[]={HID_USAGE_POWER,HID_USAGE_VOLUME_UP,HID_USAGE_VOLUME_DOWN};
     while ((n=read(fd,&sample,sizeof(sample)))>0 || (n<0 && errno==EINTR)) {
         if (n<0) continue;
         if (n!=(ssize_t)sizeof(sample) || sample.finger>=3 ||
             (sample.type!=PONG_BUTTON_DOWN && sample.type!=PONG_BUTTON_UP)) continue;
         bool down=sample.type==PONG_BUTTON_DOWN;
+        uint64_t native_ready=0;
+        if (sample.finger && ready>=0 && !notify_get_state(ready,&native_ready) && native_ready==1 &&
+            volume_tokens[sample.finger-1]>=0) {
+            // Darwin24 accepted the consumer HID report but did not dispatch
+            // its volume action on this imported iPad board. Deliver only
+            // volume transitions to SpringBoard's actual volume controller.
+            // A press counter preserves a short click if notify coalesces
+            // its down/up pair; power remains on the working HID route.
+            unsigned index=sample.finger-1;
+            if(down)volume_counts[index]++;
+            uint64_t state=(volume_counts[index]<<1)|(unsigned)down;
+            if(!notify_set_state(volume_tokens[index],state) &&
+               !notify_post(index?"dev.unixnu.pong.volume18.decrease":"dev.unixnu.pong.volume18.increase")) {
+                say("Pong keys18: volume=%u down=%u native action queued\n",index,down);
+                continue;
+            }
+        }
         IOHIDEventRef event=IOHIDEventCreateKeyboardEvent(NULL,sample.time,HID_PAGE_CONSUMER,
             usages[sample.finger],down,0);
         if (!event) continue;

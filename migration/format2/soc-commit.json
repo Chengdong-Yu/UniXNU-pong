@@ -1,0 +1,9 @@
+{
+  "author_name": "Pong Development",
+  "author_email": "pong@localhost",
+  "author_date": "2026-10-27T05:31:12-07:00",
+  "committer_name": "desktop",
+  "committer_email": "desktop@desktopdeMac-Pro.local",
+  "committer_date": "2026-10-27T05:42:09-07:00",
+  "message": "Add SM8475 common hardware profile from Pong Android DT"
+}

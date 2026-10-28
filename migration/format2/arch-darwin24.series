@@ -1,0 +1,2 @@
+# Darwin23 architecture patches are not applicable verbatim to XNU11417.
+# The adapted architecture changes are already in the device Darwin24 aggregate.

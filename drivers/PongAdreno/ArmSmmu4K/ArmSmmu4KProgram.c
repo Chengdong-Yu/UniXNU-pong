@@ -187,6 +187,38 @@ ArmSmmu4KStatus ArmSmmu4KSyncContextTlb(const ArmSmmu4KIo *io,uint64_t context_o
     if(status==ArmSmmu4KSuccess)r->phase=9;
     return status;
 }
+ArmSmmu4KStatus ArmSmmu4KSyncContextTlbPages(const ArmSmmu4KIo *io,uint64_t context_offset,unsigned asid,
+    const ArmSmmu4KRange *ranges,size_t count,unsigned budget,ArmSmmu4KProgramResult *r)
+{
+    if(!r)return ArmSmmu4KArgument;
+    *r=(ArmSmmu4KProgramResult){0};r->must_retain_tables=1;
+    if(!io || !io->write32 || !io->write64 || !io->read32 || !io->barrier || !budget || budget>1048576 || !context_offset ||
+        context_offset>io->register_bytes || io->register_bytes-context_offset<0x7f8 || !count || !ranges || asid>0xffff)
+        return ArmSmmu4KArgument;
+    size_t pages=0;
+    for(size_t i=0;i<count;++i) {
+        if(((ranges[i].iova|ranges[i].bytes)&4095) || !ranges[i].bytes || ranges[i].bytes/4096>ArmSmmu4KTlbPageLimit-pages)
+            return ArmSmmu4KArgument;
+        pages+=(size_t)(ranges[i].bytes/4096);
+    }
+    r->context_offset=context_offset;r->tlb_synchronized=0;
+    const size_t cb=(size_t)context_offset;
+    if(io->barrier(io->cookie))return ArmSmmu4KIoError;
+    /* TLBIVAL (+0x620), AArch64 format: VA[55:12] in bits 43:0, the ASID in bits 63:48. Leaf entries only: the tables above the leaves
+     * are fixed for the context's life. */
+    for(size_t i=0;i<count;++i)for(uint64_t offset=0;offset<ranges[i].bytes;offset+=4096)
+        if(write64(io,cb+0x620,(((ranges[i].iova+offset)>>12)&((UINT64_C(1)<<44)-1))|((uint64_t)asid<<48),r))return ArmSmmu4KIoError;
+    if(write32(io,cb+0x7f0,UINT32_MAX,r) || io->barrier(io->cookie))return ArmSmmu4KIoError;
+    for(unsigned i=0;i<budget;++i) {
+        uint32_t status;++r->poll_reads;
+        if(io->read32(io->cookie,cb+0x7f4,&status))return ArmSmmu4KIoError;
+        if(!(status&1)) {
+            if(io->barrier(io->cookie))return ArmSmmu4KIoError;
+            r->tlb_synchronized=1;r->phase=9;return ArmSmmu4KSuccess;
+        }
+    }
+    return ArmSmmu4KTimeout;
+}
 ArmSmmu4KStatus ArmSmmu4KSynchronizeOwnedContext(const ArmSmmu4KIo *io,unsigned bank,
     const ArmSmmu4KContextConfig *config,unsigned budget,ArmSmmu4KProgramResult *r)
 {return synchronize(io,bank,config,0,budget,r);}

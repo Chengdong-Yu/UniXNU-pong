@@ -1,0 +1,17 @@
+{
+  "guest": "22H374",
+  "instance_bytes": 136,
+  "virtual_entries": 168,
+  "metaclass": "0xfffffff007beced8",
+  "vptr": "0xfffffff006e0fa78",
+  "get_meta_class": "0xfffffff005f40798",
+  "constructor": "0xfffffff005f40704",
+  "metaclass_constructor": "0xfffffff005f406c8",
+  "destructor": "0xfffffff005f4074c",
+  "operational_overrides": [],
+  "constructor_aliases": [
+    "0xfffffff005f40704",
+    "0xfffffff005f40728"
+  ],
+  "original_prelink_base": "0xfffffff005130000"
+}

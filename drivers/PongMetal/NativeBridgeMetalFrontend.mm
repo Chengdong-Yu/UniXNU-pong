@@ -12,14 +12,17 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <pthread.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <mach/mach.h>
@@ -95,6 +98,7 @@ static NSString *lastError() {return [NSString stringWithUTF8String:nmb_last_err
 static std::mutex gJournalLock;
 static std::string gJournalPath;
 static uint64_t gJournalBegan;
+static bool gJournalVerbose;
 static void journal(const std::string &line) {
  if(gJournalPath.empty())return;
  std::lock_guard<std::mutex> lock(gJournalLock);
@@ -120,10 +124,11 @@ static NSMutableSet *gInFlight;
 static void waitForResource(id resource);
 // Resource SPI the runtime has no state for: no protected content (Metal's default options), and no owner transfer
 // (memory attribution is the kernel driver's, by the importing task), refused as not supported.
-#define NB_RESOURCE_SPI \
+#define NB_RESOURCE_SPI(TYPE) \
 - (uint64_t)protectionOptions {return 0;} \
 - (id<MTLHeap>)heap {return _parentHeap;} \
-- (BOOL)isAliasable {return NO;} \
+- (BOOL)isAliasable {return nmb_##TYPE##_is_aliasable(_handle);} \
+- (void)makeAliasable {if(!nmb_##TYPE##_make_aliasable(_handle))NBLOG(@"native-metal: makeAliasable refused: %@",lastError());} \
 - (int)setOwnerWithIdentity:(unsigned)identity {(void)identity;return 46; /* KERN_NOT_SUPPORTED */} \
 - (void)waitUntilComplete {waitForResource(self);}
 @interface NBBuffer : NBObject
@@ -162,7 +167,7 @@ static void releaseSurface(void *context,void *,uint64_t) {gSurfaceImportsReleas
 - (MTLResourceOptions)resourceOptions {return _options;}
 - (MTLStorageMode)storageMode {return (MTLStorageMode)((_options&MTLResourceStorageModeMask)>>MTLResourceStorageModeShift);}
 - (MTLCPUCacheMode)cpuCacheMode {return (MTLCPUCacheMode)((_options&MTLResourceCPUCacheModeMask)>>MTLResourceCPUCacheModeShift);}
-- (MTLHazardTrackingMode)hazardTrackingMode {return (MTLHazardTrackingMode)((_options&MTLResourceHazardTrackingModeMask)>>MTLResourceHazardTrackingModeShift);}
+- (MTLHazardTrackingMode)hazardTrackingMode {return (MTLHazardTrackingMode)nmb_buffer_hazard_tracking_mode(_handle);}
 - (void)didModifyRange:(NSRange)range {(void)range;}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
  const uint64_t answer=nmb_buffer_set_purgeable_state(_handle,state);
@@ -171,7 +176,7 @@ static void releaseSurface(void *context,void *,uint64_t) {gSurfaceImportsReleas
 }
 - (NSUInteger)allocatedSize {return nmb_buffer_length(_handle);}
 - (IOSurfaceRef)iosurface {return nullptr;}   // a buffer is never the backing of a surface here (surfaces back textures)
-NB_RESOURCE_SPI
+NB_RESOURCE_SPI(buffer)
 @end
 // Reuse only an import still held by a texture/view or pending command. Weak
 // values never extend a GPU allocation's lifetime. The strong buffer snapshot
@@ -209,6 +214,68 @@ static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out)
  *out={(uint64_t)d.textureType,(uint64_t)d.pixelFormat,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage,(uint64_t)d.resourceOptions};
  return true;
 }
+// 22H374 texture-layout SPI, read from the supplied AGXTextureLayout metadata.
+// This is our own linear host layout, never an invented AGX tiled layout.
+// The backend already supports linear textures over imported host buffers.
+struct NBFormatInfo {const char *name;uint64_t flags,castClass,words[4];};
+extern "C" NBFormatInfo MTLPixelFormatGetInfo(NSUInteger);
+struct NBLayoutWatermark {uint64_t words[2];};
+@interface NBTextureLayout : NSObject
+@property(nonatomic,copy) MTLTextureDescriptor *descriptor;
+@property(nonatomic) NSUInteger rowBytes,pixelBytes,size,alignment;
++ (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)descriptor;
+@end
+@implementation NBTextureLayout
++ (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)d {
+ if(!d || d.textureType!=MTLTextureType2D || d.sampleCount!=1 || d.mipmapLevelCount!=1 ||
+    d.depth!=1 || d.arrayLength!=1 || !d.width || !d.height || d.width>16384 || d.height>16384 ||
+    d.storageMode==MTLStorageModeMemoryless)return nil;
+ NBFormatInfo info=MTLPixelFormatGetInfo(d.pixelFormat);
+ if(!info.name || (info.flags&0x400) || !info.words[0] || info.words[0]>16)return nil;
+ const uint64_t row=nmb_device_linear_bytes_per_row(gDevice,d.pixelFormat,d.width);
+ const NSUInteger page=(NSUInteger)getpagesize();
+ if(!row || !page || row>NSUIntegerMax/d.height || row*d.height>NSUIntegerMax-(page-1))return nil;
+ NBTextureLayout *layout=[NBTextureLayout new];layout.descriptor=d;
+ layout.pixelBytes=info.words[0];layout.rowBytes=row;layout.alignment=page;
+ layout.size=((row*d.height+page-1)/page)*page;return layout;
+}
+- (NBLayoutWatermark)watermark {
+ return {{UINT64_C(0x504f4e474c494e31),
+  ((uint64_t)_descriptor.pixelFormat<<48)|((uint64_t)_descriptor.width<<24)|_descriptor.height}};
+}
+- (MTLSize)copyGranularity {return MTLSizeMake(1,1,1);}
+- (void)initializeTextureMemory:(void *)memory {if(memory)memset(memory,0,_size);}
+- (void)finalizeTextureMemory:(void *)memory {(void)memory; /* linear layout has no tiling metadata */}
+- (BOOL)validRegion:(MTLRegion)region slice:(NSUInteger)slice level:(NSUInteger)level {
+ return !slice && !level && !region.origin.z && region.size.depth==1 &&
+  region.origin.x<=_descriptor.width && region.size.width<=_descriptor.width-region.origin.x &&
+  region.origin.y<=_descriptor.height && region.size.height<=_descriptor.height-region.origin.y;
+}
+- (void)copyFromLinearBytes:(const void *)linear linearOffset:(NSUInteger)offset
+ linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image
+ toTextureMemory:(void *)memory textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region {
+ (void)image;
+ if(!linear || !memory || ![self validRegion:region slice:slice level:level])return;
+ const NSUInteger bytes=region.size.width*_pixelBytes;
+ if(row<bytes || offset>NSUIntegerMax-bytes ||
+    (region.size.height>1 && row>(NSUIntegerMax-offset-bytes)/(region.size.height-1)))return;
+ for(NSUInteger y=0;y<region.size.height;++y)
+  std::memmove((uint8_t *)memory+(region.origin.y+y)*_rowBytes+region.origin.x*_pixelBytes,
+   (const uint8_t *)linear+offset+y*row,bytes);
+}
+- (void)copyFromTextureMemory:(const void *)memory textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level
+ textureRegion:(MTLRegion)region toLinearBytes:(void *)linear linearOffset:(NSUInteger)offset
+ linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image {
+ (void)image;
+ if(!linear || !memory || ![self validRegion:region slice:slice level:level])return;
+ const NSUInteger bytes=region.size.width*_pixelBytes;
+ if(row<bytes || offset>NSUIntegerMax-bytes ||
+    (region.size.height>1 && row>(NSUIntegerMax-offset-bytes)/(region.size.height-1)))return;
+ for(NSUInteger y=0;y<region.size.height;++y)
+  std::memmove((uint8_t *)linear+offset+y*row,
+   (const uint8_t *)memory+(region.origin.y+y)*_rowBytes+region.origin.x*_pixelBytes,bytes);
+}
+@end
 @implementation NBTexture
 - (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}
 - (MTLTextureType)textureType {return (MTLTextureType)_descriptor.type;}
@@ -223,24 +290,32 @@ static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out)
 - (MTLResourceOptions)resourceOptions {return (MTLResourceOptions)_descriptor.options;}
 - (MTLStorageMode)storageMode {return (MTLStorageMode)((_descriptor.options&MTLResourceStorageModeMask)>>MTLResourceStorageModeShift);}
 - (MTLCPUCacheMode)cpuCacheMode {return (MTLCPUCacheMode)((_descriptor.options&MTLResourceCPUCacheModeMask)>>MTLResourceCPUCacheModeShift);}
+- (MTLHazardTrackingMode)hazardTrackingMode {return (MTLHazardTrackingMode)nmb_texture_hazard_tracking_mode(_handle);}
 - (BOOL)isFramebufferOnly {return NO;}
+// CoreImage in 22H374 queries this Metal SPI before choosing its render
+// destination. These are ordinary textures/IOSurface imports, never a
+// CAMetalDrawable's presentation texture. Views preserve that distinction.
+- (BOOL)isDrawable {return NO;}
 - (IOSurfaceRef)iosurface {return _surface;}
 - (NSUInteger)iosurfacePlane {return 0;}
 - (id<MTLBuffer>)buffer {return _surface?nil:(id<MTLBuffer>)_buffer;}
 - (NSUInteger)bufferOffset {return _offset;}
 - (NSUInteger)bufferBytesPerRow {return _rowBytes;}
 - (id<MTLTexture>)parentTexture {return _parent;}
+- (NSUInteger)parentRelativeLevel {return nmb_texture_parent_relative_level(_handle);}
+- (NSUInteger)parentRelativeSlice {return nmb_texture_parent_relative_slice(_handle);}
 - (NSUInteger)rotation {return 0;}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
  const uint64_t answer=nmb_texture_set_purgeable_state(_handle,state);
  if(!answer)NBLOG(@"native-metal: texture setPurgeableState refused: %@",lastError());
  return (MTLPurgeableState)answer;
 }
-NB_RESOURCE_SPI
+NB_RESOURCE_SPI(texture)
 - (id<MTLTexture>)view:(NmbTexture *)handle {
  if(!handle){NBLOG(@"native-metal: texture view refused: %@",lastError());return nil;}
  NBTexture *view=[NBTexture new];view.handle=handle;NmbTextureDescriptor descriptor;nmb_texture_describe(handle,&descriptor);view.descriptor=descriptor;
  view.parent=(id<MTLTexture>)self;view.buffer=_buffer;view.offset=_offset;view.rowBytes=_rowBytes;
+ view.parentHeap=_parentHeap;view.heapOffset=_heapOffset;
  if(_surface)view.surface=(IOSurfaceRef)CFRetain(_surface);
  return (id<MTLTexture>)view;
 }
@@ -334,6 +409,8 @@ static NBTexture *textureOnSurface(NBBuffer *buffer,MTLTextureDescriptor *d,IOSu
 @property(nonatomic,copy) NSString *name;
 @property(nonatomic) MTLFunctionType functionType;
 @property(nonatomic) std::string constantsText;   // name:type:hex of each constant value it was specialized with (the journal's)
+@property(nonatomic,strong) id pipelineLibrary;
+@property(nonatomic,strong) id functionCache;
 @end
 @implementation NBFunction
 - (void)dealloc {nmb_function_release(_handle);}
@@ -401,17 +478,17 @@ static std::string quartzCoreCallers();
   if(!bytes || !v.data){NBLOG(@"native-metal: function %@ refused: constant type %lu",name,(unsigned long)v.dataType);if(error)*error=nbError([NSString stringWithFormat:@"constant type %lu is not qualified",(unsigned long)v.dataType]);return nil;}
   constants.push_back({v.dataType,group?0:v.index,group?v.name.UTF8String:nullptr,v.data,bytes});
  }
+ const uint64_t functionBegan=nowUs();
+ NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);
  std::string text;
- for(const NmbConstant &c:constants) {
+ if(gJournalVerbose || !handle)for(const NmbConstant &c:constants) {
   char head[32];if(!c.name)snprintf(head,sizeof head,"#%llu",(unsigned long long)c.index);
   text+=text.empty()?"":" ";text+=c.name?c.name:head;snprintf(head,sizeof head,":%llu:",(unsigned long long)c.type);text+=head;
   for(uint64_t i=0;i<c.length;i++){snprintf(head,sizeof head,"%02x",((const uint8_t *)c.bytes)[i]);text+=head;}
  }
- const uint64_t functionBegan=nowUs();
- NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);
  // One S line per specialization (int-155: every QuartzCore pipeline was made on its draw, and a refused generic function would leave its
  // generic pipeline unmade without a word): the function, its constants, the time, the refusal and QuartzCore's callers.
- if(!gJournalPath.empty()) {
+ if(!gJournalPath.empty() && (gJournalVerbose || !handle)) {
   char head[96];snprintf(head,sizeof head,"S t=%llu us=%llu ok=%d name=",(unsigned long long)((functionBegan-gJournalBegan)/1000),
       (unsigned long long)(nowUs()-functionBegan),handle?1:0);
   journal(head+std::string(name.UTF8String?:"?")+" k="+text+(handle?std::string():" err="+std::string(lastError().UTF8String?:"?"))+" | "+quartzCoreCallers());
@@ -427,6 +504,31 @@ static std::string quartzCoreCallers();
  NSError *error=nil;id<MTLFunction> function=[self newFunctionWithName:name constantValues:values error:&error];
  handler(function,error);
 }
+#if PONG_GUEST_22H374
+// 22H374 Core Image uses the private pipeline-library entry, whose native
+// _MTLLibrary implementation forwards the library's functionCache. These
+// are compilation caches, not another shader library. Compile the requested
+// function/constants through our real runtime cache and keep attribution
+// objects alive; no fabricated function/pipeline is returned on failure.
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values functionCache:(id)cache error:(NSError **)error {
+ id<MTLFunction> result=values?[self newFunctionWithName:name constantValues:values error:error]:[self newFunctionWithName:name];
+ if(result) {((NBFunction *)result).functionCache=cache;if(error)*error=nil;}
+ else if(error && !values)*error=nbError([NSString stringWithFormat:@"function %@: %@",name,lastError()]);
+ return result;
+}
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values pipelineLibrary:(id)library error:(NSError **)error {
+ id cache=nil;
+ if(library && methodABI(library,sel_registerName("functionCache"),"@16@0:8"))
+  cache=((id(*)(id,SEL))objc_msgSend)(library,sel_registerName("functionCache"));
+ id<MTLFunction> result=[self newFunctionWithName:name constantValues:values functionCache:cache error:error];
+ if(result)((NBFunction *)result).pipelineLibrary=library;
+ return result;
+}
+- (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values pipelineLibrary:(id)library completionHandler:(void (^)(id<MTLFunction>,NSError *))handler {
+ NSError *error=nil;id<MTLFunction> result=[self newFunctionWithName:name constantValues:values pipelineLibrary:library error:&error];
+ if(handler)handler(result,error);
+}
+#endif
 - (MTLLibraryType)type {return MTLLibraryTypeExecutable;}
 // The descriptor's name and constants; its specialized name only labels Metal's function and its options ask for compile-time work the
 // runtime does when the function is made.
@@ -548,6 +650,9 @@ static void notified(void *context,uint64_t value) {
 // Runtime handles retain GPU storage, but only the Objective-C owner retains
 // a no-copy deallocator, its memory owner and texture/heap ancestry.
 @property(nonatomic,strong) NSMutableSet *resourceOwners;
+// Darwin24 QuartzCore attaches a uint32 task-attribution list before encoding.
+// Preserve that metadata without changing ownership of kernel BOs or tasks.
+@property(atomic,copy) NSData *responsibleTaskIDs;
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
@@ -823,6 +928,15 @@ static void scheduled(void *context);
 - (void)dealloc {nmb_command_buffer_release(_handle);}
 - (id<MTLCommandQueue>)commandQueue {return (id<MTLCommandQueue>)_queue;}
 - (BOOL)retainedReferences {return YES;}
+#if PONG_GUEST_22H374
+// Actual 22H374 Metal encoding: v28@0:8r^I16I24, not NSUInteger count.
+- (void)setResponsibleTaskIDs:(const uint32_t *)identities count:(uint32_t)count {
+ if(self.committed || (count && !identities) || count>4096) {
+  [self refuse:@"invalid responsible task attribution list"];return;
+ }
+ self.responsibleTaskIDs=count?[NSData dataWithBytes:identities length:size_t(count)*sizeof(*identities)]:nil;
+}
+#endif
 // Protected content is not supported (the runtime's AppleOnlyCall::SetProtectionOptions takes Metal's default only): any other option fails
 // the command buffer.
 - (uint64_t)protectionOptions {return 0;}
@@ -853,7 +967,11 @@ static void scheduled(void *context);
 - (CFTimeInterval)GPUEndTime {return nmb_command_buffer_gpu_time(_handle,true);}
 - (id)encoder:(NBEncoder *)encoder handle:(NmbEncoder *)handle what:(NSString *)what {
  if(self.committed){[self refuse:[what stringByAppendingString:@" after commit"]];return nil;}
- if(!handle){[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];return nil;}
+ // RenderBox on 22H374 caches the encoder's IMPs with methodForSelector:.
+ // A nil result becomes a null function call there. Keep the encoder object
+ // while preserving the failure: null runtime handles reject every operation,
+ // and encodeFailure completes this command buffer with status Error.
+ if(!handle){[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];encoder.commandBuffer=self;return encoder;}
  encoder.handle=handle;encoder.commandBuffer=self;return encoder;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
@@ -1084,7 +1202,7 @@ struct NBCost {
 // One journal line of a render pipeline creation begun at `began` (microseconds), `refused` its refusal or null. The label is the
 // caller's name for the pipeline (QuartzCore's: its spec's encoded name).
 static void journalRenderPipeline(MTLRenderPipelineDescriptor *d,uint64_t began,const char *refused,const std::string &cost) {
- if(gJournalPath.empty())return;
+ if(gJournalPath.empty() || (!gJournalVerbose && !refused))return;
  const uint64_t ended=nowUs();uint64_t tid=0;pthread_threadid_np(nullptr,&tid);
  char head[256];
  snprintf(head,sizeof head,"R t=%llu tid=%llu main=%d us=%llu ok=%d samples=%lu topo=%lu ds=%lu/%lu",(unsigned long long)((began-gJournalBegan)/1000),
@@ -1314,17 +1432,25 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  for(NSUInteger i=0;i<count;i++)if(resources[i])[held addObject:resources[i]];
  group.resources=held;return group;
 }
-// Not made here: a texture over raw memory in Apple's layout, and Apple's texture layout object. Both are refused, with the reason, rather than
-// answered with a guessed shape.
+// Match the layout object above: raw memory contains linear pixels, and is
+// imported with its real row stride. Unsupported layouts still return nil.
 - (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
- (void)bytes;(void)length;(void)d;(void)deallocator;
- NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)");
- return nil;
+ NBTextureLayout *layout=[NBTextureLayout layoutForDescriptor:d];
+ if(!layout || !bytes || d.storageMode!=MTLStorageModeShared || length<layout.size ||
+    (uintptr_t)bytes%layout.alignment || length%layout.alignment) {
+  NBLOG(@"native-metal: raw texture requires supported native linear layout and page-aligned host memory");return nil;
+ }
+ __block BOOL committed=NO;
+ NBBuffer *buffer=(NBBuffer *)[(id<MTLDevice>)self newBufferWithBytesNoCopy:bytes length:length options:d.resourceOptions
+  deallocator:^(void *pointer,NSUInteger size){if(committed && deallocator)deallocator(pointer,size);}];
+ if(!buffer)return nil;
+ NBTexture *texture=textureOnBuffer(buffer,d,0,layout.rowBytes,false);
+ if(texture)committed=YES;
+ return (id<MTLTexture>)texture;
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
- (void)d;(void)backed;
- NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
- return nil;
+ (void)backed;
+ return [NBTextureLayout layoutForDescriptor:d];
 }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count {(void)count;return [(id<MTLDevice>)self newCommandQueue];}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
@@ -1435,9 +1561,10 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  std::vector<NmbBinaryArchive *> archives;
  if(!pipelineArchives(d.binaryArchives,archives,error)){delete p;return nil;}
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
- const uint64_t pipelineBegan=nowUs();const NBCost costBegan=NBCost::now();
+ const uint64_t pipelineBegan=nowUs();
+ const NBCost costBegan=gJournalVerbose?NBCost::now():NBCost{};
  NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);delete p;gTimePipeline.add(pipelineBegan);
- journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),gJournalPath.empty()?std::string():NBCost::now().since(costBegan));
+ journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),gJournalVerbose?NBCost::now().since(costBegan):std::string());
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
@@ -1533,12 +1660,17 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  if(gDeviceObject)return gDeviceObject;
  Class base=objc_getClass("_MTLDevice");
 #if TARGET_OS_IPHONE
- if(!PongMetalDeviceAbiAvailable(base)){NBLOG(@"Pong Metal: actual 20G81 device ABI unavailable");return nil;}
+ if(!PongMetalDeviceAbiAvailable(base)){NBLOG(@"Pong Metal: matching guest device ABI unavailable");return nil;}
 #endif
  gMissing=missing;gInFlight=[NSMutableSet set];
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}
+ // Normal UI draws must not unwind QuartzCore stacks, open/close an APFS
+ // log and serialize every successful shader/pipeline creation. Keep all
+ // failures; full journals remain available for a targeted capture.
+ const char *trace=getenv("PONG_METAL_PIPELINE_TRACE");
+ gJournalVerbose=trace && !strcmp(trace,"1");
  char name[128]={};nmb_device_name(gDevice,name,sizeof name);gName=[NSString stringWithUTF8String:name];gRegistryID=registryID;
  // Report unmet reference-family rows; supportsFamily keeps the runtime's actual answer.
  {char waived[4096]={};nmb_device_family_waivers(gDevice,waived,sizeof waived);

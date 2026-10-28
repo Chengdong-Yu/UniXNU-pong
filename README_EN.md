@@ -1,65 +1,48 @@
 # UniXNU-pong
 
-> **Local `ipados18` branch:** current Pong iOS 16 development sources have been captured for a future iPadOS 18 port using seventh-generation iPad restore components. No iPadOS 18 kernel or boot image has been built. The instructions below still describe the iOS 16 baseline. See the [migration preparation notes](migration/ipados18/README.zh.md).
-
 [简体中文](README.md) | **English**
 
-UniXNU device support for Nothing Phone (2), codename **Pong**, Qualcomm **SM8475**. This repository contains the device configuration, XNU patches, board drivers, userland adaptation, and build scripts for **iOS 16.6.1 (20G81)**.
+Format 2 device support for Nothing Phone (2), codename **Pong**, Qualcomm **SM8475**. Main targets **iPadOS 18.7.10 (22H374)** from iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69. The board remains Pong. The earlier iOS16 implementation remains in Git history.
 
-The current source reflects the device state that reaches the iOS home screen. Display and touch work; Adreno 730 hardware acceleration and Metal integration are not yet confirmed.
+- [UniXNU tools](https://github.com/UniXNU/UniXNU), [Pong UEFI](https://github.com/Chengdong-Yu/uefi-pong)
+- Official [migration](https://unixnu.com/en/porting/migration) and [device repository](https://unixnu.com/en/porting/device-repository) guides
+- [Format 2 integration](migration/format2/README.zh.md), [OS migration](migration/ipados18/README.zh.md), [porting record](porting.toml)
 
-- Firmware: [uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
-- UniXNU core: [UniXNU](https://github.com/UniXNU/UniXNU)
-- Documentation: [UniXNU documentation](https://unixnu.com)
+## Hardware and progress
+
+| Area | Configuration and observations |
+| --- | --- |
+| CPU / memory | X2 + 3×A710 + 4×A510, PSCI/GICv3, 19.2 MHz timer, native 4 KiB pages; 12 GiB physical RAM, managed memory constrained by reservations |
+| Display / input | 1080×2412, stride 4320, requested 120 Hz; desktop, touch and wallpaper observed; actual refresh and brightness remain under development |
+| GPU / Metal | Adreno 730 with Pong firmware, Turnip and Metal integration used for desktop rendering; remaining paths need work |
+| Storage | Native UFS/APFS boot, separate OS/SystemOS and writable 8 GiB UFS Data at `/private/var` |
+| Wi-Fi | QCA6490/ath11k; PCIe0 link, BAR and DMA allocation observed; SMMU ordering repaired, scanning and connectivity unconfirmed |
+| Audio | ADSP, AudioReach, two TFA9873 amplifiers and output HAL connected; CoreMedia provider selection repaired, actual PCM output unconfirmed |
+| Buttons / power | Real PMIC events reach HID/SpringBoard; reported power/volume actions remain unresolved; full suspend/resume incomplete |
+
+Host builds and service publication are recorded separately from device functionality. The latest [SMMU/audio repair](migration/ipados18/services73-smmu-audio.md) is built without a temporary device boot, as requested.
 
 ## Build
 
-Clone the UniXNU core, this device repository, and the UEFI repository as sibling directories. Initialize the core repository's submodules:
+Requires full Xcode with the iPhoneOS SDK, Python 3.12, dtc, selected Apple open source dependencies, matching 22H374 restore/ABI inputs and firmware obtained from Pong. Source revisions are pinned in feeds, lock and migration records.
 
 ```sh
-git clone --recurse-submodules https://github.com/UniXNU/UniXNU
-git clone https://github.com/Chengdong-Yu/UniXNU-pong
-git clone --recurse-submodules https://github.com/Chengdong-Yu/uefi-pong
+git clone https://github.com/UniXNU/UniXNU ../UniXNU-upstream
+git -C ../UniXNU-upstream checkout 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
+cp local.toml.example local.toml
+# Set local build, Xcode and volume-layout paths in local.toml.
+python3.12 scripts/migrate-pong-format2.py --unixnu ../UniXNU-upstream
+python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../pong-build --jobs 4
 ```
 
-Run the following commands from the UniXNU core directory:
+The entry point resolves ARM64, SM8475, OS and board layers, compiles the hardware DTS and invokes the Darwin24 builder. Outputs reside in `../pong-build/pong/ipados-18.7.10-22H374/pong_ipados18/`. See the OS migration guide for restore download, userland and userdata preparation; these require matching local binary inputs.
 
-```sh
-./unixnu defconfig pong_defconfig -D ../UniXNU-pong
-./unixnu fetch
-python3 ../UniXNU-pong/scripts/fetch-ios16-assets.py
-./unixnu build kernel
-./unixnu build package
-./unixnu build firmware --uefi ../uefi-pong
-```
+Image hashing, whole-image validation and device image readback are skipped by default. The protocol's SHNGROOT header checksum is retained.
 
-The asset fetcher reads the IPSW BuildManifest according to the iOS 16.6.1 / 20G81 settings in `board.toml`, then uses HTTP Range requests to extract only the kernel, device tree, trust caches, OS, and SystemOS (Cryptex1) components needed for the build. It does not download a complete IPSW archive. Extracted components are saved under UniXNU's `out/ipsw/20G81` directory.
+## Source boundaries and license
 
-After fetching the components, build the Pong userdata root image separately:
+Only source, configuration, patches and scripts are published. IPSWs, Apple private binaries, firmware, credentials and generated userdata remain local and ignored. Machine paths belong in local configuration.
 
-```sh
-python3 ../UniXNU-pong/scripts/build-userdata.py
-```
+`PongPlatform24` identifies the community A730/QCA6490 implementation, independently of the upstream A740/WCN7850 driver. The versioned SM8475 seed is kept under `migration/format2/soc-seed`.
 
-The image is written locally under `UniXNU-pong/out/`. The builder generates the window and header digest fields required by the SHNGROOT format during a single streaming copy. It does not perform an extra image verification or readback pass. Apple restore files, generated userdata images, the system-volume authentication data, and GPU firmware are not included in this repository. Required system components are extracted from locally fetched restore inputs; GPU firmware is supplied as a local input.
-
-The restore identity selects iPad7,1 / J120 / 20G81 components, while the board drivers and boot configuration target Nothing Phone (2), Pong / SM8475 hardware.
-
-## Device support
-
-| Feature | State | Notes |
-| --- | --- | --- |
-| iOS 16.6.1 boot | ✅ | Reaches the iOS home screen |
-| Display | ✅ | System UI is visible |
-| Touch | ✅ | Pong touch path works |
-| Physical buttons | ✅ | Pong power and volume key paths are included |
-| UFS / APFS | ⚠️ | Native UFS and APFS boot paths are connected; some mount capabilities remain in progress |
-| Writable Data | ⚠️ | A local userdata root image builder is included; the image is generated locally |
-| Adreno 730 / Metal | ⚠️ | Driver and Metal adaptation sources are included; hardware acceleration is not confirmed |
-| Wi-Fi, Bluetooth, camera, audio, sensors | ❌ | Device support is not yet implemented |
-
-✅ available, ⚠️ partial or unconfirmed, ❌ unavailable.
-
-## License
-
-Device-level code is licensed under BSD-2-Clause-Patent. Imported components retain their SPDX identifiers and original licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Board code uses BSD-2-Clause-Patent. Imported components retain their licenses and SPDX identifiers; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -2,20 +2,20 @@
 #include "NativeAdrenoSmmuContext.h"
 #include <IOKit/IOLib.h>
 IOReturn NativeAdrenoSmmuContext::prepare(NativeAdrenoMemory *tables,unsigned upper,uint64_t iova,
-    size_t bytes,size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,unsigned output_bits)
+    size_t bytes,size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,unsigned output_bits,unsigned input_bits)
 {
     if(prepared_ || poisoned_)return kIOReturnBusy;
     if(!tables || upper>1 || !bytes || (iova&4095) || !leaf_budget || leaf_budget>MaxLeaves ||
         bank>63 || asid>0xffff || !poll_budget || poll_budget>4096)
         return kIOReturnBadArgument;
-    const IOReturn prepared=NativeAdrenoPrepareSmmuMemory(tables,32,output_bits,iova,bytes,upper,leaf_budget,
+    const IOReturn prepared=NativeAdrenoPrepareSmmuMemory(tables,input_bits,output_bits,iova,bytes,upper,leaf_budget,
         &arena_,&state_,&visibility_);
     if(prepared!=kIOReturnSuccess)return prepared==kIOReturnNoResources?prepared:kIOReturnBadArgument;
     /* The adreno SMMU node is dma-coherent at the pinned tree, so table walks are inner write-back. */
     config_=(ArmSmmu4KContextConfig){.lower=upper?nullptr:&arena_.config,.upper=upper?&arena_.config:nullptr,
         .lower_tables=upper?nullptr:&state_.tables,.upper_tables=upper?&state_.tables:nullptr,.id0=0,.id2=0,
         .asid=asid,.coherent_walk=1,.stall_on_fault=0,.continue_after_fault=1,.polled_faults=1,
-        .ignore_top_byte=upper?0u:1u,.shared_asid=1};
+        .ignore_top_byte=(!upper && input_bits==32)?1u:0u,.shared_asid=1};
     tables_=tables;bank_=bank;poll_budget_=poll_budget;prepared_=true;
     return kIOReturnSuccess;
 }

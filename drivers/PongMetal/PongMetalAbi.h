@@ -5,13 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Actual20G81 metadata, described by describe-pong-metal-abi.py: _MTLDevice
- * extent528, not Sheng21H461's536. No private superclass ivars are written.
+/* Guest metadata, described by describe-pong-metal-abi.py: _MTLDevice
+ * is 528 bytes on 20G81 and 600 on 22H374. No private superclass ivars are written.
  * New methods use the target's own Objective-C dispatch and public Metal ABI.
  */
 static bool PongMetalDeviceAbiAvailable(Class base)
 {
-    if (!base || class_getInstanceSize(base)!=528) return false;
+#if PONG_GUEST_22H374
+    constexpr size_t extent=600; // actual 22H374 _MTLDevice metadata
+#else
+    constexpr size_t extent=528; // actual 20G81 metadata
+#endif
+    if (!base || class_getInstanceSize(base)!=extent) return false;
     const struct {const char *name,*result,*argument;} expected[]={
         {"initWithAcceleratorPort:","@","I"},
         {"initLimits","v",nullptr},{"initFeatureQueries","v",nullptr},

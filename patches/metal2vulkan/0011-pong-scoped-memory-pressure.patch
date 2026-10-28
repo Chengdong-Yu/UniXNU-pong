@@ -1,0 +1,110 @@
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -370,6 +370,15 @@
+         self.blocks[index].take().map(|block| block.payload)
+     }
+ 
++    /// Return only unreferenced pooled blocks; placements and submitted work
++    /// retain their ranges, so they can never be trimmed here.
++    fn trim_empty(&mut self) -> impl Iterator<Item = T> + '_ {
++        self.blocks.iter_mut().filter_map(|slot| {
++            let empty = slot.as_ref().is_some_and(|b| !b.dedicated && b.ranges.is_empty());
++            if empty { slot.take().map(|b| b.payload) } else { None }
++        })
++    }
++
+     /// Every block's payload, emptying the pool.
+     pub(super) fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+         self.blocks.drain(..).flatten().map(|block| block.payload)
+@@ -684,12 +693,21 @@
+     ) -> Memory {
+         let count = properties.memory_type_count as usize;
+         let types = properties.memory_types[..count.min(vk::MAX_MEMORY_TYPES)].to_vec();
++        // A scoped 128 MiB GPU aperture cannot afford one 64 MiB block
++        // for buffers and another for images before its first IOSurface.
++        // Size pooling from the actual advertised heaps, not system RAM.
++        let heap_bytes = types.iter().filter_map(|ty| {
++            let index = ty.heap_index as usize;
++            (index < properties.memory_heap_count as usize)
++                .then(|| properties.memory_heaps[index].size)
++        }).filter(|size| *size != 0).min().unwrap_or(BLOCK_BYTES * 16);
++        let pooled_bytes = BLOCK_BYTES.min((heap_bytes / 16).max(4096));
+         Memory {
+             pools: (types.iter().chain(&types))
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
+-            block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
++            block_bytes: pooled_bytes.min(max_allocation.max(1)),
+             device_address,
+             address_types: None,
+             kept: None,
+@@ -957,6 +975,18 @@
+         if let Some(block) = self.pool(holds, type_index).release(block, offset, size) {
+             // SAFETY: no resource is placed in the block any more.
+             unsafe { block.release(device) };
++        }
++    }
++
++    /// Under allocation pressure give back warm blocks that hold no live
++    /// resource. Never wait for or evict a placed/submitted allocation.
++    fn trim_empty_blocks(&mut self, device: &ash::Device) {
++        for pool in &mut self.pools {
++            for block in pool.trim_empty() {
++                // SAFETY: no placement (including command-held resources)
++                // remains in this block; the pool removed it atomically.
++                unsafe { block.release(device) };
++            }
+         }
+     }
+ 
+@@ -1002,7 +1032,15 @@
+             }
+             // SAFETY: `info` and its chain live for the call; the type index is the device's and
+             // allows the pointer; the caller's contract keeps the memory mapped.
+-            match unsafe { device.allocate_memory(&info, None) } {
++            let mut allocation = unsafe { device.allocate_memory(&info, None) };
++            if matches!(allocation, Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)) {
++                // Imports have no pool of their own. Warm empty blocks can
++                // otherwise consume their IOVA even after every fence ended.
++                self.trim_empty_blocks(device);
++                // SAFETY: the original pointer and allocation chain are live.
++                allocation = unsafe { device.allocate_memory(&info, None) };
++            }
++            match allocation {
+                 Ok(memory) => {
+                     let block = Block {
+                         memory,
+@@ -1385,14 +1423,24 @@
+                 return Ok(placement);
+             }
+         }
+-        match maker.make(device, type_index, block_size, addressed) {
+-            Ok(block) => {
+-                let mut memory = lock(memory);
+-                let index = memory.add_block(pool, block, block_size, dedicated, size);
+-                return Ok(memory.placement(pool, index, 0, size, addressed.is_some()));
+-            }
+-            Err(error @ Error::OutOfMemory(_)) => failure = error,
+-            Err(error) => return Err(error),
++        // A requested range may fit even when a speculative pool block does
++        // not. Retry once with an exact dedicated block, still with the
++        // allocator lock released and every real Vulkan failure preserved.
++        let attempts = if dedicated || block_size == size { 1 } else { 2 };
++        for attempt in 0..attempts {
++            let bytes = if attempt == 0 { block_size } else { size };
++            match maker.make(device, type_index, bytes, addressed) {
++                Ok(block) => {
++                    let mut memory = lock(memory);
++                    let index = memory.add_block(pool, block, bytes, dedicated || attempt != 0, size);
++                    return Ok(memory.placement(pool, index, 0, size, addressed.is_some()));
++                }
++                Err(error @ Error::OutOfMemory(_)) => {
++                    failure = error;
++                    lock(memory).trim_empty_blocks(device);
++                }
++                Err(error) => return Err(error),
++            }
+         }
+     }
+     Err(failure)

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ShouldRunDiagnosticsMiniBuddy</key>
+	<false/>
+	<key>ShouldRunHSA2MiniBuddy</key>
+	<false/>
+	<key>ShouldRunKeychainSyncMiniBuddy</key>
+	<false/>
+	<key>ShouldRunMesaMiniBuddy</key>
+	<false/>
+	<key>ShouldRunPaymentMiniBuddy</key>
+	<false/>
+	<key>ShouldRunStandardMiniBuddy</key>
+	<false/>
+	<key>SilentICDPUpgrade</key>
+	<false/>
+</dict>
+</plist>

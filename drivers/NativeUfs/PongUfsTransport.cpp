@@ -42,6 +42,7 @@ struct UfsHost {
   bool writable = false;
 };
 static UfsHost gHost;
+static uint32_t gWifiUfsReady;
 static bool gTransportAttempted;
 enum : uint64_t {
   // Pong LUN0 GPT entry "userdata", captured from this phone in recovery.
@@ -205,6 +206,7 @@ static bool hostBringUp() {
   gHost.blocks = uint64_t(last) + 1;
   IOLog("PONG_UFS: transport ready LUN=0 block=4096 blocks=%llu; WRITE(10) FUA=%s; writes stay inside declared SHNGROOT windows\n",
         gHost.blocks, gHost.writable ? "enabled" : "disabled");
+  __atomic_store_n(&gWifiUfsReady,1,__ATOMIC_RELEASE);
   return true;
 }
 }
@@ -420,8 +422,21 @@ bool PongUfsBlock::start(IOService *provider) {
   gRootDiagnostic.stage = "first root read";
   if (hostRead4k(0, window.baseByte / 4096, 1, bounce) != kIOReturnSuccess)
     return transportFailure("first root read");
-  if (memcmp(bounce + window.signatureOffset, window.signature, strlen(window.signature)))
-    return transportFailure("SHNGROOT window signature mismatch");
+  const bool expected = !memcmp(bounce + window.signatureOffset, window.signature, strlen(window.signature));
+  // New restores publish a raw APFS OS container, while older OS inputs use
+  // a GPT disk. Both are actual media formats handled by IOStorage/APFS.
+  const bool rawApfsRoot = !strcmp(window.name, "OS") && !memcmp(bounce + 32, "NXSB", 4) &&
+    OSReadLittleInt32(bounce, 36) == 4096;
+  if (!expected && !rawApfsRoot) {
+    // Invalid filesystem contents belong to this window, not to the shared
+    // UFS controller. Do not invalidate already published OS/SystemOS disks.
+    IOLog("PONG_UFS: %s window has no supported filesystem header base=%llx bytes=%llx; media not published\n",
+          window.name, window.baseByte, window.size);
+    char detail[96];
+    snprintf(detail, sizeof(detail), "%s filesystem header invalid", window.name);
+    PongProbeRecord(4, "ufs-transport", PongProbeFail, detail, window.baseByte);
+    return false;
+  }
   gRootDiagnostic.first = kPongUserdataFirst4k;
   gRootDiagnostic.last = kPongUserdataLast4k;
   gRootDiagnostic.windowBytes = window.size;
@@ -539,10 +554,10 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
     return transportFailure("Pong userdata geometry changed");
   if (layout.manifestStatus) return transportFailure("invalid SHNGROOT manifest/hash/bounds");
   static const struct { const char *name, *product, *signature; unsigned offset; } wanted[] = {
-    {"OS", "iOS 16 OS root", "EFI PART", 512},
-    {"SystemOS", "iOS 16 SystemOS", "NXSB", 32},
+    {"OS", "Pong OS root", "EFI PART", 512},
+    {"SystemOS", "Pong SystemOS", "NXSB", 32},
 #if XNU_PONG_UFS_DATA
-    {"Data", "iOS 16 persistent Data", "EFI PART", 512},
+    {"Data", "Pong persistent Data", "EFI PART", 512},
 #endif
   };
   gRootWindowCount = 0;
@@ -558,11 +573,21 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
     }
     if (!found) return transportFailure("required SHNGROOT window missing");
   }
+  bool rootPublished = false;
   for (unsigned index = 0; index < gRootWindowCount; ++index) {
     OSSharedPtr<PongUfsBlock> block(new PongUfsBlock, OSNoRetain);
     if (!block || !block->init(nullptr, gRootWindows[index]) || !block->attach(provider))
       return transportFailure("block allocation/attachment");
-    if (!block->start(provider)) { block->detach(provider); return transportFailure("block start"); }
+    if (!block->start(provider)) {
+      block->detach(provider);
+      // Actual I/O/controller failures still stop further DMA. A rejected
+      // filesystem header leaves the transport usable for the other windows.
+      if (!gHost.ready) return false;
+      continue;
+    }
+    if (!strcmp(gRootWindows[index].name, "OS")) rootPublished = true;
   }
-  return true;
+  return rootPublished;
 }
+
+extern "C" bool pong_ufs_ready(void) { return __atomic_load_n(&gWifiUfsReady,__ATOMIC_ACQUIRE)!=0; }

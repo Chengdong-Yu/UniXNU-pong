@@ -1,0 +1,140 @@
+{
+  "date": "2026-10-24",
+  "target": "Pong / SM8475 / Adreno 730 / iPadOS 18.7.10 / 22H374",
+  "repositories": {
+    "UniXNU": {
+      "path": "/Volumes/PongDev/upstream/UniXNU",
+      "before": "1a01c2afa197d975d04da892325c56b6b14aaecb",
+      "status": "",
+      "after": "16e592abee8a550dec8154ed1f38b5ebc4f16213"
+    },
+    "UniXNU-sheng": {
+      "path": "/Volumes/PongDev/upstream/UniXNU-sheng",
+      "before": "251b291adf941b9953fe3ae66a808b9b626e164d",
+      "status": "",
+      "after": "0e1f6e52638137db15905db8d775ad73757f39fa"
+    }
+  },
+  "components": [
+    {
+      "legacy": "NativeAdreno",
+      "name": "Adreno740",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeAdreno",
+      "base": "b686b9054f57d393c80195b82568a09f8ca106a2",
+      "head": "4e0314df8ad29d52f6fa3f9383a540adcd618b87",
+      "canonical": "https://github.com/UniXNU/Adreno740.git"
+    },
+    {
+      "legacy": "NativeMetal",
+      "name": "AdrenoMetal",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeMetal",
+      "base": "c6d29caad6d880cc8204ebe3bc34d77479a3255d",
+      "head": "454ff2ce83766ce7b3e0f355e83f1d72907708b3",
+      "canonical": "https://github.com/UniXNU/AdrenoMetal.git"
+    },
+    {
+      "legacy": "NativeMobileDisplay",
+      "name": "GopFramebuffer",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeMobileDisplay",
+      "base": "8666a9950c9699b368931d18cac92c0fdb2ce9c0",
+      "head": "cf3b42979a9c44219e7bb149543e6fc3388b58ed",
+      "canonical": "https://github.com/UniXNU/GopFramebuffer.git"
+    },
+    {
+      "legacy": "ArmSmmu4K",
+      "name": "ArmSmmu4K",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/ArmSmmu4K",
+      "base": "4d0d6598b1a36aeec3de01091893fa6660e49388",
+      "head": "8bb168ad058c28d5c04f179ba407875eacba7ef3",
+      "canonical": "https://github.com/UniXNU/ArmSmmu4K.git"
+    },
+    {
+      "legacy": "AdrenoFirmware",
+      "name": "AdrenoFirmware",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/AdrenoFirmware",
+      "base": "40fdb8ea87606612ac6f1e80bbb49955d0ce4051",
+      "head": "20ad3d7aca14bd46aecab6335c780f5413fa054b",
+      "canonical": "https://github.com/UniXNU/AdrenoFirmware.git"
+    },
+    {
+      "legacy": "AdrenoPM4",
+      "name": "AdrenoPM4",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/AdrenoPM4",
+      "base": "445f8fe6d115738352b9d78dc70af6d61aa7f62f",
+      "head": "282606b528b2595bc4274ea7490b62b323f35a5f",
+      "canonical": "https://github.com/UniXNU/AdrenoPM4.git"
+    }
+  ],
+  "merge_policy": "Review upstream deltas against the captured source base; keep Pong board values and Darwin24 ABI adaptations",
+  "merged": [
+    {
+      "upstream": "UniXNU 578cf86",
+      "path": "drivers/DarwinBoot24/DarwinBootPkg/Driver/DarwinBoot.c",
+      "change": "Print the effective loader command line before ExitBootServices"
+    },
+    {
+      "upstream": "Adreno740 4e0314df8ad29d52f6fa3f9383a540adcd618b87",
+      "path": "drivers/PongAdreno/submit",
+      "change": "Canonical component references; exported symbols and native wire ABI retained"
+    },
+    {
+      "upstream": "UniXNU component/OS profile contract",
+      "path": "scripts/build-pong-metal-plugin.py",
+      "change": "Require bridge build guest and _MTLDevice extent to match the selected plugin guest"
+    }
+  ],
+  "already_present": [
+    {
+      "change": "nonzero arm-io base and relative standard reg",
+      "path": "scripts/make-pong-adt-ipados18.py",
+      "detail": "APSS_BASE ranges and GIC offsets already comply; custom Pong hardware metadata remains absolute by contract"
+    },
+    {
+      "change": "4 GiB GPU aperture",
+      "path": "drivers/PongAdreno/PongAdrenoCp.cpp",
+      "detail": "32-bit VM, 2053 page-table pages and disjoint client windows already present"
+    },
+    {
+      "change": "legacy display compile guard",
+      "path": "patches/xnu-ipados18/0001-pong-darwin24.patch",
+      "detail": "Already conditioned on XNU_NATIVE_LEGACY_DISPLAY"
+    }
+  ],
+  "retained": [
+    "XNU 11417.140.69 / Darwin 24.6 / 22H374 source and component bindings",
+    "SM8475 power/clock/SMMU/Goodix/Adreno730 firmware and memory geometry",
+    "services36 64 KiB owned-page cache-maintenance batches",
+    "current installed userland and persistent Data"
+  ],
+  "deferred": [
+    {
+      "feature": "Format2 SoC/OS profile conversion",
+      "reason": "Upstream supplies SM8550 and 21H461 profiles; this branch requires an explicit SM8475 and 22H374 conversion"
+    },
+    {
+      "feature": "Sheng WiFi/ADSP/audio/battery/governors",
+      "reason": "New code depends on Sheng board firmware/resources and 21H461 runtime interfaces"
+    },
+    {
+      "feature": "whole-image shader priming",
+      "reason": "Pong discovery path has not yet qualified real Metal work on 22H374; upstream documentation idle threshold is not implemented in the pinned PrimeShaders.h"
+    }
+  ],
+  "builds": [
+    {
+      "component": "DarwinBoot24",
+      "result": "compile/link complete",
+      "report": "mac-build/darwinboot24/BUILD_RESULT.json"
+    },
+    {
+      "component": "Pong 22H374 Metal plugin",
+      "result": "compile/link/sign complete",
+      "report": "/Volumes/Untitled/Pong-iPadOS18/upstream-sync-20261024/metal-plugin/build-report.json"
+    }
+  ],
+  "tests_run": false,
+  "image_verification": "skipped by request",
+  "device_modified": false,
+  "new_boot_image": false,
+  "last_temporary_boot": "services36; unchanged by this sync"
+}

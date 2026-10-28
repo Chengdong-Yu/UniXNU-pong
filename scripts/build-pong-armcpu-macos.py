@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the Pong PSCI/GICv3 CPU provider against Darwin 22 headers."""
+"""Compile the Pong PSCI/GICv3 CPU provider against the selected XNU headers."""
 import argparse
 import json
 import os
@@ -9,14 +9,14 @@ import shutil
 import subprocess
 
 DEVICE = Path(__file__).resolve().parents[1]
-DEFAULT_TREE = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree')
+DEFAULT_TREE = Path('/Volumes/PongDev/build/Pong-iPadOS18-native/tree')
 DEVELOPER = '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=DEFAULT_TREE,
-                        help='XNU build tree whose Darwin 22 kernel headers should be used')
+                        help='XNU build tree whose exported kernel headers should be used')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='compatibility option; this builder does not hash or audit images')
     args = parser.parse_args()
@@ -31,12 +31,14 @@ def main():
         raise SystemExit('First build the native PONG kernel SDK')
     env = dict(os.environ, DEVELOPER_DIR=DEVELOPER)
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, env=env).strip()
+    target = 'arm64-apple-ios' + os.environ.get('UNIXNU_IOS_TARGET', '18.0')
+    darwin = os.environ.get('UNIXNU_XNU_DARWIN', '24.6.0').split('.')[0]
     obj = out / 'ArmCpu.o'
-    command = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-target', 'arm64-apple-ios16.0',
+    command = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-target', target,
         '-isysroot', sdk, '-mkernel', '-ffreestanding', '-fno-builtin', '-fno-exceptions',
         '-fno-rtti', '-fno-stack-check', '-std=gnu++17', '-fblocks', '-O2',
         '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1',
-        '-DARM64_BOARD_CONFIG_PONG=1', '-Xclang', '-target-feature', '-Xclang', '+pan',
+        '-DARM64_BOARD_CONFIG_PONG=1', '-DPONG_DARWIN_MAJOR=' + darwin, '-Xclang', '-target-feature', '-Xclang', '+pan',
         '-I' + str(framework / 'PrivateHeaders'), '-I' + str(framework / 'Headers'),
         '-Wno-deprecated-declarations', '-c', str(source), '-o', str(obj)]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -45,7 +47,7 @@ def main():
         raise SystemExit(result.stderr)
     archive = out / 'libArmCpu.a'
     subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), str(obj)], check=True, env=env)
-    report = {'host': platform.machine(), 'target': 'arm64-apple-ios16.0',
+    report = {'host': platform.machine(), 'target': target, 'darwin_major': int(darwin),
         'build_tree': str(tree),
         'source': str(source), 'archive': str(archive),
         'image_verification': 'skipped by request',

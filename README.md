@@ -2,64 +2,48 @@
 
 **简体中文** | [English](README_EN.md)
 
-> **本地 `ipados18` 分支**：已同步当前 Pong iOS 16 开发源码，为第七代 iPad 的 iPadOS 18 迁移准备。新系统适配尚未开始；下文的构建说明仍属于 iOS 16 基线。分支说明和待适配项目见 [迁移准备](migration/ipados18/README.zh.md)。
+Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。当前 main 面向第七代 iPad 的 **iPadOS 18.7.10（22H374）**，使用 Darwin 24.6.0 / XNU 11417.140.69；系统输入为 iPad7,11 / J171AP，硬件始终是 Pong。iOS16 的实现保留在 Git 历史中。
 
-Nothing Phone (2)（代号 **Pong**，高通 **SM8475**）的 UniXNU 设备支持仓库。这里包含设备配置、XNU 补丁、板级驱动、用户空间适配和构建脚本，目标系统为 **iOS 16.6.1（20G81）**。
+- 核心构建工具：[UniXNU](https://github.com/UniXNU/UniXNU)
+- 独立固件：[uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
+- 官方说明：[仓库迁移](https://unixnu.com/zh/porting/migration)、[设备仓库](https://unixnu.com/zh/porting/device-repository)、[驱动适配](https://unixnu.com/zh/porting/drivers)
+- 本设备：[格式 2 配置与构建](migration/format2/README.zh.md)、[系统迁移](migration/ipados18/README.zh.md)、[结构化移植记录](porting.toml)
 
-当前代码以已达到 iOS 主界面的设备状态为基准。屏幕显示和触摸可用；Adreno 730 的硬件加速与 Metal 接入仍未确认完成。
+## 设备与进度
 
-- 固件：[uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
-- UniXNU 核心：[UniXNU](https://github.com/UniXNU/UniXNU)
-- 文档：[UniXNU 文档](https://unixnu.com)
+| 部分 | Pong 配置及实际进度 |
+| --- | --- |
+| CPU / 内存 | SM8475，Cortex-X2 + 3×A710 + 4×A510，PSCI/GICv3，19.2 MHz timer，原生 4 KiB 页；物理 12 GiB，受管容量受保留区限制 |
+| 屏幕 | 1080×2412，stride 4320，120 Hz 请求；桌面、触摸与壁纸已有实机记录，实际刷新率和亮度继续完善 |
+| GPU / Metal | Adreno 730，Pong 固件、Turnip 与 Metal 前端接入；渲染已用于桌面，部分路径仍需完善 |
+| 存储 | 原生 UFS/APFS 启动，独立 OS / SystemOS / 8 GiB 可写 UFS Data，Data 挂载至 `/private/var` |
+| Wi-Fi | QCA6490 / ath11k；PCIe0 link、BAR 和 DMA 分配已有日志，SMMU 编程顺序已修补；扫描与联网尚未确认 |
+| 声音 | ADSP、AudioReach、TFA9873 双功放与输出 HAL 已接通；已修补 CoreMedia 路由服务选择，实际 PCM 发声尚未确认 |
+| 按键 / 电源 | PMIC 物理事件已送达 HID / SpringBoard；电源键与音量键当前反馈仍有问题，继续适配系统动作；完整挂起恢复未完成 |
+
+主机编译、服务发布和设备功能分开记录。最新修补见 [SMMU 与音频路由审计](migration/ipados18/services73-smmu-audio.md)，本轮按要求只构建，不临时启动。
 
 ## 构建
 
-将 UniXNU 核心、设备仓库和 UEFI 仓库放在同一目录下，并初始化核心仓库的子模块：
+需要完整 Xcode（含 iPhoneOS SDK）、Python 3.12、dtc、对应 Apple 开源依赖、匹配的 22H374 restore/ABI 输入和从 Pong 获取的私有固件。源版本由 `feeds.toml`、`unixnu.lock` 与迁移记录固定。
 
 ```sh
-git clone --recurse-submodules https://github.com/UniXNU/UniXNU
-git clone https://github.com/Chengdong-Yu/UniXNU-pong
-git clone --recurse-submodules https://github.com/Chengdong-Yu/uefi-pong
+git clone https://github.com/UniXNU/UniXNU ../UniXNU-upstream
+git -C ../UniXNU-upstream checkout 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
+cp local.toml.example local.toml
+# 编辑 local.toml，填写本机构建目录、Xcode 和 volume-layout 路径。
+python3.12 scripts/migrate-pong-format2.py --unixnu ../UniXNU-upstream
+python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../pong-build --jobs 4
 ```
 
-以下命令从 UniXNU 核心仓库目录运行：
+该入口依次解析 ARM64、SM8475、22H374、Pong 四层配置，编译板级 DTS，再调用已适配的 Darwin24 内核构建器。输出为 `../pong-build/pong/ipados-18.7.10-22H374/pong_ipados18/`。原始镜像下载、用户态处理和 userdata 构建入口见 [系统迁移说明](migration/ipados18/README.zh.md)；配置命令不能代替匹配的本地二进制输入。
 
-```sh
-./unixnu defconfig pong_defconfig -D ../UniXNU-pong
-./unixnu fetch
-python3 ../UniXNU-pong/scripts/fetch-ios16-assets.py
-./unixnu build kernel
-./unixnu build package
-./unixnu build firmware --uefi ../uefi-pong
-```
+默认跳过镜像哈希、全盘校验和设备镜像回读。原有协议需要的 SHNGROOT 头部校验值仍保留。
 
-组件获取脚本按 `board.toml` 中的 iOS 16.6.1 / 20G81 配置读取 IPSW 的 BuildManifest，并通过 HTTP Range 只提取内核、设备树、信任缓存、OS 和 SystemOS（Cryptex1）等构建输入。完整 IPSW 不会保存到仓库或作为必需的本地归档；提取的组件保存在 UniXNU 的 `out/ipsw/20G81` 目录。
+## 源码边界与许可证
 
-Pong 的 userdata 根镜像可在获取组件后单独生成：
+仓库包含板级源码、补丁、配置和脚本，不包含 IPSW、Apple 私有二进制、固件、认证数据或构建好的 userdata。它们由脚本在本机获取或生成，并存放于 Git 忽略目录。本机路径只写入 `local.toml` 等本地配置。
 
-```sh
-python3 ../UniXNU-pong/scripts/build-userdata.py
-```
+社区聚合组件使用 `PongPlatform24` 身份，未将 A730/QCA6490 冒充为上游 A740/WCN7850 实现。SM8475 公共层种子单独位于 `migration/format2/soc-seed`，可按固定元数据重建。
 
-镜像写入本机的 `UniXNU-pong/out/`。构建器在单次拷贝中生成 SHNGROOT 格式要求的窗口和头部摘要字段，不执行额外的镜像校验或回读。Apple restore 文件、生成的 userdata 镜像、系统卷认证数据和 GPU 固件均不纳入仓库；需要的系统组件由脚本从本地获取的 restore 输入中提取，GPU 固件作为本机输入提供。
-
-设备身份配置选择 iPad7,1 / J120 / 20G81 restore 组件；板级驱动和启动配置对应 Nothing Phone (2) 的 Pong / SM8475 硬件。
-
-## 设备支持
-
-| 功能 | 状态 | 说明 |
-| --- | --- | --- |
-| iOS 16.6.1 启动 | ✅ | 已进入 iOS 主界面 |
-| 屏幕显示 | ✅ | 系统界面可显示 |
-| 触摸 | ✅ | Pong 触摸路径可用 |
-| 实体按键 | ✅ | 保留 Pong 电源键和音量键路径 |
-| UFS / APFS | ⚠️ | 原生 UFS 和 APFS 启动路径已接通，部分挂载能力仍在完善 |
-| 可写 Data | ⚠️ | 提供本地 userdata 根镜像构建器；镜像需在本机生成 |
-| Adreno 730 / Metal | ⚠️ | 驱动和 Metal 适配源码已纳入，硬件加速尚未确认 |
-| Wi-Fi、蓝牙、相机、音频、传感器 | ❌ | 尚未完成设备适配 |
-
-✅ 可用，⚠️ 部分可用或尚未确认，❌ 尚不可用。
-
-## 许可证
-
-设备级代码采用 BSD-2-Clause-Patent。导入组件保留各自的 SPDX 标记与原始许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+设备级代码采用 BSD-2-Clause-Patent；导入组件保留原始许可证及 SPDX 标记，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

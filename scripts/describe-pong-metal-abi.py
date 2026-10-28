@@ -9,6 +9,7 @@ from pathlib import Path
 import struct
 
 p=argparse.ArgumentParser(description=__doc__)
+p.add_argument('--build', choices=('20G81','22H374'), default='20G81')
 p.add_argument('--cache-directory',type=Path,required=True)
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--device-class',type=lambda x:int(x,0),default=0x1e1bb7a58)
@@ -16,7 +17,7 @@ p.add_argument('--expected-class',default='_MTLDevice',help='also describe anoth
 a=p.parse_args()
 maps=[];slides=[];files=[];main=None
 for path in sorted(a.cache_directory.glob('dyld_shared_cache_arm64*')):
-    if path.suffix=='.symbols': continue
+    if path.suffix in ('.symbols','.atlas'): continue
     f=path.open('rb');data=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ)
     files.append((f,data))
     if path.name=='dyld_shared_cache_arm64': main=data
@@ -98,8 +99,8 @@ def layout(va):
 
 device=layout(a.device_class);meta=layout(ptr(a.device_class))
 if device['name']!=a.expected_class: raise RuntimeError('requested class differs: '+device['name'])
-report=dict(system='iOS16.6.1/20G81',cache_uuid=main[88:104].hex(),
+report=dict(system='iPadOS18.7.10/22H374' if a.build=='22H374' else 'iOS16.6.1/20G81',cache_uuid=main[88:104].hex(),
     device=device,metaclass=meta,runtime_observed=False,hardware_acceleration=False)
 a.output.parent.mkdir(parents=True,exist_ok=True)
 a.output.write_text(json.dumps(report,indent=2)+'\n')
-print('Actual 20G81 '+device['name']+':',device['instance_size'],'bytes,',len(device['methods']),'own methods')
+print('Actual '+a.build+' '+device['name']+':',device['instance_size'],'bytes,',len(device['methods']),'own methods')

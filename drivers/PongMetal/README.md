@@ -1,4 +1,56 @@
-# Pong Metal / iOS16.6.1 development
+# Pong Metal
+
+Pong's A730 frontend is a device fork of upstream
+[AdrenoMetal](https://github.com/UniXNU/AdrenoMetal), previously named
+NativeMetal. Its native user-client implementation derives from
+[Adreno740](https://github.com/UniXNU/Adreno740); Pong retains SM8475/A730
+firmware, power, SMMU and scanout integration. Runtime classes, symbols and
+the fixed-size wire ABI remain compatible with the selected native backend.
+
+## Current 22H374 integration
+
+The iPadOS18 branch builds the plugin and object bridge with
+`--guest-build 22H374`. `_MTLDevice` is 600 bytes on this restore, compared
+with 528 on 20G81. The plugin builder requires the bridge's recorded guest
+and instance extent to match, before linking. The kernel publishes
+`PongMetal22H374Enabled` only according to the boot policy, and real CP/fence
+readiness remains a separate prerequisite for opening the device.
+
+`PongAdrenoMetal.bundle` resides in the prepared OS's real
+`/System/Library/Extensions` directory. The iPadOS18 init does not install a
+Data-backed union over that directory. The stock 22H374 renderer selects a
+real available Metal device, retaining its CPU fallback when no device is
+available. The display format adapter selects linear BGRA output.
+
+`patches/metal2vulkan/0010-pong-ipados18-22H374-policy.patch` adds the
+separate IOS18_7_10 runtime policy. It reads 22H374's actual format metadata
+and preserves Vulkan capability limits rather than claiming an Apple GPU.
+
+The latest captured GPU-enabled boot (services36) completed real CP init,
+ZAP authentication and timestamp fences, then created Vulkan/Metal devices.
+backboardd exited on the missing Darwin24 setResponsibleTaskIDs:count: SPI
+before completing command buffers. services37 retains that task metadata
+with the actual 22H374 signature, restores capacity after clients close and
+admits the supplied restore's wallpaper processes. Accelerated presentation
+remains unconfirmed. Whole-image shader priming is not currently enabled.
+
+Build with the matching translator source and Pong Turnip library:
+
+```sh
+python3 scripts/build-pong-metal-bridge.py --guest-build 22H374 \
+  --translator /path/to/metal2vulkan-22H374 \
+  --output-dir /path/to/metal18-bridge
+python3 scripts/build-pong-metal-plugin.py --guest-build 22H374 \
+  --bridge-directory /path/to/metal18-bridge \
+  --turnip-library /path/to/pong/libvulkan_freedreno.dylib \
+  --output-dir /path/to/metal18-plugin
+```
+
+These commands compile artifacts without modifying a phone. Source pins,
+reviewed deltas and upstream migration notes are recorded in
+[the 2026-10-24 sync](../../migration/ipados18/upstream-20261024.md).
+
+## 20G81 development reference
 
 This is a local fork of Sheng's NativeMetal frontend and object bridge over
 metal2vulkan and Turnip. The compiled path now includes stock20G81 Metal

@@ -85,7 +85,8 @@ public:
      * bring-up packets keep the plain submit() above, as Linux sends them outside a7xx_submit()). */
     IOReturn submitFramed(const uint32_t *words,size_t word_count,uint32_t *fence);
     /* The next framed submission starts with the A7XX context entry of a6xx_set_pagetable() (BR/BV counters, on-chip
-     * timestamps and resource table cleared between thread syncs); a new user client requests it, as Linux does per context. */
+     * timestamps and resource table cleared between thread syncs). The submit
+     * owner requests this on actual client changes and reused client slots. */
     void requestContextReset() {reset_pending_=true;}
     /* Polls the CP-written timestamp after invalidating the fence page. Never
      * writes registers and never advances the ring. Timeout is not poison. */

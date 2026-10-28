@@ -1,0 +1,106 @@
+{
+  "board": "Pong",
+  "soc": "SM8475",
+  "source": "Live Android DT and Nothing modem_a, vendor_b read-only",
+  "adsp": {
+    "pas_id": 1,
+    "firmware_path": "/pong/firmware/adsp.mbn",
+    "memory_base": 2238709760,
+    "memory_bytes": 41943040,
+    "smem_base": 2156920832,
+    "smem_bytes": 2097152,
+    "mutex": 32780288,
+    "ipcc_base": 248610816,
+    "ipcc_irq": 261,
+    "remote_pid": 2,
+    "smp2p_in": 443,
+    "smp2p_out": 429,
+    "glink_items": [
+      478,
+      479,
+      480
+    ]
+  },
+  "battery": {
+    "owner": 32778,
+    "channel": "PMIC_RTR_ADSP_APPS",
+    "battery_property_ids": {
+      "status": 0,
+      "present": 2,
+      "capacity": 4,
+      "voltage_uv": 7,
+      "current_ua": 9,
+      "temperature_decic": 12,
+      "counter_uah": 14,
+      "cycles": 15,
+      "full_design_uah": 16,
+      "full_uah": 17,
+      "time_to_full_s": 19,
+      "time_to_empty_s": 20
+    },
+    "charger_writes": false
+  },
+  "audio": {
+    "channel": "adsp_apps",
+    "amplifiers": [
+      {
+        "compatible": "tfa,tfa98xx",
+        "controller": 11091968,
+        "address": 52
+      },
+      {
+        "compatible": "tfa,tfa98xx",
+        "controller": 11091968,
+        "address": 53
+      }
+    ],
+    "codec": "WCD938x",
+    "local_route_inputs": "/Volumes/Untitled/Pong-iPadOS18/pong-audio-inputs",
+    "pcm_route_implemented": true,
+    "runtime_playback_observed": false,
+    "capture_implemented": false,
+    "amplifier_model": "TFA9873",
+    "amp_reset_gpio": [
+      1,
+      89
+    ],
+    "app_smmu_sid": "0x1801",
+    "pcm_route": {
+      "back_end": "MI2S-LPAIF-RX-TERTIARY",
+      "rate": 48000,
+      "channels": 2,
+      "bits": 32,
+      "pins": [
+        121,
+        122,
+        123,
+        124
+      ],
+      "lpaif_type": 0,
+      "interface_index": 2,
+      "sd_line_index": 1,
+      "source": "Pong resourcemanager_waipio_qrd.xml MI2S-LPAIF-RX-TERTIARY; LPAIF=0, RX direction, tertiary index2, SD0=1"
+    },
+    "hal": "org.unixnu.pong.audio",
+    "i2c_pins": [
+      48,
+      49
+    ],
+    "i2c_mux": 1,
+    "i2c_pin_source": "live i2c@a94000 pinctrl-0: qupv3_se13_i2c_active / cape qup13",
+    "amp_reset_active_high": true,
+    "amp_reset_assert_ms": 10,
+    "amp_reset_release_ms": 10,
+    "amp_reset_source": "Pong live DT has no reset-polarity; Nothing tfa98xx_parse_dt defaults HIGH, ext_reset drives HIGH then LOW",
+    "hal_exposed_by_default": false,
+    "capture_memory_implemented": false
+  },
+  "power": {
+    "active_tcs": 4,
+    "serialized_with": "PongWifi",
+    "gpu_tcs": 3,
+    "cpu_governor_implemented": false,
+    "suspend_resume_implemented": false
+  },
+  "private_firmware_in_repository": false
+}

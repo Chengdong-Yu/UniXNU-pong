@@ -21,6 +21,7 @@ def main():
     p.add_argument('--tools-directory', type=Path, required=True)
     p.add_argument('--venv', type=Path, required=True)
     p.add_argument('--output-dir', type=Path, required=True)
+    p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
     p.add_argument('--developer-dir', type=Path, default=Path(
         '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
     a = p.parse_args()
@@ -28,10 +29,20 @@ def main():
     if 'MIN2(tu_get_system_heap_size(device), info->va_size)' not in backend.read_text():
         subprocess.run(['git', 'apply', str(ROOT / 'patches/mesa/0001-pong-scoped-gpu-heap.patch')],
                        cwd=a.mesa, check=True)
+    if 'NativeAdrenoMethodSubmitBatch' not in backend.read_text():
+        subprocess.run(['git','apply',str(ROOT/'patches/mesa/0003-pong-atomic-batches-and-fence-wait.patch')],cwd=a.mesa,check=True)
+    copies = a.mesa / 'src/freedreno/vulkan/tu_clear_blit.cc'
+    if 'reserve_buffer_copy_step' not in copies.read_text():
+        subprocess.run(['git', 'apply', str(ROOT / 'patches/mesa/0004-pong-buffer-copy-allocation-errors.patch')],
+                       cwd=a.mesa, check=True)
+    abi=a.abi_directory/'NativeAdrenoABI.h'
+    if 'NativeAdrenoMethodSubmitBatch' not in abi.read_text():
+        raise SystemExit('Use the Pong ABI header with negotiated 128-IB submissions: '+str(abi))
     out = a.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    minimum='18.0' if a.guest_build=='22H374' else '16.6.1'
     env = dict(os.environ, DEVELOPER_DIR=str(a.developer_dir),
-               IPHONEOS_DEPLOYMENT_TARGET='16.6.1')
+               IPHONEOS_DEPLOYMENT_TARGET=minimum)
     env['PATH'] = ':'.join([str(a.tools_directory), str(a.venv/'bin'),
         '/Users/desktop/Downloads/Minecraft-Zink-NVK/build-tools/bin',
         '/opt/local/bin', env['PATH']])
@@ -45,9 +56,9 @@ def main():
             env=env, text=True).strip()
 
     sdk = sdk_read('--show-sdk-path')
-    flags = ['-target', 'arm64-apple-ios16.6.1', '-isysroot', sdk,
+    flags = ['-target', 'arm64-apple-ios'+minimum, '-isysroot', sdk,
              '-fstack-protector-strong']
-    cross = out/'pong-ios16.cross'
+    cross = out/('pong-'+a.guest_build+'.cross')
     cross.write_text('[binaries]\n' + ''.join(
         name+' = '+repr(sdk_read('--find', tool))+'\n'
         for name, tool in [('c', 'clang'), ('cpp', 'clang++'), ('objc', 'clang'),
@@ -88,7 +99,7 @@ def main():
         raise SystemExit('Turnip build failed: '+str(out/'build.log'))
     library = out/'src/freedreno/vulkan/libvulkan_freedreno.dylib'
     (out/'build-report.json').write_text(json.dumps(dict(library=str(library),
-        deployment='iOS16.6.1', cpu_page_bytes=4096, chip_id='0x07030002',
+        guest=a.guest_build,deployment=minimum, cpu_page_bytes=4096, chip_id='0x07030002',
         automatic_install=False, hardware_executed=False, commands=[command, build],
         image_verification='skipped by request'), indent=2)+'\n')
     print(library)

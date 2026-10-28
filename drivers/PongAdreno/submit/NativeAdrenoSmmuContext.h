@@ -30,12 +30,13 @@ public:
     ~NativeAdrenoSmmuContext()=default;
     NativeAdrenoSmmuContext(const NativeAdrenoSmmuContext &)=delete;
     NativeAdrenoSmmuContext &operator=(const NativeAdrenoSmmuContext &)=delete;
-    /* Full 32-bit GPU aperture; the GMU still requests its original 2 GiB. */
-    enum : size_t {MaxLeaves=size_t(1)<<20};
+    /* 16 GiB user aperture; these are PTE capacity, not reserved BO pages.
+     * GMU keeps its own original 32-bit configuration and 2 GiB aperture. */
+    enum : size_t {MaxLeaves=size_t(1)<<22};
     /* iova/bytes describe the aperture in the chosen region; the pool must be contiguous. */
     /* output_bits: the context's output size, at most the SMMU's ID2.OAS (Linux uses OAS for stage 1). */
     IOReturn prepare(NativeAdrenoMemory *tables,unsigned upper,uint64_t iova,size_t bytes,
-        size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,unsigned output_bits=40);
+        size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,unsigned output_bits=40,unsigned input_bits=32);
     /* Reads actual IDs, programs and enables exactly this bank. */
     IOReturn program(const ArmSmmu4KIo *);
     /* Attach the caller's exact stream routes to the programmed bank. */

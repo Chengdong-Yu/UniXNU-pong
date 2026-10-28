@@ -1,24 +1,40 @@
+schema_version = 2
+
 [board]
 name = "pong"
 soc = "SM8475"
+soc_source = "sm8475"
+os_profile = "ipados-18.7.10-22H374"
 description = "Nothing Phone (2): UniXNU UEFI bring-up"
 kit = "pong"
 
-# Apple component source for the iOS 16 port, selected from the BuildManifest.
+# iPadOS 18.7.10 restore selected from the matching J171 BuildIdentity.
 [ipsw]
-url = "https://updates.cdn-apple.com/2023SummerFCS/fullrestores/042-44385/366890C4-D9B5-4938-B399-C19FB58DBEE0/iPad_Pro_HFR_16.6.1_20G81_Restore.ipsw"
-product = "iPad7,1"
-version = "16.6.1"
-build = "20G81"
-device_class = "j120ap"
-chip_id = 0x8011
-board_id = 12
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1", "Cryptex1,SystemTrustCache", "OS"]
+url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
+product = "iPad7,11"
+version = "18.7.10"
+build = "22H374"
+device_class = "j171ap"
+chip_id = 0x8010
+board_id = 0x1c
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "Cryptex1,SystemTrustCache", "Cryptex1,AppOS", "Cryptex1,AppTrustCache", "OS"]
+
+[components]
+# This is the community Pong A730/QCA6490/Darwin24 implementation, not the A740/WCN7850 source.
+include = ["PongPlatform24"]
+
+[device_tree]
+source = "device:dts/pong.dts"
+include_dirs = ["soc:dts"]
 
 [kernel]
-defconfig = "pong_defconfig"
+defconfig = "pong_ipados18_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
+patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
+archives = ["component:PongPlatform24"]
 
-# Prelink and userdata geometry will be added after Pong-specific validation.
+
+# Local prelink and userdata entries are documented under migration/ipados18.
 [firmware]
 config = "pong"
 dsc = "Platforms/Nothing/pongPkg/pong.dsc"
@@ -33,7 +49,7 @@ patches = [
 packages = [
   "{uefi}",
   "{tree}/package",
-  "{tree}/drivers/DarwinBoot",
+  "{tree}/drivers/DarwinBoot24",
   "{edk2}",
   "{uefi}/Platforms/Nothing",
   "{uefi}/Common/Mu",
@@ -52,3 +68,15 @@ MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
 BUILDID_STRING = "UniXNU-Pong"
 PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
+
+[payload]
+title = "Pong iPadOS 18.7.10"
+[payload.adt]
+packed_data_ramdisk = false
+[pong_build]
+entry = "scripts/build-pong-format2.py"
+kernel_entry = "scripts/build-ipados18-pong-macos.py"
+boot_entry = "scripts/build-ipados18-prelinked-boot.py"
+cpus = 8
+# The matching Darwin24 prelinker derives relocation from the 22H374 ABI record.
+# The generic Darwin23 prelink/boot entry is intentionally not selected here.

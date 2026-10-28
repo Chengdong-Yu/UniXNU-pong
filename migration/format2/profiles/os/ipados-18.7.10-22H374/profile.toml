@@ -1,0 +1,43 @@
+[os]
+name = "ipados-18.7.10-22H374"
+darwin = "24.6.0"
+xnu_version = "11417.140.69"
+xnu_revision = "43a90889846e00bfb5cf1d255cdc0a701a1e05a4"
+driverkit_tag = "xnu-10063.121.3"
+trustcache_tag = "xnu-8796.101.5"
+abi = ["Darwin24-arm64-4KiB", "IOGPUFamily-22H374", "IOHIDFamily-22H374", "IOAudio2Family-22H374", "IOMobileGraphicsFamily-22H374"]
+[ipsw]
+url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
+product = "iPad7,11"
+version = "18.7.10"
+build = "22H374"
+device_class = "j171ap"
+chip_id = 32784
+board_id = 28
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "Cryptex1,SystemTrustCache", "Cryptex1,AppOS", "Cryptex1,AppTrustCache", "OS"]
+
+[adt.root.string]
+model = "iPhone17,1"
+target-type = "J171"
+target-sub-type = "J171AP"
+[adt.root.strings]
+compatible = ["J171AP", "iPhone17,1"]
+[adt.chosen.string]
+osenvironment = "main"
+crypto-hash-method = "sha2-384"
+psci-method = "smc"
+[adt.chosen.u32]
+debug-enabled = 1
+mix-n-match-prevention-status = 0
+[adt.product.string]
+product-name = "iPhone 16 Pro"
+product-description = "iPhone 16 Pro"
+artwork-device-idiom = "phone"
+artwork-display-gamut = "sRGB"
+compatible-device-fallback = "iPhone17,1"
+[adt.product.u32]
+artwork-device-subtype = 2622
+artwork-scale-factor = 3
+device-perf-memory-class = 3
+[adt.defaults.u32]
+sleep-disabled = 1

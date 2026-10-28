@@ -1,0 +1,63 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -77,8 +77,8 @@
+    if (!dw.tunnel)
+       return IOConnectCallStructMethod(dw.conn, method, in, in_size, out_size ? out : NULL,
+                                        out_size ? &out_bytes : NULL);
+-   uint8_t buffer[8 + sizeof(NativeAdrenoAbiSubmit)];
+-   if (in_size > sizeof(NativeAdrenoAbiSubmit))
++   uint8_t buffer[8 + sizeof(NativeAdrenoAbiSubmitBatch)];
++   if (in_size > sizeof(NativeAdrenoAbiSubmitBatch))
+       return kIOReturnBadArgument;
+    const uint32_t header[2] = {DW_TUNNEL_MAGIC, method};
+    memcpy(buffer, header, sizeof(header));
+@@ -176,9 +176,11 @@
+ {
+    for (;;) {
+       uint64_t now = os_time_get_nano();
+-      uint64_t slice = 1000000; /* 1 ms */
+-      if (abs_timeout_ns != UINT64_MAX && abs_timeout_ns <= now)
+-         slice = 0;
++      /* Give the IRQ-backed kernel wait the remaining interval, capped at
++       * 100 ms, rather than issuing one Mach transaction per millisecond. */
++      uint64_t slice = 100000000;
++      if (abs_timeout_ns != UINT64_MAX)
++         slice = abs_timeout_ns > now ? MIN2(abs_timeout_ns - now, slice) : 0;
+       NativeAdrenoAbiWaitFence req = {.fence = fence, .timeout_ns = slice};
+       kern_return_t kr = dw_call(NativeAdrenoMethodWaitFence, &req, sizeof(req), NULL, 0);
+       if (kr == KERN_SUCCESS)
+@@ -877,7 +879,10 @@
+                     unsigned count, uint32_t *fence)
+ {
+    struct tu_device *dev = queue->device;
+-   NativeAdrenoAbiSubmit req = {};
++   NativeAdrenoAbiSubmitBatch req = {};
++   const bool batch = dw.params.flags & NativeAdrenoParamsSubmitBatch;
++   if (count > (batch ? NativeAdrenoAbiMaxBatchBuffers : NativeAdrenoAbiMaxBuffers))
++      return vk_device_set_lost(&dev->vk, "submit: unsupported batch length");
+    req.buffer_count = count;
+    req.queue = 0;
+    for (unsigned i = 0; i < count; i++)
+@@ -885,7 +890,8 @@
+ 
+    for (unsigned attempt = 0; attempt < 64; attempt++) {
+       NativeAdrenoAbiSubmitReply reply = {};
+-      kern_return_t kr = dw_call(NativeAdrenoMethodSubmit, &req, sizeof(req), &reply, sizeof(reply));
++      kern_return_t kr = dw_call(batch ? NativeAdrenoMethodSubmitBatch : NativeAdrenoMethodSubmit, &req,
++                                 batch ? sizeof(req) : sizeof(NativeAdrenoAbiSubmit), &reply, sizeof(reply));
+       if (kr == KERN_SUCCESS) {
+          *fence = (uint32_t)reply.fence;
+          return VK_SUCCESS;
+@@ -926,8 +932,10 @@
+    if (total) {
+       const NativeAdrenoAbiSubmitBuffer *all =
+          util_dynarray_element(&submit->commands, NativeAdrenoAbiSubmitBuffer, 0);
+-      for (unsigned at = 0; at < total; at += NativeAdrenoAbiMaxBuffers) {
+-         unsigned count = MIN2(total - at, (unsigned)NativeAdrenoAbiMaxBuffers);
++      const unsigned batch = (dw.params.flags & NativeAdrenoParamsSubmitBatch) ?
++                             NativeAdrenoAbiMaxBatchBuffers : NativeAdrenoAbiMaxBuffers;
++      for (unsigned at = 0; at < total; at += batch) {
++         unsigned count = MIN2(total - at, batch);
+          uint32_t chunk_fence = 0;
+          VkResult result = darwin_submit_chunk(queue, all + at, count, &chunk_fence);
+          if (result != VK_SUCCESS)

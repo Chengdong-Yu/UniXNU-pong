@@ -39,7 +39,7 @@ typedef struct {
 typedef struct {
     size_t descriptor_reads,descriptor_writes,published_pages;
     unsigned complete,translation_removed,must_retain_resources;
-    unsigned whole_verification;   /* this update re-proved the whole region (every 64th of a region) */
+    unsigned whole_verification;   /* this update proved the whole region (a region's first) */
     ArmSmmu4KProgramResult synchronization;
 } ArmSmmu4KLiveResult;
 /* Prepare an INACTIVE empty native4K arena. Preallocate only real intermediate
@@ -108,6 +108,14 @@ ArmSmmu4KStatus ArmSmmu4KLiveUpdateContextBatch(const ArmSmmu4KIo *,unsigned ban
     const ArmSmmu4KLiveRegion *upper,unsigned change_upper,
     const ArmSmmu4KLiveVisibility *,const ArmSmmu4KRange *changes,size_t change_count,
     unsigned map,unsigned poll_budget,ArmSmmu4KLiveResult *);
+/* UpdateContextBatch for a map whose physical pages the caller owns exclusively: no other range of either region can name them, so
+ * the changes are not checked for cache-attribute aliases against the existing ranges (they still are against each other). Every
+ * other check stays. Those alias passes walked every existing range per class on each map (i568: 52609 ranges, 0.4 ms a map). */
+ArmSmmu4KStatus ArmSmmu4KLiveMapContextBatchExclusive(const ArmSmmu4KIo *,unsigned bank,
+    const ArmSmmu4KContextConfig *,const ArmSmmu4KLiveRegion *lower,
+    const ArmSmmu4KLiveRegion *upper,unsigned change_upper,
+    const ArmSmmu4KLiveVisibility *,const ArmSmmu4KRange *changes,size_t change_count,
+    unsigned poll_budget,ArmSmmu4KLiveResult *);
 #ifdef __cplusplus
 }
 #endif

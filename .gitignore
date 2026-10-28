@@ -38,3 +38,9 @@ __pycache__/
 /BuildManifest.plist
 /Restore.plist
 .DS_Store
+
+/mac-build/
+
+/local.toml
+/unixnu.local.toml
+/build-services*.log

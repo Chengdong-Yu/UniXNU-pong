@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The registry-visible accelerator for the original Metal discovery (IOServiceMatching("IOAcceleratorES") ->
 // MetalPluginName -> /System/Library/Extensions/<name>.bundle). It derives from the original IOAcceleratorES base exactly as
-// qualified in drivers/NativeMetal/OriginalAcceleratorABI.h: the original base has no operational overrides, so the only
+// qualified in AdrenoMetal/OriginalAcceleratorABI.h (PongIOAcceleratorABI.h here): the original base has no operational overrides, so the only
 // virtuals this class adds are newUserClient and the property reads below (diagnostic counting only). Its static initializer
 // is staged out of __mod_init_func and run by the board probe after the original IOGPUFamily kext has loaded, because the
 // parent metaclass does not exist before that. The class is named after the Apple accelerator class on purpose, so original

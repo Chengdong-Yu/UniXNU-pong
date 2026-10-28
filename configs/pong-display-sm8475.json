@@ -1,0 +1,24 @@
+{
+  "board": "Pong / SM8475",
+  "panel": "NT37705 Visionox AMOLED command mode",
+  "source": "REC selected panel phandle 0x5e6; NothingOSS c402fcdb3a1523d10b15ef1123bced45456f7592",
+  "width": 1080,
+  "height": 2412,
+  "refresh_hz": [120, 90, 60],
+  "brightness": {
+    "transport": "DSI DCS",
+    "version": 1,
+    "controller": "0x0ae94000",
+    "register_bytes": 1024,
+    "channel": 0,
+    "minimum_nonzero": 10,
+    "maximum": 4095,
+    "bl_inverted_dbv": true,
+    "wire_byte_order": "most significant first; Nothing MIPI helper low/high with bl-inverted-dbv swap",
+    "write_command": "0x51",
+    "read_command": "0x52",
+    "write_mode": "HS",
+    "read_mode": "LP with BTA",
+    "runtime_validated": false
+  }
+}

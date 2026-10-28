@@ -15,7 +15,7 @@ IOLock *scanout_gate;
 IOMemoryDescriptor *scanout;
 task_t client;
 PongScanoutModeInfo mode{};
-bool waiting=false,poisoned=false;
+bool waiting=false,workerReady=false,poisoned=false;
 uint64_t sequence=0,completed=0;
 struct Pending {bool offered=false,delivered=false,done=false;uint64_t id=0;
     uint32_t status=0;IOMemoryDescriptor *memory=nullptr;IOMemoryMap *map=nullptr;
@@ -68,7 +68,7 @@ extern "C" void pong_scanout_disconnect(task_t owner)
     if(!scanout_gate)return;
     IOLockLock(scanout_gate);
     if(client==owner) {
-        waiting=false;
+        waiting=false;workerReady=false;
         if(pending.offered && pending.delivered && !pending.done) {
             poisoned=true; // unknown DMA lifetime: retain source/mapping.
             note("client closed with outstanding GPU copy; retain pages",pending.id,kIOReturnAborted);
@@ -104,6 +104,7 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
             IOLockUnlock(scanout_gate);return kIOReturnBadArgument;
         }
         pending.status=q.status;pending.done=true;
+        if(q.status==PongScanoutNotSubmitted)workerReady=false;
         if(q.status && q.status!=PongScanoutNotSubmitted)poisoned=true;
         IOLockWakeup(scanout_gate,&pending,false);IOLockUnlock(scanout_gate);return kIOReturnSuccess;
     }
@@ -112,7 +113,7 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
     }
     if(waiting){IOLockUnlock(scanout_gate);return kIOReturnBusy;}
     uint64_t ms=static_cast<const PongScanoutWaitInfo *>(in)->timeout_ms;
-    const uint64_t until=deadline(unsigned(ms>1000?1000:ms));waiting=true;
+    const uint64_t until=deadline(unsigned(ms>1000?1000:ms));waiting=true;workerReady=true;
     while(client==owner && !poisoned && (!pending.offered || pending.delivered)) {
         if(IOLockSleepDeadline(scanout_gate,&pending,until,THREAD_ABORTSAFE)!=THREAD_AWAKENED) {
             waiting=false;IOLockUnlock(scanout_gate);return kIOReturnTimeout;
@@ -122,7 +123,7 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
     if(client!=owner || poisoned){IOLockUnlock(scanout_gate);return kIOReturnNotReady;}
     auto *map=pending.memory->createMappingInTask(owner,0,kIOMapAnywhere);
     if(!map || !map->getVirtualAddress()) {
-        if(map)map->release();pending.done=true;pending.status=kIOReturnNoMemory;
+        if(map)map->release();workerReady=false;pending.done=true;pending.status=kIOReturnNoMemory;
         IOLockWakeup(scanout_gate,&pending,false);IOLockUnlock(scanout_gate);return kIOReturnNoMemory;
     }
     pending.map=map;pending.delivered=true;
@@ -137,7 +138,7 @@ extern "C" int pong_scanout_frame(IOMemoryDescriptor *source,size_t offset,uint3
     if(!scanout_gate || !source || stride<uint64_t(width)*4 || width!=mode.width || height!=mode.height || (offset&4095))return 0;
     IOLockLock(scanout_gate);
     if(poisoned){IOLockUnlock(scanout_gate);return 2;}
-    if(!client || !waiting || pending.offered){IOLockUnlock(scanout_gate);return 0;}
+    if(!client || !workerReady || pending.offered){IOLockUnlock(scanout_gate);return 0;}
     size_t bytes=(size_t(stride)*height+4095)&~size_t(4095);
     if(offset>source->getLength() || bytes>source->getLength()-offset){IOLockUnlock(scanout_gate);return 0;}
     auto *memory=IOSubMemoryDescriptor::withSubRange(source,offset,bytes,kIODirectionInOut);
@@ -155,6 +156,7 @@ extern "C" int pong_scanout_frame(IOMemoryDescriptor *source,size_t offset,uint3
         poisoned=true;note("GPU copy not retired; retain pages and previous frame",pending.id,pending.status?:kIOReturnTimeout);
         IOLockUnlock(scanout_gate);return 2;
     }
+    if(!pending.delivered)workerReady=false; // a vanished waiter cannot stall every subsequent CPU frame
     bool ok=pending.done && !pending.status;
     if(ok && completed++<3)note("GPU frame completed",pending.id,0);
     if(pending.map)pending.map->release();

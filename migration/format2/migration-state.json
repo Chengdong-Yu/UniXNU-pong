@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "upstream_revision": "0fc0fc1f9ddd0fbd4787738afef38667df5e0a95",
+  "device_base": "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a",
+  "soc_revision": "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21",
+  "os_profile": "ipados-18.7.10-22H374",
+  "local_unpublished_edits": true,
+  "source_pins_preserved": true,
+  "image_hashes_used": false
+}

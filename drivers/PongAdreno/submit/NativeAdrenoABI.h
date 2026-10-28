@@ -13,6 +13,7 @@
 enum {
     NativeAdrenoAbiVersion = 1,
     NativeAdrenoAbiMaxBuffers = 16,
+    NativeAdrenoAbiMaxBatchBuffers = 128,
     NativeAdrenoAbiMaxBoBytesShift = 28, /* 256MiB per object */
     NativeAdrenoMethodQuery = 1,
     NativeAdrenoMethodBoAlloc = 2,
@@ -30,6 +31,7 @@ enum {
     NativeAdrenoMethodBoCpuUnmap = 14,
     NativeAdrenoMethodGetDeviceInfo = 15,
     NativeAdrenoMethodBoImport = 16,
+    NativeAdrenoMethodSubmitBatch = 17,
     NativeAdrenoAbiMetadataBytes = 64,
     NativeAdrenoAbiMaxQueues = 8
 };
@@ -41,7 +43,8 @@ struct NativeAdrenoAbiParams {
     uint64_t max_bo_bytes;
 };
 enum {
-    NativeAdrenoParamsHostImport = 1  /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
+    NativeAdrenoParamsHostImport = 1, /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
+    NativeAdrenoParamsSubmitBatch = 2 /* Method17 accepts one atomic 128-IB batch; method5 stays unchanged */
 };
 struct NativeAdrenoAbiBoAlloc {
     uint64_t bytes;               /* 4KiB multiple, <= max_bo_bytes */
@@ -84,6 +87,14 @@ struct NativeAdrenoAbiSubmit {
     uint64_t wait_fence;          /* zero or an earlier fence of this client */
     uint64_t wait_timeout_ns;     /* used only when wait_fence is nonzero */
     NativeAdrenoAbiSubmitBuffer buffers[NativeAdrenoAbiMaxBuffers];
+};
+/* Additive extension: old 416-byte method5 remains valid. Splitting a Vulkan
+ * submission at an arbitrary 16-IB boundary inserts BR/BV framing inside
+ * command streams that may still depend on the preceding stream's state. */
+struct NativeAdrenoAbiSubmitBatch {
+    uint32_t buffer_count,reserved;
+    uint64_t queue,wait_fence,wait_timeout_ns;
+    NativeAdrenoAbiSubmitBuffer buffers[NativeAdrenoAbiMaxBatchBuffers];
 };
 struct NativeAdrenoAbiMetadata {
     uint64_t handle;              /* object identity */
@@ -152,6 +163,7 @@ static_assert(sizeof(NativeAdrenoAbiBoMap) == 32, "ABI map layout");
 static_assert(sizeof(NativeAdrenoAbiBoImport) == 16, "ABI import layout");
 static_assert(sizeof(NativeAdrenoAbiSubmitBuffer) == 24, "ABI buffer layout");
 static_assert(sizeof(NativeAdrenoAbiSubmit) == 416, "ABI submit layout");
+static_assert(sizeof(NativeAdrenoAbiSubmitBatch) == 3104, "ABI batch layout");
 static_assert(sizeof(NativeAdrenoAbiBoCpuMap) == 8, "ABI cpu map layout");
 static_assert(sizeof(NativeAdrenoAbiBoCpuMapReply) == 16, "ABI cpu map reply layout");
 static_assert(sizeof(NativeAdrenoAbiBoCpuUnmap) == 16, "ABI cpu unmap layout");

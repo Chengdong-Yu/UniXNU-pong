@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/*20G81 stock Metal discovery over Pong's real IOAcceleratorES provider.
+/* Guest-specific stock Metal discovery over Pong's real IOAcceleratorES provider.
  * The OS loads this bundle and registers the returned native device.
  * No manual catalog mutation or iOS17 QuartzCore offsets.
  */
@@ -67,11 +67,17 @@ static bool query(Call call,unsigned connection,unsigned selector,void *output,s
 static bool backend(unsigned port,uint64_t *registryID)
 {
     char version[64]={};size_t length=sizeof(version);
-    if(sysctlbyname("kern.osversion",version,&length,NULL,0) || strcmp(version,"20G81")) {
-        report("guest build is not20G81",-1);return false;
+    if(sysctlbyname("kern.osversion",version,&length,NULL,0) || strcmp(version,
+#if PONG_GUEST_22H374
+        "22H374"
+#else
+        "20G81"
+#endif
+        )) {
+        report("guest build differs from compiled Metal ABI",-1);return false;
     }
     if(!PongMetalDeviceAbiAvailable(objc_getClass("_MTLDevice"))) {
-        report("20G81 _MTLDevice ABI unavailable",-1);return false;
+        report("guest _MTLDevice ABI unavailable",-1);return false;
     }
     if(!iokit)iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_NOW|RTLD_LOCAL);
     if(!iokit)return false;
@@ -85,7 +91,13 @@ static bool backend(unsigned port,uint64_t *registryID)
      * Runtime ABI and the hardware below must independently agree.
      */
     if(!propertyTrue(read,port,CFSTR("PongAdrenoCPReady")) ||
-       !propertyTrue(read,port,CFSTR("PongMetal20G81Enabled"))) {
+       !propertyTrue(read,port,CFSTR(
+#if PONG_GUEST_22H374
+       "PongMetal22H374Enabled"
+#else
+       "PongMetal20G81Enabled"
+#endif
+       ))) {
         report("CP unavailable or Metal disabled; CPU display remains available",-1);return false;
     }
     unsigned connection=0;kern_return_t result=open(port,mach_task_self(),0x4147,&connection);
@@ -133,7 +145,6 @@ static id openDevice(unsigned port)
     // A7xx sysmem/no concurrent binning until Pong's BV/BR scheduling is ready.
     // Plain IOSurface rows match Pong's current framebuffer/scanout contract.
     setenv("TU_DEBUG","sysmem,nocb",0);
-    setenv("PONG_IOSURFACE_PADDING","1",1);
     // Pong implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
@@ -179,7 +190,11 @@ static bool selectedClient()
         char line[80];bool selected=false;
         while(fgets(line,sizeof(line),file)) {
             line[strcspn(line,"\r\n")]=0;
-            if(!strcmp(line,process)){selected=true;break;}
+            if(!strcmp(line,process)
+#if PONG_GUEST_22H374
+                || !strcmp(line,"*")
+#endif
+            ){selected=true;break;}
         }
         fclose(file);return selected;
     }
@@ -213,7 +228,7 @@ static void startPresentation(id candidate,unsigned port)
     @synchronized([PongAdrenoMetalDevice class]) {
         if(!device) {
             device=openDevice(port);
-            if(device){report("real device returned to stock20G81 discovery",0);startPresentation(device,port);}
+            if(device){report("real device returned to matching stock discovery",0);startPresentation(device,port);}
         }
         return device;
     }

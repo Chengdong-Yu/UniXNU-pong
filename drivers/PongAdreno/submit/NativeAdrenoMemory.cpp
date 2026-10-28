@@ -53,6 +53,7 @@ void poolGive(size_t offset,size_t bytes) {
 }
 }
 size_t NativeAdrenoMemory::poolBytes() {return pool.bytes;}
+uint64_t NativeAdrenoMemory::poolPhysical() {return pool.physical;}
 /* int-152: a user BO's pages changed attribute one pmap_set_cache_attributes call at a time (each walks the page's mappings, flushes the
  * TLB and cleans the page), on allocation and again on release, under the connection lock: 3 ms a BO on average and 90-130 ms for a
  * surface-sized one, while every other GPU call of every client waited. The pool is the BOs' own block and nothing else maps it, so

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the generic DT platform against the current Darwin 22 kernel SDK."""
+"""Compile the generic DT platform against the selected XNU kernel SDK."""
 import argparse
 import json
 import os
@@ -9,7 +9,7 @@ import shutil
 import subprocess
 
 DEVICE = Path(__file__).resolve().parents[1]
-TREE = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree')
+TREE = Path('/Volumes/PongDev/build/Pong-iPadOS18-native/tree')
 DEVELOPER = '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'
 
 
@@ -29,13 +29,15 @@ def main():
         raise SystemExit('First build the native PONG kernel SDK')
     env = dict(os.environ, DEVELOPER_DIR=DEVELOPER)
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, env=env).strip()
+    target = 'arm64-apple-ios' + os.environ.get('UNIXNU_IOS_TARGET', '18.0')
     obj = out / 'ArmDTPlatform.o'
-    command = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-target', 'arm64-apple-ios16.0',
+    command = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-target', target,
         '-isysroot', sdk, '-mkernel', '-ffreestanding', '-fno-builtin', '-fno-exceptions',
         '-fno-rtti', '-fno-stack-check', '-std=gnu++17', '-fblocks', '-O2',
         '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1',
         '-DARM64_BOARD_CONFIG_PONG=1', '-Xclang', '-target-feature', '-Xclang', '+pan',
         '-DXNU_PONG_ADRENO_PLATFORM='+env.get('XNU_PONG_ADRENO_PLATFORM','0'),
+        '-DXNU_PONG_WIFI='+env.get('XNU_PONG_WIFI','0'),
         '-I' + str(framework / 'PrivateHeaders'), '-I' + str(framework / 'Headers'),
         '-Wno-deprecated-declarations', '-c', str(source), '-o', str(obj)]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -44,7 +46,7 @@ def main():
         raise SystemExit(result.stderr)
     archive = out / 'libArmDTPlatform.a'
     subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), str(obj)], check=True, env=env)
-    report = {'host': platform.machine(), 'target': 'arm64-apple-ios16.0',
+    report = {'host': platform.machine(), 'target': target,
         'source': str(source), 'archive': str(archive),
         'image_verification': 'skipped by request',
         'command': command, 'runtime_qualified': False,

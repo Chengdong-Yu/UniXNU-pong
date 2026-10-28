@@ -1,0 +1,88 @@
+{
+  "date_utc": "2026-10-25T13:52:31.222024+00:00",
+  "repositories": [
+    {
+      "name": "UniXNU",
+      "path": "/Volumes/PongDev/upstream/UniXNU",
+      "head": "16e592abee8a550dec8154ed1f38b5ebc4f16213",
+      "remote_main": "16e592abee8a550dec8154ed1f38b5ebc4f16213",
+      "date": "2026-10-25T12:25:19+08:00",
+      "subject": "docs(adreno-metal): describe shader priming of the OS image",
+      "tracked_changes": "",
+      "sync": "fetch and fast-forward merge completed; already up to date; untracked legacy compatibility directories preserved"
+    },
+    {
+      "name": "UniXNU-sheng",
+      "path": "/Volumes/PongDev/upstream/UniXNU-sheng",
+      "head": "0e1f6e52638137db15905db8d775ad73757f39fa",
+      "remote_main": "0e1f6e52638137db15905db8d775ad73757f39fa",
+      "date": "2026-10-25T05:10:12+08:00",
+      "subject": "docs(porting): record sheng charging and ADSP firmware state",
+      "tracked_changes": "",
+      "sync": "fetch and fast-forward merge completed; already up to date; untracked legacy compatibility directories preserved"
+    }
+  ],
+  "components": [
+    {
+      "component": "NativeAdreno",
+      "canonical": "https://github.com/UniXNU/Adreno740.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeAdreno",
+      "before": "4e0314df8ad29d52f6fa3f9383a540adcd618b87",
+      "head": "4e0314df8ad29d52f6fa3f9383a540adcd618b87",
+      "diff": ""
+    },
+    {
+      "component": "NativeMetal",
+      "canonical": "https://github.com/UniXNU/AdrenoMetal.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeMetal",
+      "before": "454ff2ce83766ce7b3e0f355e83f1d72907708b3",
+      "head": "454ff2ce83766ce7b3e0f355e83f1d72907708b3",
+      "diff": ""
+    },
+    {
+      "component": "NativeMobileDisplay",
+      "canonical": "https://github.com/UniXNU/GopFramebuffer.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/NativeMobileDisplay",
+      "before": "cf3b42979a9c44219e7bb149543e6fc3388b58ed",
+      "head": "cf3b42979a9c44219e7bb149543e6fc3388b58ed",
+      "diff": ""
+    },
+    {
+      "component": "ArmSmmu4K",
+      "canonical": "https://github.com/UniXNU/ArmSmmu4K.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/ArmSmmu4K",
+      "before": "8bb168ad058c28d5c04f179ba407875eacba7ef3",
+      "head": "8bb168ad058c28d5c04f179ba407875eacba7ef3",
+      "diff": ""
+    },
+    {
+      "component": "AdrenoFirmware",
+      "canonical": "https://github.com/UniXNU/AdrenoFirmware.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/AdrenoFirmware",
+      "before": "20ad3d7aca14bd46aecab6335c780f5413fa054b",
+      "head": "20ad3d7aca14bd46aecab6335c780f5413fa054b",
+      "diff": ""
+    },
+    {
+      "component": "AdrenoPM4",
+      "canonical": "https://github.com/UniXNU/AdrenoPM4.git",
+      "path": "/Volumes/PongDev/upstream/gpu-pong/AdrenoPM4",
+      "before": "282606b528b2595bc4274ea7490b62b323f35a5f",
+      "head": "282606b528b2595bc4274ea7490b62b323f35a5f",
+      "diff": ""
+    }
+  ],
+  "porting_document": "https://unixnu.com/zh/porting/gpu",
+  "primary_source": "https://raw.githubusercontent.com/UniXNU/UniXNU/main/docs/zh/porting/gpu.md",
+  "changes_merged_this_sync": 0,
+  "adaptation": {
+    "chip": "Adreno730 / SM8475",
+    "firmware": "Pong original",
+    "guest": "22H374 / Darwin24",
+    "source_changes": [
+      "scoped Metal allocator budget and empty-only pressure trim",
+      "native PosterBoard Angel memory policy lookup",
+      "SystemStatusUI native phone provider selector and initialization"
+    ]
+  }
+}

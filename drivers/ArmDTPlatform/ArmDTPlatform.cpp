@@ -21,6 +21,10 @@
 #include <kern/clock.h>
 
 extern "C" bool pong_cpu_start(IOService *platform);
+#if XNU_PONG_WIFI
+extern "C" void pong_wifi_start_optional(void);
+extern "C" void pong_power_start_optional(void);
+#endif
 #if XNU_PONG_ADRENO_PLATFORM
 extern "C" void pong_adreno_start_optional(void);
 #endif
@@ -218,6 +222,10 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
+#if XNU_PONG_WIFI
+  pong_power_start_optional();
+  pong_wifi_start_optional();
+#endif
   IOLog ("ArmDTPlatform: registered platform cpus=%u arm-io=%u devices=%u nvram-proxy=%u\n",
          cpuCount, busCount, armdt_platform_device_count, armdt_platform_nvram_proxy);
   registerService ();

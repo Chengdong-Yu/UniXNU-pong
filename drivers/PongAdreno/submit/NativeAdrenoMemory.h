@@ -63,6 +63,7 @@ public:
      * allocate(..., pooled=true) uses the pool when one is reserved and has room, else the scattered path. Only the board calls this. */
     static IOReturn reservePool(unsigned output_bits,size_t bytes);
     static size_t poolBytes();
+    static uint64_t poolPhysical();
     /* The whole pool write-combined once, for good: a pooled BO then takes no page-attribute change on allocation or release.
      * Board only, after reservePool, when user BOs are write-combined. */
     static IOReturn writeCombinePool();
@@ -71,6 +72,7 @@ public:
      * publishForDevice/acquireDeviceWrites have nothing to do for this object. Spans and PA bounds are checked as for allocate. */
     IOReturn importTask(void *task,uint64_t address,size_t bytes,unsigned output_bits,size_t byte_budget);
     bool imported() const {return imported_!=nullptr;}
+    bool pooled() const {return pooled_;}
     /* An import of memory the owner maps read-only (the kernel could pin it for reading only): the GPU may read it, never write it. */
     bool readOnly() const {return read_only_;}
     /* After allocate(), before any device or client mapping: cleans and invalidates the pages and makes every CPU mapping of them

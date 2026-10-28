@@ -1,0 +1,63 @@
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -3682,6 +3682,24 @@ tu_TransitionImageLayoutEXT(VkDevice device,
+    return VK_SUCCESS;
+ }
+ 
++/* A scanout texture with a different row pitch produces thousands of copy
++ * regions. In release builds tu_cs_reserve() only asserts an allocation
++ * failure and the next packet would write past the old command BO. Reserve
++ * a bounded complete R2D step explicitly and propagate the real error to
++ * vkEndCommandBuffer before any packet in that step can be emitted. */
++static bool
++reserve_buffer_copy_step(struct tu_cmd_buffer *cmd)
++{
++   if (vk_command_buffer_has_error(&cmd->vk))
++      return false;
++   VkResult result = tu_cs_reserve_space(&cmd->cs, 512);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      return false;
++   }
++   return true;
++}
++
+ template <chip CHIP>
+ static void
+ copy_buffer(struct tu_cmd_buffer *cmd,
+@@ -3709,12 +3727,16 @@ copy_buffer(struct tu_cmd_buffer *cmd,
+       break;
+    }
+ 
++   if (!reserve_buffer_copy_step(cmd))
++      return;
+    handle_buffer_unaligned_store<CHIP>(cmd, dst_va, size, unaligned_store);
+ 
+    ops->setup(cmd, cs, format, format, VK_IMAGE_ASPECT_COLOR_BIT, 0, false, false,
+               VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT);
+ 
+    while (blocks) {
++      if (!reserve_buffer_copy_step(cmd))
++         return;
+       uint32_t src_x = (src_va & 63) / block_size;
+       uint32_t dst_x = (dst_va & 63) / block_size;
+       uint32_t width = MIN2(MIN2(blocks, 0x4000 - src_x), 0x4000 - dst_x);
+@@ -3741,6 +3763,8 @@ tu_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+    VK_FROM_HANDLE(tu_buffer, src_buffer, pCopyBufferInfo->srcBuffer);
+    VK_FROM_HANDLE(tu_buffer, dst_buffer, pCopyBufferInfo->dstBuffer);
+ 
++   if (!reserve_buffer_copy_step(cmd))
++      return;
+    trace_start_copy_buffer(&cmd->trace, &cmd->cs, cmd);
+ 
+    /* Choose the largest common block size for all copy regions
+@@ -3772,6 +3796,8 @@ tu_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                         vk_buffer_address(&dst_buffer->vk, region->dstOffset),
+                         vk_buffer_address(&src_buffer->vk, region->srcOffset),
+                         region->size, block_size, &unaligned_store);
++      if (vk_command_buffer_has_error(&cmd->vk))
++         return;
+    }
+ 
+    after_buffer_unaligned_buffer_store<CHIP>(cmd, unaligned_store);

@@ -1,0 +1,272 @@
+{
+  "format": "pong-sm8475-dram-v1",
+  "physical_bytes": 12884901888,
+  "source": "Pong REC /sys/firmware/fdt, capture services57a",
+  "dram": [
+    {
+      "base": "0x80000000",
+      "size": "0x6a000000"
+    },
+    {
+      "base": "0xf1400000",
+      "size": "0xec00000"
+    },
+    {
+      "base": "0x800000000",
+      "size": "0x39900000"
+    },
+    {
+      "base": "0x839f00000",
+      "size": "0x1e00000"
+    },
+    {
+      "base": "0x840000000",
+      "size": "0xc0000000"
+    },
+    {
+      "base": "0x900000000",
+      "size": "0x180000000"
+    }
+  ],
+  "reserved": [
+    {
+      "name": "hyp_region@80000000",
+      "base": "0x80000000",
+      "size": "0x600000"
+    },
+    {
+      "name": "xbl_dtlog_region@80600000",
+      "base": "0x80600000",
+      "size": "0x40000"
+    },
+    {
+      "name": "xbl_ramdump_region@80640000",
+      "base": "0x80640000",
+      "size": "0x1c0000"
+    },
+    {
+      "name": "aop_image_region@80800000",
+      "base": "0x80800000",
+      "size": "0x60000"
+    },
+    {
+      "name": "aop_cmd_db_region@80860000",
+      "base": "0x80860000",
+      "size": "0x20000"
+    },
+    {
+      "name": "aop_config_region@80880000",
+      "base": "0x80880000",
+      "size": "0x20000"
+    },
+    {
+      "name": "tme_crash_dump_region@808a0000",
+      "base": "0x808a0000",
+      "size": "0x40000"
+    },
+    {
+      "name": "tme_log_region@808e0000",
+      "base": "0x808e0000",
+      "size": "0x4000"
+    },
+    {
+      "name": "uefi_log_region@808e4000",
+      "base": "0x808e4000",
+      "size": "0x10000"
+    },
+    {
+      "name": "smem_region@80900000",
+      "base": "0x80900000",
+      "size": "0x200000"
+    },
+    {
+      "name": "cpucp_fw_region@80b00000",
+      "base": "0x80b00000",
+      "size": "0x100000"
+    },
+    {
+      "name": "cdsp_secure_heap_region@80c00000",
+      "base": "0x80c00000",
+      "size": "0x4600000"
+    },
+    {
+      "name": "video_region@9FD00000",
+      "base": "0x9fd00000",
+      "size": "0x700000"
+    },
+    {
+      "name": "adsp_region@85700000",
+      "base": "0x85700000",
+      "size": "0x2800000"
+    },
+    {
+      "name": "slpi_region@88000000",
+      "base": "0x88000000",
+      "size": "0x1900000"
+    },
+    {
+      "name": "cdsp_region@89900000",
+      "base": "0x89900000",
+      "size": "0x2000000"
+    },
+    {
+      "name": "ipa_fw_region@8b900000",
+      "base": "0x8b900000",
+      "size": "0x10000"
+    },
+    {
+      "name": "ipa_gsi_region@8b910000",
+      "base": "0x8b910000",
+      "size": "0xa000"
+    },
+    {
+      "name": "gpu_microcode_region@8b91a000",
+      "base": "0x8b91a000",
+      "size": "0x2000"
+    },
+    {
+      "name": "spss_region_region@8ba00000",
+      "base": "0x8ba00000",
+      "size": "0x180000"
+    },
+    {
+      "name": "spu_tz_shared_mem@8bb80000",
+      "base": "0x8bb80000",
+      "size": "0x60000"
+    },
+    {
+      "name": "spu_modem_shared_mem@8bbe0000",
+      "base": "0x8bbe0000",
+      "size": "0x20000"
+    },
+    {
+      "name": "mpss_region@8bc00000",
+      "base": "0x8bc00000",
+      "size": "0x13200000"
+    },
+    {
+      "name": "cvp_region@9ee00000",
+      "base": "0x9ee00000",
+      "size": "0x700000"
+    },
+    {
+      "name": "camera_region@9f500000",
+      "base": "0x9f500000",
+      "size": "0x800000"
+    },
+    {
+      "name": "xbl_sc_region@a6e00000",
+      "base": "0xa6e00000",
+      "size": "0x40000"
+    },
+    {
+      "name": "cpusys_vm_region@e0600000",
+      "base": "0xe0600000",
+      "size": "0x400000"
+    },
+    {
+      "name": "trust_ui_vm_qrtr@e55f3000",
+      "base": "0xe55f3000",
+      "size": "0x9000"
+    },
+    {
+      "name": "trust_ui_vm_vblk0_ring@e55fc000",
+      "base": "0xe55fc000",
+      "size": "0x4000"
+    },
+    {
+      "name": "trust_ui_vm_swiotlb@e5600000",
+      "base": "0xe5600000",
+      "size": "0x100000"
+    },
+    {
+      "name": "tz_stat_region@e8800000",
+      "base": "0xe8800000",
+      "size": "0x100000"
+    },
+    {
+      "name": "tags_region@e8900000",
+      "base": "0xe8900000",
+      "size": "0x1200000"
+    },
+    {
+      "name": "qtee_region@e9b00000",
+      "base": "0xe9b00000",
+      "size": "0x500000"
+    },
+    {
+      "name": "ramoops_region",
+      "base": "0x85200000",
+      "size": "0x400000"
+    },
+    {
+      "name": "bootloader_log_region@A7605000",
+      "base": "0xa7605000",
+      "size": "0x8000"
+    },
+    {
+      "name": "splash_region",
+      "base": "0xb8000000",
+      "size": "0x2b00000"
+    }
+  ],
+  "allocatable": [
+    {
+      "base": "0x808f4000",
+      "size": "0xc000"
+    },
+    {
+      "base": "0x85600000",
+      "size": "0x100000"
+    },
+    {
+      "base": "0x87f00000",
+      "size": "0x100000"
+    },
+    {
+      "base": "0x8b91c000",
+      "size": "0xe4000"
+    },
+    {
+      "base": "0xa0400000",
+      "size": "0x6a00000"
+    },
+    {
+      "base": "0xa6e40000",
+      "size": "0x7c5000"
+    },
+    {
+      "base": "0xa760d000",
+      "size": "0x109f3000"
+    },
+    {
+      "base": "0xbab00000",
+      "size": "0x25b00000"
+    },
+    {
+      "base": "0xe0a00000",
+      "size": "0x4bf3000"
+    },
+    {
+      "base": "0xe5700000",
+      "size": "0x3100000"
+    },
+    {
+      "base": "0xf1400000",
+      "size": "0xec00000"
+    },
+    {
+      "base": "0x800000000",
+      "size": "0x39900000"
+    },
+    {
+      "base": "0x839f00000",
+      "size": "0x1e00000"
+    },
+    {
+      "base": "0x840000000",
+      "size": "0x240000000"
+    }
+  ],
+  "policy": "Intersect with current UEFI EfiConventionalMemory and claim each range; exclude firmware GOP at runtime; never reclaim BootServices/RuntimeServices or reserved descriptors"
+}

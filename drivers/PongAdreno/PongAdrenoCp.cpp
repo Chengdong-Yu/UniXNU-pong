@@ -46,7 +46,7 @@ struct Device {
     NativeAdrenoTimer timer;
     NativeAdrenoStatus status;
     NativeAdrenoIrq irq;
-    uint32_t irq_fatal=0,irq_count=0;
+    uint32_t irq_fatal=0,irq_count=0,irq_cp_status=0,irq_protect_status=0;
     PongCpBackend backend{};
     OSSharedPtr<IOMemoryMap> zap_map;
     PongZapState zap{};
@@ -60,7 +60,10 @@ static uint64_t now(void *) {uint64_t ns=0;absolutetime_to_nanoseconds(mach_abso
 static int idle(void *)
 {
     if(gpu->irq_attached && ml_get_interrupts_enabled() && !ml_at_interrupt_context() && !get_preemption_level()) {
-        assert_wait_timeout(event_t(&gpu->irq_count),THREAD_UNINT,100,NSEC_PER_USEC);
+        /* The fence IRQ wakes this immediately. A 100 us timeout generated
+         * thousands of scheduler wakeups while a wallpaper pass ran; retain
+         * a bounded 1 ms fallback for a missed/early interrupt. */
+        assert_wait_timeout(event_t(&gpu->irq_count),THREAD_UNINT,1,NSEC_PER_MSEC);
         thread_block(THREAD_CONTINUE_NULL);
     } else IODelay(20);
     return 0;
@@ -77,13 +80,27 @@ static bool faulted()
     if(!gpu || gpu->poisoned)return true;
     const auto *p=gpu->context.programResult();
     uint32_t fsr=sr(p->context_offset+0x58),global=sr(0x48),irq=rd(GEN7_RBBM_INT_0_STATUS),cp=rd(GEN7_CP_HW_FAULT);
-    /* Timestamp, RB-done and software/preemption indications are not errors.
-     * Poll real status; no GPU interrupt line is enabled without its owner. */
-    const uint32_t fatal=0x33c082c2u;
+    /* Use the same CP substatus decoder as the IRQ owner. PM4 completion and
+     * CP_HW_ERROR without an error cause must not destroy a working device. */
+    const uint32_t cp_status=(irq&(1u<<9))?rd(GEN7_CP_INTERRUPT_STATUS):0;
+    const uint32_t flags=NativeAdrenoIrq::classify(irq,cp_status);
     const uint32_t captured=__atomic_load_n(&gpu->irq_fatal,__ATOMIC_ACQUIRE);
-    if((fsr&SmmuContextFaultMask) || global || ((irq|captured)&fatal) || cp || captured) {
+    if((fsr&SmmuContextFaultMask) || global || (flags&NativeAdrenoIrqFatal) || cp || captured) {
         gpu->poisoned=true;gpu->status.noteFault();
         note("CP/SMMU fault; retain BOs",1,(uint64_t(fsr)<<32)|global,(uint64_t(irq|captured)<<32)|cp);
+        const uint32_t cause=cp_status|__atomic_load_n(&gpu->irq_cp_status,__ATOMIC_ACQUIRE);
+        const uint32_t protect=__atomic_load_n(&gpu->irq_protect_status,__ATOMIC_ACQUIRE)|
+            ((cause&(1u<<4))?rd(GEN7_CP_PROTECT_STATUS):0);
+        note("CP cause/protection",cause,(uint64_t(protect)<<32)|rd(GEN7_CP_BV_PROTECT_STATUS),
+            (uint64_t(rd(GEN7_CP_RB_RPTR))<<32)|rd(GEN7_CP_RB_WPTR));
+        /* Nothing gen7's opcode-error callback selects SQE_STAT index1.
+         * Capture once after poisoning, never on healthy submissions. */
+        if(cause&(1u<<13)) {
+            if(wr(GEN7_CP_BV_SQE_STAT_ADDR,1))note("BV opcode at fatal error",cause,rd(GEN7_CP_BV_SQE_STAT_DATA));
+        }
+        if(cause&1u) {
+            if(wr(GEN7_CP_SQE_STAT_ADDR,1))note("BR opcode at fatal error",cause,rd(GEN7_CP_SQE_STAT_DATA));
+        }
         if(fsr&SmmuContextFaultMask)
             note("GPU fault FAR/syndrome",fsr,(uint64_t(sr(p->context_offset+0x64))<<32)|sr(p->context_offset+0x60),
                 (uint64_t(sr(p->context_offset+0x68))<<32)|sr(p->context_offset+0x6c));
@@ -101,6 +118,8 @@ static void interrupt(void *)
     __atomic_fetch_add(&gpu->irq_count,1,__ATOMIC_RELAXED);
     thread_wakeup(event_t(&gpu->irq_count));
     if(status || (result.flags&NativeAdrenoIrqFatal)) {
+        __atomic_fetch_or(&gpu->irq_cp_status,result.cp_status,__ATOMIC_RELAXED);
+        __atomic_fetch_or(&gpu->irq_protect_status,result.protect_status,__ATOMIC_RELAXED);
         __atomic_fetch_or(&gpu->irq_fatal,result.status?result.status:0x80000000u,__ATOMIC_RELEASE);
         gpu->ops.registers.write32(gpu->ops.registers.cookie,GEN7_RBBM_INT_0_MASK,0);
         gpu->ops.registers.barrier(gpu->ops.registers.cookie);
@@ -317,10 +336,12 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
         const auto status=NativeAdrenoMemory::writeCombinePool();
         note("native BO pool",status,NativeAdrenoMemory::poolBytes());
     }
-    // 32-bit / native 4K: one L1 root, four L2 pages, 2048 L3 pages.
-    // The GMU owns a different context and retains its original aperture.
+    // Keep the previously working 32-bit IOVA aperture while recovering
+    // boot. The wider context was rejected by the software TBI policy;
+    // that failure did not establish a hardware address-width limitation.
+    // One L1 root, four L2 pages and 2048 L3 pages cover 4 GiB at 4 KiB.
     IOReturn status=gpu->tables.allocate(2053*4096,gpu->output_bits,true,2053*4096);
-    if(!status)status=gpu->context.prepare(&gpu->tables,0,0,UINT64_C(0x100000000),1048576,0,2,4096,gpu->output_bits);
+    if(!status)status=gpu->context.prepare(&gpu->tables,0,0,UINT64_C(0x100000000),1048576,0,2,4096,gpu->output_bits,32);
     if(!status)gpu->context.setAliasScratch(gpu->alias_scratch,262144);
     if(!status)status=gpu->context.program(&ops->smmu);
     ArmSmmu4KStream streams[gpu_stream_count]={};

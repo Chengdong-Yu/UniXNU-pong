@@ -19,12 +19,20 @@ def main():
     p.add_argument('--reference-dir',type=Path,
         help='regenerate hardware facts from the matching vendor gen7_reg.h')
     p.add_argument('--output-dir',required=True,type=Path)
+    p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
     p.add_argument('--tree',type=Path,default=Path('/Volumes/PongDev/build/Pong-iOS16-v45-high-scratch/tree'))
-    p.add_argument('--firmware-dir',type=Path,default=Path('/Volumes/PongDev/build/Pong-iOS16-v92-settings-adreno/firmware'))
+    p.add_argument('--firmware-dir',type=Path,
+        help='local REC-extracted Adreno730 firmware; defaults to this guest branch output')
     p.add_argument('--developer-dir',type=Path,
         default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
     a=p.parse_args();out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
+    if a.firmware_dir is None:
+        a.firmware_dir=ROOT/('out/ipados18' if a.guest_build=='22H374' else 'out')/'firmware/adreno730'
+    for name in ('gmu_gen70000.bin','a730_sqe.fw','a730_zap.mdt','a730_zap.b01','a730_zap.b02'):
+        if not (a.firmware_dir/name).is_file():
+            raise RuntimeError('Actual Pong firmware missing: '+str(a.firmware_dir/name))
     source=ROOT/'drivers/PongAdreno'
+    target='arm64-apple-ios18.0' if a.guest_build=='22H374' else 'arm64-apple-ios16.0'
     regs=(a.reference_dir/'gen7_reg.h').read_text() if a.reference_dir else (source/'PongAdrenoCpProfile.h').read_text()
     needed=sorted(set(re.findall(r'\bGEN7_[A-Z0-9_]+\b',(source/'PongAdrenoGmu.c').read_text())))
     values={}
@@ -46,7 +54,7 @@ def main():
         'ArmSmmu4KLive','ArmSmmu4KTableMemory']]
     for name in sources:
         obj=out/(Path(name).name+'.o')
-        cmd=['xcrun','clang','-target','arm64-apple-ios16.0','-isysroot',sdk,
+        cmd=['xcrun','clang','-target',target,'-isysroot',sdk,
              '-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only',
              '-fno-asynchronous-unwind-tables','-Os',
              '-Wall','-Wextra','-Werror','-I'+str(out),'-I'+str(source),
@@ -70,10 +78,11 @@ def main():
     subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(obj)
     framework=a.tree/'.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
     obj=out/'PongAdrenoPlatform.o'
-    cmd=['xcrun','clang++','-target','arm64-apple-ios16.0','-isysroot',sdk,
+    cmd=['xcrun','clang++','-target',target,'-isysroot',sdk,
         '-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only',
         '-fno-exceptions','-fno-rtti','-fno-stack-check','-std=gnu++17','-fblocks','-Os',
         '-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_PONG=1',
+        *(['-DPONG_GUEST_22H374=1'] if a.guest_build=='22H374' else []),
         '-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),
         '-I'+str(out),'-I'+str(source),'-I'+str(source/'ArmSmmu4K'),
         '-Wno-deprecated-declarations',
@@ -89,10 +98,11 @@ def main():
         cmd[cmd.index('-c')+1]=str(source/(name+'.cpp'));cmd[-1]=str(obj)
         cmd+=['-I'+str(source/'submit')]
         subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(obj)
-    # Sheng's late accelerator class: bind its genuine 20G81 IOAcceleratorES
+    # Sheng's late accelerator class: bind the selected guest's IOAcceleratorES
     # ancestry, and defer its constructor until IOGPUFamily is loaded.
-    abi=json.loads((ROOT/'configs/pong-iogpu-20G81.json').read_text())
+    abi=json.loads((ROOT/('configs/pong-iogpu-'+a.guest_build+'.json')).read_text())
     fixed=json.loads((ROOT/'mac-build/native-ufs/bindings.json').read_text())
+    if fixed.get('build', '20G81') != a.guest_build:raise RuntimeError('GPU and storage prelink guests differ')
     slide=int(fixed['fixed_prelink_base'],16)-int(abi['original_prelink_base'],16)
     bindings={'__ZN15IOAcceleratorESC2EPK11OSMetaClass':'constructor',
               '__ZN15IOAcceleratorESD2Ev':'destructor',
@@ -102,7 +112,7 @@ def main():
     assembly.write_text(''.join('.globl '+symbol+'\n.set '+symbol+', '+hex(int(abi[key],16)+slide)+'\n'
         for symbol,key in bindings.items()))
     binding_object=out/'PongIOAcceleratorBindings.o'
-    cmd=['xcrun','clang','-target','arm64-apple-ios16.0','-isysroot',sdk,'-c',str(assembly),'-o',str(binding_object)]
+    cmd=['xcrun','clang','-target',target,'-isysroot',sdk,'-c',str(assembly),'-o',str(binding_object)]
     subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(binding_object)
     accelerator=out/'NativeAdrenoAccelerator.o';cmd=cpp_template.copy()
     cmd[cmd.index('-c')+1]=str(source/'submit/NativeAdrenoAccelerator.cpp');cmd[-1]=str(accelerator)
@@ -141,14 +151,14 @@ def main():
     # ar rcs otherwise retains stale members from the replaced client wrapper.
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun','ar','rcs',str(archive),*[str(x) for x in objects]],env=env,check=True)
-    report=dict(archive=str(archive),commands=commands,
+    report=dict(archive=str(archive),guest_build=a.guest_build,target=target,commands=commands,
         chip_id='0x07030002',gmem_bytes=0x200000,gmu_firmware='gmu_gen70000.bin',
         sqe_firmware='a730_sqe.fw',zap='a730_zap',
         hfi_table_words=210,hfi_queue_offset_bytes=848,active_queues=3,
         cpu_page_bytes=4096,registers=values,automatic_boot_entry=False,
         startup_boot_argument='pong_adreno_start=1',accelerator_published=False,
         cp_ring_compiled=True,cp_board_connected=True,cp_init='SM8475 bootstrap drain, PAS13/ZAP, nonsecure timestamp fence',
-        native_user_client='NativeAdrenoGpuPublished',metal_publication='upstream AGXAccelerator/NativeAdrenoPublish on real20G81 IOAcceleratorES',
+        native_user_client='NativeAdrenoGpuPublished',metal_publication='NativeAdrenoPublish on matching '+a.guest_build+' IOAcceleratorES',
         metal_parent_abi=abi,metal_parent_bindings={s:hex(int(abi[k],16)+slide) for s,k in bindings.items()},
         timestamp_gmu_offsets=[0x16220,0x16224],
         gpu_streams=[0,0x400,1,0x401],gmu_streams=[5,0x405],

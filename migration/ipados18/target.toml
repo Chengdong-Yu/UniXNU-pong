@@ -1,4 +1,4 @@
-# Migration planning metadata only. Not consumed by the iOS16 build scripts.
+# Darwin 24 migration target; board.toml selects the same restore.
 [target]
 os = "iPadOS"
 major_version = 18
@@ -9,7 +9,7 @@ supported_product_types = ["iPad7,11", "iPad7,12"]
 version = "18.7.10"
 build = "22H374"
 ipsw_url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
-stage = "preparation"
+stage = "kernel-and-userland-port"
 chip_id = 0x8010
 board_id = 0x1c
 content_encoding = "aea"

@@ -1,0 +1,24 @@
+name: Pong porting record
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
+          path: tools
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Add Pong community component metadata
+        run: cat device/migration/format2/components.toml >> tools/components.toml
+      - name: Check porting record
+        run: python3 tools/scripts/porting-record.py check --device device

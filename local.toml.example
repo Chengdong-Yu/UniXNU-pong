@@ -1,0 +1,7 @@
+# Copy to local.toml (ignored by Git). Paths below are examples, not inputs.
+# migrate-pong-format2.py adds local source overrides for the reproducible
+# SM8475 seed, this device kit and the selected Apple open source checkouts.
+[pong_build]
+tree = "../build/Pong-iPadOS18-native/tree"
+developer_dir = "/Applications/Xcode.app/Contents/Developer"
+volume_layout = "../private-inputs/volume-layout.json"

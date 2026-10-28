@@ -27,6 +27,18 @@ static ArmSmmu4KStatus build_region(const ArmSmmu4KConfig *config,
         return ArmSmmu4KBadRange;
     size_t leaves = 0;
     uint64_t previous_end = 0;
+    /* Fragmented wired buffers can contain one range per 4K page. Identical
+     * memory attributes cannot form the conflicting physical aliases checked
+     * below; keep that common case linear without weakening mixed-attribute
+     * alias validation. */
+    unsigned uniform_attributes = 1;
+    for (size_t i = 1; i < range_count; ++i) {
+        if (ranges[i].writeback != ranges[0].writeback ||
+            ranges[i].shareability != ranges[0].shareability ||
+            ((ranges[i].permissions ^ ranges[0].permissions) & ArmSmmu4KPrivileged)) {
+            uniform_attributes = 0; break;
+        }
+    }
     for (size_t i = 0; i < range_count; ++i) {
         const ArmSmmu4KRange *r = &ranges[i];
         if (!r->bytes || ((r->iova | r->physical | r->bytes) & 4095) ||
@@ -40,7 +52,7 @@ static ArmSmmu4KStatus build_region(const ArmSmmu4KConfig *config,
         previous_end = r->iova + (r->bytes-1);
         if (r->physical < pool + pool_bytes && pool < r->physical + r->bytes)
             return ArmSmmu4KOverlap;
-        for (size_t j = 0; j < i; ++j) {
+        for (size_t j = 0; !uniform_attributes && j < i; ++j) {
             if ((r->writeback != ranges[j].writeback || r->shareability != ranges[j].shareability || ((r->permissions ^ ranges[j].permissions) & ArmSmmu4KPrivileged)) && r->physical < ranges[j].physical + ranges[j].bytes &&
                 ranges[j].physical < r->physical + r->bytes) return ArmSmmu4KOverlap;
         }
