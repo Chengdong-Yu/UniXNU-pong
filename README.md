@@ -78,7 +78,7 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 
 - 不刷机、不碰设备，一次运行只产出文件。
 - 不生成 userdata 镜像：那一步需要一份 prepared userland（`result.json`、`apply-complete.json` 以及 OS / SystemOS / Data 三个镜像），CI 里没有这些输入，所以 `userdata-decision.json` 记为 `skipped`，不是失败。
-- 默认跳过整镜像哈希校验和单核 ADT 审计（prelink 路径传 `--skip-image-verification`），容器结构校验仍然执行。
+- 走 prelink 路径时跳过整镜像哈希校验和 ADT 审计（`build-ipados18-prelinked-boot.py` 传给 `build-ipados18-bootimg-local.py` 的 `--skip-image-verification`），换来的代价是 `image_sha256` 等字段为 `null`；容器结构校验两条路都做。
 - 产物没有上过真机。CI 只校验容器结构和打包内容，不做任何启动验证。
 
 ## 源码边界与许可证

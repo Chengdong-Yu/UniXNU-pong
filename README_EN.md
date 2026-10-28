@@ -79,7 +79,7 @@ A fork therefore runs Path A and needs no secrets at all. For the full configura
 
 - It never flashes a device; a run only produces files.
 - It does not build the userdata image. That step needs a prepared userland (`result.json`, `apply-complete.json`, and the OS, SystemOS and Data images), and CI has none of those inputs, so `userdata-decision.json` records `skipped` rather than a failure.
-- Image hashing and the single-core ADT audit are skipped by default (the prelink path passes `--skip-image-verification`); the container checks still run.
+- The prelink path skips image hashing and the ADT audit (`build-ipados18-prelinked-boot.py` passes `--skip-image-verification` to `build-ipados18-bootimg-local.py`), which leaves fields such as `image_sha256` as `null`; both paths still check the container structure.
 - Nothing is verified on hardware. CI validates the container and its packed contents only; it never boots anything.
 
 ## Source boundaries and license
