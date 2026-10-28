@@ -594,6 +594,11 @@ jobs:
         run: |
           set -euo pipefail
           source ci-env.sh
+          # This workflow never runs userland/build-ipados18.py, so
+          # ${PONG_INPUTS}/22H374/prepared is absent. That is a recorded skip
+          # (exit 0), not a failed stage. The layout script runs only when
+          # result.json, apply-complete.json, and the three cdr images are
+          # already there with build 22H374.
           echo "=== df before userdata ==="
           df -h | tee df-before-userdata.txt
           set +e
@@ -708,11 +713,11 @@ jobs:
           path: ci-logs/
           if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: success()
+        if: always()
         with:
           name: pong-macos-products
           retention-days: 14
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             ci-products/pong-xnu-initial.img
             ci-products/mach.development.pong
