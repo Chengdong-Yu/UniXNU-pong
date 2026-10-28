@@ -83,6 +83,15 @@ def run(cmd, **kw):
 
 def sha(path):
     if not VERIFY_IMAGES: return None
+    return file_sha(path)
+
+
+def file_sha(path):
+    """Hash one file even when whole-image verification is off.
+
+    sha() returns None in that mode. Comparing None with None made the
+    launchd guards succeed without reading the file.
+    """
     h = hashlib.sha256()
     with open(path, 'rb') as f:
         for b in iter(lambda: f.read(1024 * 1024), b''):
@@ -936,7 +945,7 @@ def prepare(a):
     dump(out / 'cryptex-links.json', dict(build='22H374', links=links,
          count=len(links), existing_OS_files_preserved=True))
     required = ['sbin/launchd', 'usr/lib/dyld', 'System/Library/CoreServices/SystemVersion.plist']
-    hashes = {p: sha(root / p) for p in required}
+    hashes = {p: file_sha(root / p) for p in required}
     cache = cryptex / 'System/Library/Caches/com.apple.dyld'
     cache_files = sorted(p for p in cache.glob('dyld_shared_cache_arm64*') if p.is_file())
     if len(cache_files) < 2: raise RuntimeError('matching split arm64 shared cache missing')
@@ -1000,7 +1009,7 @@ def apply(a):
     root = out / 'system-mount'
     device = attach(out / 'pong-ipados18-system.cdr', root)
     try:
-        if sha(root / 'sbin/launchd') != plan['apple_sha256']['sbin/launchd']:
+        if file_sha(root / 'sbin/launchd') != plan['apple_sha256']['sbin/launchd']:
             raise RuntimeError('launchd does not match source 22H374')
         stock = root / 'pong/stock-config'
         stock.mkdir(parents=True)
@@ -1037,7 +1046,7 @@ def apply(a):
             dest = root / 'Applications' / p.name
             if os.path.lexists(dest): raise RuntimeError('app already exists: ' + p.name)
             p.rename(dest); moved.append(p.name)
-        if sha(stock / 'launchd.original') != plan['apple_sha256']['sbin/launchd']:
+        if file_sha(stock / 'launchd.original') != plan['apple_sha256']['sbin/launchd']:
             raise RuntimeError('original launchd changed')
     finally:
         run(['hdiutil', 'detach', device])
@@ -1476,25 +1485,19 @@ def finish(a):
     out = a.out.resolve(); plan = json.loads((out / 'build-plan.json').read_text())
     if not (out / 'apply-complete.json').exists(): raise RuntimeError('apply has not completed')
     if not VERIFY_IMAGES:
+        packed = out / 'pong-ipados18-data.packed'
+        pack_data(out / 'pong-ipados18-data.cdr', packed)
         tracked = storage_for(out / 'pong-ipados18-system.cdr')
         files = {name: {'bytes': (out / name).stat().st_size} for name in
-                 ('pong-ipados18-system.cdr', 'pong-ipados18-data.cdr')}
+                 ('pong-ipados18-system.cdr', 'pong-ipados18-data.cdr', 'pong-ipados18-data.packed')}
         if tracked:
             files['pong-ipados18-system.cdr'] = dict(path=tracked['image'],
                 bytes=tracked['logical_bytes'], storage='sparsebundle; raw cdr retained as earlier base')
         result=dict(build='22H374', data_backend='ufs', image_verification='skipped by request',
-                    device_boot_verified=False, files=files)
+                    device_boot_verified=False, static_init_signature=plan.get('static_init_signature'),
+                    phone_written=False, files=files)
         dump(out/'result.json',result)
         print(json.dumps(result,indent=2))
-        return
-        packed = out / 'pong-ipados18-data.packed'
-        pack_data(out / 'pong-ipados18-data.cdr', packed)
-        result = dict(image_verification='skipped by request', device_boot_verified=False,
-            static_init_signature=plan.get('static_init_signature'), phone_written=False,
-            files={name: {'bytes': (out / name).stat().st_size} for name in
-                ('pong-ipados18-system.cdr', 'pong-ipados18-data.cdr', 'pong-ipados18-data.packed')})
-        dump(out / 'result.json', result)
-        print(json.dumps(result, indent=2))
         return
     c = apfs.Container(str(out / 'pong-ipados18-system.cdr')); v = apfs.pick_volume(c, None)
     def content(path):
