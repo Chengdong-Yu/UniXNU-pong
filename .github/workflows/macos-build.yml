@@ -73,6 +73,15 @@ jobs:
           repository: UniXNU/UniXNU
           ref: 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
           path: unixnu
+          fetch-depth: 1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: UniXNU/UniXNU-sheng
+          ref: 08cde20edc3254ed6f7df8d0f5384fb887786e8f
+          path: sheng
+          fetch-depth: 1
+          # drivers/Ath12kWifi is a gitlink to UniXNU/Ath12kWifi f6bf561f92cc42761bdd417fce1d53fe1db9477c.
+          submodules: true
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
@@ -84,13 +93,25 @@ jobs:
           SELECTED="$(xcode-select -p)"
           echo "xcode-select: ${SELECTED}"
           xcodebuild -version
-          for app in /Applications/Xcode*.app; do
-            [ -d "$app" ] || continue
-            case "$SELECTED" in
-              "$app"/*) echo "keep $app" ;;
-              *) echo "remove $app"; sudo rm -rf "$app" ;;
-            esac
-          done
+          # Run 9 had 107 GiB free before this step and 180 GiB after. The
+          # difference was eight minutes of rm -rf on the unused Xcode copies.
+          # The selected Xcode stays. Delete the others only below 40 GiB free,
+          # which still covers the kernel objects, EDK2, and the Linux checkout.
+          NEED_KB=$((40 * 1024 * 1024))
+          AVAIL_KB="$(df -k / | awk 'NR==2 {print $4}')"
+          echo "avail_kb=${AVAIL_KB} need_kb=${NEED_KB}"
+          if [ "$AVAIL_KB" -ge "$NEED_KB" ]; then
+            echo "Skipping unused Xcode deletion: ${AVAIL_KB} KiB free is at least ${NEED_KB} KiB. Keeping ${SELECTED}."
+          else
+            echo "Free space is below 40 GiB. Removing Xcode copies other than ${SELECTED}."
+            for app in /Applications/Xcode*.app; do
+              [ -d "$app" ] || continue
+              case "$SELECTED" in
+                "$app"/*) echo "keep $app" ;;
+                *) echo "remove $app"; sudo rm -rf "$app" ;;
+              esac
+            done
+          fi
           sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
           rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/Homebrew" || true
           echo "=== df after reclaim ==="
@@ -101,12 +122,55 @@ jobs:
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
           # cmake and ninja are already on the image. Do not upgrade them:
           # `brew install cmake` on macos-15-intel failed with "cmake: no bottle available".
-          brew install dtc lzfse
-          command -v dtc
-          command -v lzfse
-          command -v cmake
-          command -v ninja
-          command -v make
+          # The current Homebrew llvm formula also has no bottle on this Tier 3 runner.
+          # The image already has the llvm@18 keg. XNU keeps using xcrun.
+          brew install dtc lzfse mtools nasm acpica
+          require_cmd() {
+            local tool="$1" stage="$2"
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "missing ${tool} for ${stage}" >&2
+              exit 1
+            fi
+          }
+          require_cmd dtc "format2 device tree"
+          require_cmd lzfse "kernelcache decompress"
+          require_cmd mformat "boot image packager"
+          require_cmd mcopy "boot image packager"
+          require_cmd nasm "DarwinBoot24 EDK2"
+          require_cmd iasl "DarwinBoot24 EDK2"
+          require_cmd cmake "XNU build"
+          require_cmd ninja "XNU build"
+          require_cmd make "XNU build"
+          # Preinstalled keg. Do not brew install llvm, and do not use Xcode clang for CLANGPDB.
+          LLVM_BIN="$(brew --prefix llvm@18)/bin"
+          require_llvm() {
+            local tool="$1" stage="$2"
+            local path="${LLVM_BIN}/${tool}"
+            if [ ! -x "$path" ]; then
+              echo "missing ${tool} for ${stage}: ${path} is not in the preinstalled Homebrew llvm@18 keg. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
+            echo "=== ${stage}: ${path} ==="
+            "$path" --version
+          }
+          # llvm-lib and llvm-rc are MSVC-compatible drivers. They reject
+          # --version and exit 1 with no inputs, so existence is the check.
+          require_llvm_present() {
+            local tool="$1" stage="$2"
+            local path="${LLVM_BIN}/${tool}"
+            if [ ! -x "$path" ]; then
+              echo "missing ${tool} for ${stage}: ${path} is not in the preinstalled Homebrew llvm@18 keg. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
+            echo "=== ${stage}: ${path} present ==="
+          }
+          require_llvm clang "DarwinBoot24 CLANGPDB"
+          require_llvm lld-link "DarwinBoot24 CLANGPDB"
+          require_llvm llvm-nm "ath11k link"
+          require_llvm llvm-objcopy "ath11k link"
+          require_llvm_present llvm-lib "DarwinBoot24 CLANGPDB"
+          require_llvm_present llvm-rc "DarwinBoot24 CLANGPDB"
+          printf '%s\n' "$LLVM_BIN" > ci-llvm-bin.txt
           python3 --version
           python3 -m pip install --disable-pip-version-check pyhpke
       - name: Public Apple OSS pins
@@ -139,26 +203,24 @@ jobs:
             echo "fetched ${ref} ${commit}"
           done
       - name: Choose firmware path
+        id: firmware
         env:
           PONG_FIRMWARE_TOKEN: ${{ secrets.PONG_FIRMWARE_TOKEN }}
-          # Full commit of Chengdong-Yu/UniXNU-pong-firmware. Empty until that
-          # private repo has a commit. Path B will not guess a branch.
-          FIRMWARE_REVISION: ""
+          # Full commit of Chengdong-Yu/UniXNU-pong-firmware. Do not guess a branch.
+          FIRMWARE_REVISION: c1695a31eae622e136787ef328f5ed11016d4f4a
         run: |
           set -euo pipefail
           if [ -z "${PONG_FIRMWARE_TOKEN}" ]; then
             echo "PONG_FIRMWARE_TOKEN is absent."
             echo "Path A: configs/pong_ipados18_ci_defconfig."
-            echo "CONFIG_XNU_PONG_WIFI=n, CONFIG_XNU_PONG_BACKLIGHT=n, CONFIG_XNU_PONG_ADRENO_PLATFORM=n."
-            echo "This is not the shipping kernel. Those stages need private modem, amplifier, and Adreno730 firmware."
+            echo "WIFI off, backlight off, Adreno730 off."
+            echo "This is not the shipping kernel. Those stages need the private firmware checkout."
             echo "pong_ipados18_ci_defconfig" > ci-defconfig-name.txt
             echo "A" > ci-firmware-path.txt
+            printf '%s\n' 'path=A' >> "$GITHUB_OUTPUT"
+            printf '%s\n' 'Path A. WIFI off, backlight off, Adreno730 off: private firmware token is absent.' > ci-stages.txt
           else
-            echo "PONG_FIRMWARE_TOKEN is set. Path B checks out Chengdong-Yu/UniXNU-pong-firmware."
-            if [ -z "${FIRMWARE_REVISION}" ]; then
-              echo "Path B refused: FIRMWARE_REVISION in .github/workflows/macos-build.yml is empty, so there is no commit SHA to pin."
-              exit 1
-            fi
+            echo "Path B checks out Chengdong-Yu/UniXNU-pong-firmware at ${FIRMWARE_REVISION}."
             dest="${RUNNER_TEMP}/pong-firmware"
             rm -rf "$dest"
             mkdir -p "$dest"
@@ -166,31 +228,151 @@ jobs:
             git -C "$dest" init -q
             git -C "$dest" remote add origin https://github.com/Chengdong-Yu/UniXNU-pong-firmware.git
             git -C "$dest" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" fetch --depth 1 origin "${FIRMWARE_REVISION}"
+            unset auth
+            unset PONG_FIRMWARE_TOKEN
             git -C "$dest" checkout -q FETCH_HEAD
             test "$(git -C "$dest" rev-parse HEAD)" = "${FIRMWARE_REVISION}"
-            export PONG_WIFI_FIRMWARE="${dest}/wifi"
-            export PONG_AUDIO_INPUTS="${dest}/audio"
+            wifi="${dest}/wifi"
+            audio="${dest}/audio"
+            adreno="${dest}/adreno730"
             missing=0
             for name in amss.bin amss20.bin m3.bin regdb.bin; do
-              if [ ! -f "${PONG_WIFI_FIRMWARE}/${name}" ]; then
-                echo "missing firmware file: ${PONG_WIFI_FIRMWARE}/${name}"
+              if [ ! -f "${wifi}/${name}" ]; then
+                echo "missing firmware file: wifi/${name}"
                 missing=1
               fi
             done
-            if [ ! -f "${PONG_AUDIO_INPUTS}/tfa98xx.cnt" ]; then
-              echo "missing audio profile: ${PONG_AUDIO_INPUTS}/tfa98xx.cnt"
+            if [ ! -f "${audio}/tfa98xx.cnt" ]; then
+              echo "missing audio profile: audio/tfa98xx.cnt"
+              missing=1
+            fi
+            for name in gmu_gen70000.bin a730_sqe.fw a730_zap.mdt a730_zap.b01 a730_zap.b02; do
+              if [ ! -f "${adreno}/${name}" ]; then
+                echo "missing adreno firmware file: adreno730/${name}"
+                missing=1
+              fi
+            done
+            if [ ! -f "${dest}/power/adsp.mbn" ]; then
+              echo "missing power firmware file: power/adsp.mbn"
               missing=1
             fi
             if [ "$missing" -ne 0 ]; then
               echo "Path B refused: the pinned firmware repo does not contain the expected files."
               exit 1
             fi
-            # Persist the paths for later steps without printing the token.
-            printf '%s\n' "$PONG_WIFI_FIRMWARE" > ci-wifi-firmware-path.txt
-            printf '%s\n' "$PONG_AUDIO_INPUTS" > ci-audio-inputs-path.txt
+            printf '%s\n' "$wifi" > ci-wifi-firmware-path.txt
+            printf '%s\n' "$audio" > ci-audio-inputs-path.txt
+            printf '%s\n' "$adreno" > ci-adreno-firmware-path.txt
+            printf '%s\n' "${dest}/power/adsp.mbn" > ci-adsp-path.txt
             echo "pong_ipados18_defconfig" > ci-defconfig-name.txt
             echo "B" > ci-firmware-path.txt
+            printf '%s\n' 'path=B' >> "$GITHUB_OUTPUT"
+            {
+              echo 'Path B uses configs/pong_ipados18_defconfig.'
+              echo 'WIFI on: Linux v7.0.14 ath11k sources 458c6079fc1d41d564c37679c8ace02cd83ee817. UniXNU-sheng supplies Ath12kWifi. Firmware wifi/ supplies amss.bin, amss20.bin, m3.bin and regdb.bin.'
+              echo 'BACKLIGHT on: UniXNU-sheng package plus audio/tfa98xx.cnt. build-pong-power-native.py runs because backlight is on.'
+              echo 'ADRENO on: PONG_ADRENO_FIRMWARE points at the checked-out adreno730 directory (gmu_gen70000.bin, a730_sqe.fw, a730_zap.mdt, a730_zap.b01, a730_zap.b02).'
+              echo 'power/adsp.mbn is present for the runtime firmware path. The power build does not embed that file.'
+            } > ci-stages.txt
+            cat ci-stages.txt
           fi
+      - name: Linux 7.0.14 ath11k sources
+        if: steps.firmware.outputs.path == 'B'
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/linux-7.0.14"
+          rm -rf "$dest"
+          git clone --filter=blob:none --sparse --depth 1 --branch v7.0.14 \
+            https://github.com/gregkh/linux.git "$dest"
+          git -C "$dest" sparse-checkout set \
+            drivers/net/wireless/ath \
+            drivers/bus/mhi \
+            drivers/soc/qcom \
+            include/linux \
+            include/net \
+            include/uapi/linux
+          test "$(git -C "$dest" rev-parse HEAD)" = "458c6079fc1d41d564c37679c8ace02cd83ee817"
+          test -f "$dest/drivers/net/wireless/ath/ath11k/pci.c"
+          test -f "$dest/drivers/net/wireless/ath/ath11k/core.c"
+          test -f "$dest/drivers/net/wireless/ath/spectral_common.h"
+          test -f "$dest/drivers/bus/mhi/host/init.c"
+          test -f "$dest/drivers/soc/qcom/qmi_interface.c"
+          test -f "$dest/include/linux/mhi.h"
+          test -f "$dest/include/net/mac80211.h"
+          printf '%s\n' "$dest" > ci-linux-source.txt
+          echo "Linux v7.0.14 sparse checkout is the real ath11k/mhi/qmi tree at 458c6079fc1d41d564c37679c8ace02cd83ee817."
+      - name: DarwinBoot24
+        run: |
+          set -euo pipefail
+          LLVM_BIN="$(cat ci-llvm-bin.txt)"
+          for tool in clang lld-link llvm-lib llvm-rc; do
+            if [ ! -x "${LLVM_BIN}/${tool}" ]; then
+              echo "missing ${tool} for DarwinBoot24 CLANGPDB: ${LLVM_BIN}/${tool}. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
+          done
+          export PONG_LLVM="$LLVM_BIN"
+          test -d "${GITHUB_WORKSPACE}/unixnu/package/UniXNUPkg"
+          test -f "${GITHUB_WORKSPACE}/unixnu/package/UniXNUPkg/UniXNUPkg.dec"
+          test -d "${GITHUB_WORKSPACE}/sheng/package"
+          test -f "${GITHUB_WORKSPACE}/sheng/drivers/Ath12kWifi/include/nw_abi.h"
+          # Mu_Basecore is pinned to v2026080000.0.4, the exact tree
+          # uefi-pong builds against. Do not move this to another release:
+          # newer/older trees differ in where the assembly macro header lives
+          # (MdePkg/Include/AArch64/AsmMacroLib.h vs MdePkg/Include/AsmMacroIoLib.h).
+          MU_BASECORE_COMMIT=3c9c7b2e211e62d2a954ad760a36fe05adc43aa3
+          dest="${RUNNER_TEMP}/Mu_Basecore"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          git -C "$dest" init -q
+          git -C "$dest" remote add origin https://github.com/microsoft/mu_basecore.git
+          if ! git -C "$dest" fetch --depth 1 origin refs/tags/v2026080000.0.4; then
+            echo "Pinned Mu_Basecore tag was not fetched. Fetching the commit directly."
+            git -C "$dest" fetch --depth 1 origin "$MU_BASECORE_COMMIT"
+          fi
+          git -C "$dest" checkout -q FETCH_HEAD
+          test "$(git -C "$dest" rev-parse HEAD)" = "$MU_BASECORE_COMMIT"
+          test -f "$dest/MdePkg/Include/AArch64/AsmMacroLib.h"
+          # Two submodules are load-bearing: MdePkg.dec lists the mipisyst include
+          # path for every build, and BrotliCompress needs its own source tree.
+          git -C "$dest" submodule update --init --depth 1 \
+            MdePkg/Library/MipiSysTLib/mipisyst \
+            BaseTools/Source/C/BrotliCompress/brotli
+          test -f "$dest/MdePkg/Library/MipiSysTLib/mipisyst/library/include/mipi_syst.h.in"
+          test -f "$dest/BaseTools/Source/C/BrotliCompress/brotli/c/common/constants.h"
+          test -d "$dest/MdePkg"
+          # Microsoft ships prebuilt BaseTools for Windows and Linux only, so the
+          # host tools have to be compiled here. CLANGPDB output needs GenFw, and
+          # GenFw needs the Common library; nothing else in BaseTools is used.
+          export PYTHON_COMMAND="$(command -v python3)"
+          make -C "$dest/BaseTools/Source/C" Common
+          make -C "$dest/BaseTools/Source/C" GenFw
+          test -x "$dest/BaseTools/Source/C/bin/GenFw"
+          # A real invocation: a GenFw that cannot start would fail the build later anyway.
+          "$dest/BaseTools/Source/C/bin/GenFw" --version
+          export IASL_PREFIX="$(brew --prefix acpica)/bin/"
+          export NASM_PREFIX="$(brew --prefix nasm)/bin/"
+          test -x "${IASL_PREFIX}iasl"
+          test -x "${NASM_PREFIX}nasm"
+          set +e
+          python3 scripts/build-darwinboot24-macos.py \
+            --edk2 "$dest" \
+            --package "${GITHUB_WORKSPACE}/unixnu/package" \
+            --llvm "$LLVM_BIN" \
+            --output-dir "${RUNNER_TEMP}/Pong-DarwinBoot24"
+          status=$?
+          set -e
+          mkdir -p ci-logs
+          find "${RUNNER_TEMP}/Pong-DarwinBoot24" mac-build/darwinboot24 -name '*.log' -type f 2>/dev/null | while read -r log; do
+            cp -f "$log" "ci-logs/$(basename "$log")" || true
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "DarwinBoot24 build exited ${status}"
+            exit "$status"
+          fi
+          test -s mac-build/darwinboot24/DarwinBoot24.efi
+          ls -l mac-build/darwinboot24/DarwinBoot24.efi
+          rm -rf "$dest" "${RUNNER_TEMP}/Pong-DarwinBoot24"
       - name: Layout, kernelcache, and describe paths
         run: |
           set -euo pipefail
@@ -200,9 +382,22 @@ jobs:
           export PONG_BUILD_TREE="${PONG_WORK}/build/Pong-iPadOS18-native/tree"
           export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
           export PONG_STORAGE_HEADERS="${GITHUB_WORKSPACE}/refer/ipados18/IOStorageFamily-323"
+          export PONG_SHENG_ROOT="${GITHUB_WORKSPACE}/sheng"
+          export PONG_WIFI_BUILD="${PONG_WORK}/wifi-ath11k-build"
+          export PONG_LLVM="$(cat ci-llvm-bin.txt)"
+          export PONG_LLVM_NM="${PONG_LLVM}/llvm-nm"
+          export PONG_LLVM_OBJCOPY="${PONG_LLVM}/llvm-objcopy"
+          if [ ! -x "$PONG_LLVM_NM" ] || [ ! -x "$PONG_LLVM_OBJCOPY" ]; then
+            echo "missing llvm-nm or llvm-objcopy for the ath11k link under ${PONG_LLVM}. Not falling back to Xcode clang." >&2
+            exit 1
+          fi
+          if [ -f ci-linux-source.txt ]; then
+            export PONG_WIFI_SOURCE="$(cat ci-linux-source.txt)"
+          fi
           if [ -f ci-wifi-firmware-path.txt ]; then
             export PONG_WIFI_FIRMWARE="$(cat ci-wifi-firmware-path.txt)"
             export PONG_AUDIO_INPUTS="$(cat ci-audio-inputs-path.txt)"
+            export PONG_ADRENO_FIRMWARE="$(cat ci-adreno-firmware-path.txt)"
           fi
           mkdir -p "${PONG_WORK}/build" "${PONG_INPUTS}"
           python3 - <<'PY'
@@ -236,23 +431,34 @@ jobs:
           python3 scripts/pong_paths.py describe | tee ci-paths.txt
           echo "=== df after kernelcache ==="
           df -h | tee df-after-kernelcache.txt
-          printf '%s\n' "$PONG_WORK" > ci-pong-work.txt
-          printf '%s\n' "$PONG_INPUTS" > ci-pong-inputs.txt
-          printf '%s\n' "$PONG_DEVELOPER_DIR" > ci-developer-dir.txt
+          {
+            printf 'export PONG_WORK=%q\n' "$PONG_WORK"
+            printf 'export PONG_INPUTS=%q\n' "$PONG_INPUTS"
+            printf 'export PONG_DEVELOPER_DIR=%q\n' "$PONG_DEVELOPER_DIR"
+            printf 'export PONG_BUILD_TREE=%q\n' "$PONG_BUILD_TREE"
+            printf 'export PONG_VOLUME_LAYOUT=%q\n' "$PONG_VOLUME_LAYOUT"
+            printf 'export PONG_STORAGE_HEADERS=%q\n' "$PONG_STORAGE_HEADERS"
+            printf 'export PONG_SHENG_ROOT=%q\n' "$PONG_SHENG_ROOT"
+            printf 'export PONG_WIFI_BUILD=%q\n' "$PONG_WIFI_BUILD"
+            printf 'export PONG_LLVM=%q\n' "$PONG_LLVM"
+            printf 'export PONG_LLVM_NM=%q\n' "$PONG_LLVM_NM"
+            printf 'export PONG_LLVM_OBJCOPY=%q\n' "$PONG_LLVM_OBJCOPY"
+            if [ -n "${PONG_WIFI_SOURCE:-}" ]; then
+              printf 'export PONG_WIFI_SOURCE=%q\n' "$PONG_WIFI_SOURCE"
+            fi
+            if [ -n "${PONG_WIFI_FIRMWARE:-}" ]; then
+              printf 'export PONG_WIFI_FIRMWARE=%q\n' "$PONG_WIFI_FIRMWARE"
+              printf 'export PONG_AUDIO_INPUTS=%q\n' "$PONG_AUDIO_INPUTS"
+              printf 'export PONG_ADRENO_FIRMWARE=%q\n' "$PONG_ADRENO_FIRMWARE"
+            fi
+          } > ci-env.sh
       - name: Compile CI kernel
         id: kernel
         run: |
           set -euo pipefail
-          export PONG_WORK="$(cat ci-pong-work.txt)"
-          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
-          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
-          export PONG_BUILD_TREE="${PONG_WORK}/build/Pong-iPadOS18-native/tree"
-          export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
-          export PONG_STORAGE_HEADERS="${GITHUB_WORKSPACE}/refer/ipados18/IOStorageFamily-323"
-          if [ -f ci-wifi-firmware-path.txt ]; then
-            export PONG_WIFI_FIRMWARE="$(cat ci-wifi-firmware-path.txt)"
-            export PONG_AUDIO_INPUTS="$(cat ci-audio-inputs-path.txt)"
-          fi
+          source ci-env.sh
+          echo "stages:"
+          cat ci-stages.txt
           DEFCONFIG="$(cat ci-defconfig-name.txt)"
           echo "building with ${DEFCONFIG}; firmware path $(cat ci-firmware-path.txt)"
           set +e
@@ -279,10 +485,22 @@ jobs:
       - name: Boot image or the reason it was not built
         run: |
           set -euo pipefail
-          export PONG_WORK="$(cat ci-pong-work.txt)"
-          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
-          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
-          export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
+          source ci-env.sh
+          template="${PONG_WORK}/boot-template-v4.img"
+          python3 - "$template" <<'PY'
+          import struct
+          import sys
+          from pathlib import Path
+          # Android boot v4 skeleton. kernel_size is 0 because this repo has no
+          # device boot stub to place in that slot. The XNU kernel is the ramdisk payload.
+          header = bytearray(4096)
+          header[0:8] = b'ANDROID!'
+          struct.pack_into('<4I', header, 8, 0, 0, 0, 1584)
+          struct.pack_into('<I', header, 40, 4)
+          struct.pack_into('<I', header, 1580, 0)
+          Path(sys.argv[1]).write_bytes(bytes(header) + bytes(4096))
+          PY
+          export PONG_BOOT_TEMPLATE="$template"
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -292,131 +510,207 @@ jobs:
               'bindings_json': str(bindings),
               'bindings_generated': bindings.is_file(),
               'darwinboot_efi': str(efi),
-              'darwinboot_efi_present': efi.is_file(),
-              'prelinked_boot': 'not-run',
+              'darwinboot_efi_bytes': efi.stat().st_size if efi.is_file() else 0,
+              'action': 'blocked',
           }
-          if not bindings.is_file():
-              record['prelinked_boot'] = 'skipped'
+          if not efi.is_file() or efi.stat().st_size == 0:
+              record['reason'] = 'DarwinBoot24.efi was not produced by scripts/build-darwinboot24-macos.py.'
+          elif bindings.is_file():
+              data = json.loads(bindings.read_text())
+              record['bindings_build'] = data.get('build')
+              if data.get('build') == '22H374' and data.get('fixed_prelink_base'):
+                  record['action'] = 'prelink'
+                  record['reason'] = 'UFS bindings and DarwinBoot24.efi are present. Running the prelinked boot.'
+              else:
+                  record['action'] = 'initial'
+                  record['reason'] = 'bindings.json is not a 22H374 prelink binding. Packaging the initial XNU image.'
+          else:
+              record['action'] = 'initial'
               record['reason'] = (
-                  'scripts/build-ipados18-prelinked-boot.py reads '
-                  'mac-build/native-ufs/bindings.json and that file is not in the repository. '
-                  'The UFS build did not generate it, so the prelinked boot was not run and the file was not fabricated.'
-              )
-          elif not efi.is_file():
-              record['prelinked_boot'] = 'skipped'
-              record['reason'] = (
-                  'bindings.json is present, but mac-build/darwinboot24/DarwinBoot24.efi is not. '
-                  'scripts/build-darwinboot24-macos.py builds that loader from PONG_EDK2 (Mu_Basecore), '
-                  'which this runner does not have. The prelinked boot was not run.'
+                  'mac-build/native-ufs/bindings.json was not produced by the UFS build. '
+                  'The prelinked boot was not run. Packaging the initial XNU image from the built kernel.'
               )
           Path('boot-decision.json').write_text(json.dumps(record, indent=2) + '\n')
           print(json.dumps(record, indent=2))
           PY
-          if [ "$(python3 -c 'import json; print(json.load(open("boot-decision.json"))["prelinked_boot"])')" = "not-run" ]; then
-            ARTIFACT="$(python3 - <<'PY'
+          ACTION="$(python3 -c 'import json; print(json.load(open("boot-decision.json"))["action"])')"
+          if [ "$ACTION" = "blocked" ]; then
+            echo "boot image was not built; see boot-decision.json"
+            exit 1
+          fi
+          ARTIFACT="$(python3 - <<'PY'
           import json
           from pathlib import Path
           found = list(Path('out').rglob('PONG_FORMAT2_RESULT.json'))
           if len(found) != 1:
-              raise SystemExit(f'expected one PONG_FORMAT2_RESULT.json, found {found}')
+              raise SystemExit('expected one PONG_FORMAT2_RESULT.json, found %s' % found)
           print(Path(json.loads(found[0].read_text())['output']) / 'kernel')
           PY
           )"
+          test -s "${ARTIFACT}/mach.development.pong"
+          test -s "${ARTIFACT}/PONG_BUILD_RESULT.json"
+          if [ "$ACTION" = "prelink" ]; then
             python3 scripts/build-ipados18-prelinked-boot.py \
               --artifact-dir "${ARTIFACT}" \
               --output-dir out/ipados18/boot-first \
               --volume-layout "${PONG_VOLUME_LAYOUT}" \
               --cpus 8
-            python3 - <<'PY'
-            import json
-            from pathlib import Path
-            image = Path('out/ipados18/boot-first/pong-xnu-initial.img')
-            record = json.loads(Path('boot-decision.json').read_text())
-            record['prelinked_boot'] = 'ran'
-            record['image'] = str(image)
-            record['image_bytes'] = image.stat().st_size if image.is_file() else None
-            if image.is_file():
-                record['magic'] = image.read_bytes()[:4].hex()
-            Path('boot-decision.json').write_text(json.dumps(record, indent=2) + '\n')
-            PY
+          else
+            python3 scripts/build-ipados18-bootimg-local.py \
+              --kernel "${ARTIFACT}/mach.development.pong" \
+              --result "${ARTIFACT}/PONG_BUILD_RESULT.json" \
+              --loader "${GITHUB_WORKSPACE}/mac-build/darwinboot24/DarwinBoot24.efi" \
+              --template "${PONG_BOOT_TEMPLATE}" \
+              --output-dir out/ipados18/boot-first \
+              --cpus 1
           fi
-          echo "=== df after boot decision ==="
-          df -h | tee df-after-boot.txt
-          python3 - <<'PY'
-          import json, shutil
+          if [ "$ACTION" = "prelink" ]; then
+            PACKED_KERNEL="out/ipados18/boot-first/kernel-ipados18.macho"
+          else
+            PACKED_KERNEL="${ARTIFACT}/mach.development.pong"
+          fi
+          test -s "$PACKED_KERNEL"
+          python3 - "$PACKED_KERNEL" <<'PY'
+          import json
+          import struct
+          import sys
           from pathlib import Path
-          usage = shutil.disk_usage('.')
-          need = 11_800_000_000
-          record = {
-              'free_bytes': usage.free,
-              'need_bytes_for_os_aea_plus_decrypt': need,
-              'fits': usage.free >= need,
-          }
-          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
-          print('userdata disk check', json.dumps(record))
+          image_path = Path('out/ipados18/boot-first/pong-xnu-initial.img')
+          image = image_path.read_bytes()
+          kernel = Path(sys.argv[1]).read_bytes()
+          ramdisk = Path('out/ipados18/boot-first/payload.ramdisk').read_bytes()
+
+          def page(size):
+              return (size + 4095) & ~4095
+
+          kernel_size, ramdisk_size, _, header_size = struct.unpack_from('<4I', image, 8)
+          header_version = struct.unpack_from('<I', image, 40)[0]
+          ramdisk_at = 4096 + page(kernel_size)
+          signature_at = ramdisk_at + page(ramdisk_size)
+          problems = []
+          if image[:8] != b'ANDROID!':
+              problems.append('magic')
+          if header_version != 4:
+              problems.append('header_version')
+          if header_size != 1584:
+              problems.append('header_size')
+          if ramdisk_size != len(ramdisk):
+              problems.append('ramdisk_size')
+          if len(image) != signature_at + 4096:
+              problems.append('length')
+          if any(image[signature_at:]):
+              problems.append('signature')
+          if image[ramdisk_at:ramdisk_at + 8] != b'PONGFAT1':
+              problems.append('ramdisk magic')
+          if kernel not in image[ramdisk_at:signature_at]:
+              problems.append('xnu payload')
+          record = json.loads(Path('boot-decision.json').read_text())
+          record['image'] = str(image_path)
+          record['image_bytes'] = len(image)
+          record['kernel_bytes'] = len(kernel)
+          record['ramdisk_bytes'] = len(ramdisk)
+          record['header_version'] = header_version
+          record['header_size'] = header_size
+          record['kernel_size'] = kernel_size
+          record['ramdisk_size'] = ramdisk_size
+          record['ramdisk_offset'] = ramdisk_at
+          record['signature_offset'] = signature_at
+          record['container_ok'] = not problems
+          record['problems'] = problems
+          Path('boot-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          if problems:
+              raise SystemExit('boot image failed validation: ' + ', '.join(problems))
+          print('boot image validated', len(image), 'bytes')
           PY
-          if [ ! -f out/ipados18/boot-first/pong-xnu-initial.img ]; then
-            echo "boot image was not produced; see boot-decision.json"
-            exit 1
-          fi
-      - name: Userdata image or the measured disk blocker
+          mkdir -p ci-products
+          cp -f out/ipados18/boot-first/pong-xnu-initial.img ci-products/pong-xnu-initial.img
+          cp -f "${ARTIFACT}/mach.development.pong" ci-products/mach.development.pong
+          cp -f mac-build/darwinboot24/DarwinBoot24.efi ci-products/DarwinBoot24.efi
+          cp -f boot-decision.json ci-products/boot-decision.json
+          test -s ci-products/pong-xnu-initial.img
+          test -s ci-products/mach.development.pong
+          test -s ci-products/DarwinBoot24.efi
+          echo "=== df after boot ==="
+          df -h | tee df-after-boot.txt
+      - name: Userdata image or the missing prepared userland
         if: always() && steps.kernel.outcome == 'success'
         run: |
           set -euo pipefail
+          source ci-env.sh
+          # This workflow never runs userland/build-ipados18.py, so
+          # ${PONG_INPUTS}/22H374/prepared is absent. That is a recorded skip
+          # (exit 0), not a failed stage. The layout script runs only when
+          # result.json, apply-complete.json, and the three cdr images are
+          # already there with build 22H374.
           echo "=== df before userdata ==="
           df -h | tee df-before-userdata.txt
+          set +e
           python3 - <<'PY'
-          import json, shutil
+          import json
+          import os
           from pathlib import Path
-          usage = shutil.disk_usage('.')
-          # OS AEA 5.9 GiB plus its decrypt must both exist for a moment: about 11.8 GiB.
-          need = 11_800_000_000
-          record = {
-              'free_bytes': usage.free,
-              'need_bytes_for_os_aea_plus_decrypt': need,
-              'fits': usage.free >= need,
+          prepared = Path(os.environ['PONG_INPUTS']) / '22H374' / 'prepared'
+          systemos = Path('apple/ipados18-22H374/prepared/pong-ipados18-systemos.cdr')
+          required = {
+              'result.json': prepared / 'result.json',
+              'apply-complete.json': prepared / 'apply-complete.json',
+              'pong-ipados18-system.cdr': prepared / 'pong-ipados18-system.cdr',
+              'pong-ipados18-data.cdr': prepared / 'pong-ipados18-data.cdr',
+              'pong-ipados18-systemos.cdr': systemos,
           }
-          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
-          print(json.dumps(record, indent=2))
-          if usage.free < need:
-              raise SystemExit(
-                  'userdata image was not started: free space '
-                  f'{usage.free} bytes is below the {need} bytes needed to hold '
-                  '094-32804-038.dmg.aea and its decrypt at the same time. '
-                  'No truncated image was written.'
+          missing = [name for name, path in required.items() if not path.is_file()]
+          build = None
+          result_path = required['result.json']
+          if result_path.is_file():
+              build = json.loads(result_path.read_text()).get('build')
+              if build != '22H374':
+                  missing.append('result.json build %s' % build)
+          record = {
+              'status': 'skipped' if missing else 'ready',
+              'prepared': str(prepared),
+              'build': build,
+              'missing': missing,
+          }
+          if missing:
+              record['reason'] = (
+                  'userdata image was not built. scripts/prepare-ipados18-ufs-layout.py needs a prepared '
+                  '22H374 userland (result.json build 22H374, apply-complete.json, and the OS, SystemOS, '
+                  'and Data images). Missing: ' + ', '.join(missing) + '. No SHNGROOT header was written.'
               )
-          print('free space can hold the OS AEA and its decrypt; extracting those members')
+          else:
+              record['reason'] = 'prepared 22H374 userland is present'
+          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print(record['reason'])
+          raise SystemExit(0 if missing else 10)
           PY
-          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
-          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
-          export PONG_VOLUME_LAYOUT="$(cat ci-pong-work.txt)/build/volume-layout.json"
-          python3 scripts/prepare-ipados18-components.py --remote \
-            --output-dir "${PONG_INPUTS}/22H374" \
-            --only OS --only Cryptex1,SystemOS --only Cryptex1,AppOS
-          OS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg.aea' -print -quit)"
-          SYS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg.aea' -print -quit)"
-          test -n "$OS_AEA"
-          test -n "$SYS_AEA"
-          python3 scripts/decrypt-ipados18-aea.py --input "$OS_AEA" --output "${OS_AEA%.aea}"
-          rm -f "$OS_AEA"
-          echo "=== df after OS decrypt ==="
-          df -h | tee df-after-os-decrypt.txt
-          python3 scripts/decrypt-ipados18-aea.py --input "$SYS_AEA" --output "${SYS_AEA%.aea}"
-          rm -f "$SYS_AEA"
-          echo "=== df after SystemOS decrypt ==="
-          df -h | tee df-after-systemos-decrypt.txt
-          echo "Decrypted OS and SystemOS. Searching the mounted images for 22H374 roots."
-          find "${PONG_INPUTS}/22H374/components" -type f -exec ls -l {} \;
-          OS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg' -print -quit)"
-          SYS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg' -print -quit)"
-          mkdir -p "${PONG_INPUTS}/mount/os" "${PONG_INPUTS}/mount/systemos"
-          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/os" "$OS_DMG"
-          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/systemos" "$SYS_DMG"
-          find "${PONG_INPUTS}/mount" -name SystemVersion.plist -print
-          if [ ! -f out/ipados18/ufs/shngroot-ipados18.bin ]; then
-            echo "SHNGROOT header was not produced. The decrypted images stayed on the runner and were not uploaded."
-            exit 1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
           fi
+          if [ "$status" -ne 10 ]; then
+            exit "$status"
+          fi
+          python3 scripts/prepare-ipados18-ufs-layout.py \
+            --userland "${PONG_INPUTS}/22H374/prepared" \
+            --volume-layout "${PONG_VOLUME_LAYOUT}" \
+            --output-dir out/ipados18/ufs
+          test -s out/ipados18/ufs/shngroot-ipados18.bin
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          header = Path('out/ipados18/ufs/shngroot-ipados18.bin').read_bytes()
+          record = json.loads(Path('userdata-decision.json').read_text())
+          record['status'] = 'built'
+          record['header_bytes'] = len(header)
+          record['magic'] = header[:8].decode('ascii', 'replace')
+          if header[:8] != b'SHNGROOT' or len(header) != 4096:
+              raise SystemExit('SHNGROOT header is not a 4096-byte directory')
+          if header[24+32+8+8+4+4:24+32+8+8+4+4+32] == bytes(32):
+              raise SystemExit('SHNGROOT window digest is still 32 zero bytes')
+          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print('userdata header', len(header), 'bytes')
+          PY
       - name: Write manifest
         if: always()
         run: |
@@ -429,9 +723,14 @@ jobs:
           def load(name):
               path = Path(name)
               return json.loads(path.read_text()) if path.is_file() else None
+          products = {}
+          for name in ('pong-xnu-initial.img', 'mach.development.pong', 'DarwinBoot24.efi'):
+              path = Path('ci-products') / name
+              products[name] = path.stat().st_size if path.is_file() else None
           doc = {
               'firmware_path': (read('ci-firmware-path.txt') or '').strip(),
               'defconfig': (read('ci-defconfig-name.txt') or '').strip(),
+              'stages': read('ci-stages.txt'),
               'paths': read('ci-paths.txt'),
               'df_before': read('df-before.txt'),
               'df_after_reclaim': read('df-after.txt'),
@@ -441,11 +740,14 @@ jobs:
               'df_before_userdata': read('df-before-userdata.txt'),
               'boot': load('boot-decision.json'),
               'userdata': load('userdata-decision.json'),
+              'product_bytes': products,
           }
           Path('ci-manifest.json').write_text(json.dumps(doc, indent=2) + '\n')
+          print(json.dumps({'product_bytes': products, 'boot': doc['boot'], 'userdata': doc['userdata']}, indent=2))
           PY
-          mkdir -p ci-logs
-          cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json ci-logs/ 2>/dev/null || true
+          mkdir -p ci-logs ci-products
+          cp -f ci-manifest.json ci-products/ci-manifest.json
+          cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json ci-stages.txt ci-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -453,3 +755,15 @@ jobs:
           retention-days: 1
           path: ci-logs/
           if-no-files-found: warn
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pong-macos-products
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ci-products/pong-xnu-initial.img
+            ci-products/mach.development.pong
+            ci-products/DarwinBoot24.efi
+            ci-products/ci-manifest.json
+            ci-products/boot-decision.json

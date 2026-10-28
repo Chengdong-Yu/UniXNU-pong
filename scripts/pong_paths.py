@@ -93,6 +93,17 @@ def audio_inputs(explicit=None):
     return _env('PONG_AUDIO_INPUTS') or input_root() / 'pong-audio-inputs'
 
 
+def adreno_firmware(explicit=None):
+    """Adreno730 firmware directory.
+
+    Unset leaves the guest build on its historical output path. The kernel
+    link does not invent this directory.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    return _env('PONG_ADRENO_FIRMWARE')
+
+
 def sheng_root(explicit=None):
     """Shared UniXNU-sheng sources; falls back to the sibling checkout."""
     if explicit:
@@ -242,6 +253,7 @@ def describe():
         'volume_layout': volume_layout(), 'prepared_userland': prepared_userland(),
         'wifi_source': wifi_source(), 'wifi_build': wifi_build(),
         'wifi_firmware': wifi_firmware(), 'audio_inputs': audio_inputs(),
+        'adreno_firmware': adreno_firmware(),
         'sheng_root': sheng_root(), 'adb': adb(),
     }
     for name, path in entries.items():

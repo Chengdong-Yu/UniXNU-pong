@@ -7,7 +7,6 @@ import hashlib
 import json
 from pathlib import Path
 import struct
-import uuid
 import xml.etree.ElementTree as ET
 
 from native_prelink import backed_offset, exports, macho, plan, unserialize_xml
@@ -138,7 +137,7 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
     if verify_images:
         report.update(instruction_inventory(original_data, parent, modules))
     else:
-        report['image_verification'] = 'skipped by request'
+        report['image_verification'] = 'executable bytes checked; image hashes skipped by request'
     early_security_init = early_security_init or {}
     if early_security_init:
         markers = [address for address, names in exports(native_data, native).items()
@@ -288,8 +287,8 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
         raise ValueError('Rebased KASLR offset cannot fit original 32-bit format')
     new_metadata = {'_PrelinkInfoDictionary': selected_entries,
                     '_PrelinkLinkKASLROffsets': struct.pack(f'<{len(offsets) + 1}I', len(offsets), *offsets),
-                    '_PrelinkKCID': hashlib.sha256(native_data + original_data).digest()[:16]
-                        if verify_images else uuid.uuid4().bytes}
+                    # Identity of the two inputs. A random KCID made every prelink unreproducible.
+                    '_PrelinkKCID': hashlib.sha256(native_data + original_data).digest()[:16]}
     xml = ET.tostring(to_xml(new_metadata), encoding='utf-8').replace(b' />', b'/>') + b'\0'
     # Darwin 22 uses vm_prelink_einfo as vm_kernel_slid_top for embedded
     # MH_EXECUTE caches. Keep metadata after every native/component extent;
@@ -328,7 +327,7 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
     output[32:32 + len(rebuilt)] = rebuilt
     # No executable instruction byte is patched, including original POST code.
     text_hashes = {}
-    for identifier, module in (modules.items() if verify_images else []):
+    for identifier, module in modules.items():
         for segment in module['segments']:
             if segment['name'] == '__TEXT_EXEC' and segment['filesize']:
                 old = backed_offset(parent, segment['va'], segment['filesize'], len(original_data))
@@ -336,8 +335,7 @@ def emit(native_data, original_data, roots, slide, early_security_init=None, ver
                 if output[new:new + segment['filesize']] != original_data[old:old + segment['filesize']]:
                     raise ValueError('Original executable bytes changed')
                 text_hashes[identifier] = hashlib.sha256(original_data[old:old + segment['filesize']]).hexdigest()
-    if verify_images:
-        macho(output)
+    macho(output)
     report.update(candidate_sha256=hashlib.sha256(output).hexdigest() if verify_images else None, coalesced_segments=new_segments,
                   original_executable_sha256=text_hashes, candidate_bytes=len(output),
                   source_inputs_modified=False, runtime_qualified=False, loadable=False)

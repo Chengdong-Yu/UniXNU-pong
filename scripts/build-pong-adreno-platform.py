@@ -29,7 +29,10 @@ def main():
     p.add_argument('--developer-dir',type=Path,default=pong_paths.developer_dir())
     a=p.parse_args();out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     if a.firmware_dir is None:
-        a.firmware_dir=ROOT/('out/ipados18' if a.guest_build=='22H374' else 'out')/'firmware/adreno730'
+        # PONG_ADRENO_FIRMWARE wins. Otherwise the guest's existing output path.
+        # build-xnu-ipados18.sh does not pass --firmware-dir.
+        found=pong_paths.adreno_firmware()
+        a.firmware_dir=found if found is not None else ROOT/('out/ipados18' if a.guest_build=='22H374' else 'out')/'firmware/adreno730'
     for name in ('gmu_gen70000.bin','a730_sqe.fw','a730_zap.mdt','a730_zap.b01','a730_zap.b02'):
         if not (a.firmware_dir/name).is_file():
             raise RuntimeError('Actual Pong firmware missing: '+str(a.firmware_dir/name))

@@ -46,8 +46,8 @@ def main():
                         help='packed DBRDISK1 APFS scratch Data seed passed as DarwinBoot initrd')
     parser.add_argument('--packed-data-ramdisk', action='store_true',
                         help='publish the supplied Data seed as PackedRAMDisk')
-    parser.add_argument('--skip-image-verification', action='store_true', default=True,
-                        help='package without image hashes, comparisons or output audits')
+    parser.add_argument('--skip-image-verification', action='store_true',
+                        help='skip image hashes and the single-core ADT audit; the Android boot container is still checked')
     args = parser.parse_args()
     if not 0x10000000 <= args.window_size <= 0x200000000 or args.window_size % 0x200000:
         parser.error('--window-size must be 256 MiB..8 GiB, aligned to 2 MiB')
@@ -61,11 +61,23 @@ def main():
     if args.fat_mib < 32 or args.fat_mib > 112 or args.fat_mib % 16:
         parser.error('--fat-mib must be a multiple of 16 in [32, 112] within the qualified 128 MiB scan limit')
     report = json.loads(args.result.read_text())
-    kernel = args.kernel.read_bytes() if not args.skip_image_verification else None
-    if not args.skip_image_verification and (not report['build_complete'] or report['machine_config'] != 'PONG' or
-            report['kernel']['sha256'] != hashlib.sha256(kernel).hexdigest() or
-            report['unstripped_kernel']['raspberry_pi_hardware_symbols']):
-        raise ValueError('Kernel does not match the audited PONG result')
+    kernel = args.kernel.read_bytes()
+    if kernel[:4] not in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+        raise ValueError('kernel payload is not a Mach-O')
+    if not args.skip_image_verification:
+        if not report.get('build_complete'):
+            raise ValueError('Kernel build is not complete')
+        if report.get('profile') == 'Pong-iPadOS18-22H374-Darwin24':
+            recorded = report.get('kernel') or {}
+            if recorded.get('bytes') not in (None, len(kernel)):
+                raise ValueError('Kernel length does not match the Darwin 24 build result')
+            recorded_sha = recorded.get('sha256')
+            if recorded_sha and recorded_sha != hashlib.sha256(kernel).hexdigest():
+                raise ValueError('Kernel sha256 does not match the Darwin 24 build result')
+        elif (report.get('machine_config') != 'PONG' or
+                (report.get('kernel') or {}).get('sha256') != hashlib.sha256(kernel).hexdigest() or
+                (report.get('unstripped_kernel') or {}).get('raspberry_pi_hardware_symbols')):
+            raise ValueError('Kernel does not match the audited PONG result')
     if args.root_match_volume_uuid and not args.skip_image_verification:
         prelink = report.get('prelink')
         if not prelink:
@@ -154,19 +166,40 @@ def main():
     ramdisk = bytes(header) + raw
     (out / 'payload.ramdisk').write_bytes(ramdisk)
     template = args.template.read_bytes()
-    if not args.skip_image_verification and (template[:8] != b'ANDROID!' or struct.unpack_from('<I', template, 40)[0] != 4):
+    if template[:8] != b'ANDROID!' or struct.unpack_from('<I', template, 40)[0] != 4:
         raise ValueError('Expected Android boot v4')
     kernel_size, old_size = struct.unpack_from('<2I', template, 8)
+    header_size = struct.unpack_from('<I', template, 20)[0]
+    if header_size != 1584:
+        raise ValueError('Expected Android boot v4 header_size 1584')
     page = lambda size: (size + 4095) & ~4095
     ramdisk_at = 4096 + page(kernel_size)
     signature_at = ramdisk_at + page(old_size)
-    if not args.skip_image_verification and (len(template) != signature_at + 4096 or any(template[signature_at:])):
+    if len(template) != signature_at + 4096 or any(template[signature_at:]):
         raise ValueError('Unexpected unsigned signature area')
     image = bytearray(template[:ramdisk_at])
     struct.pack_into('<I', image, 12, len(ramdisk))
     image += ramdisk + bytes(page(len(ramdisk)) - len(ramdisk)) + template[signature_at:]
-    if not args.skip_image_verification:
-        assert image[4096:ramdisk_at] == template[4096:ramdisk_at]
+    if image[4096:ramdisk_at] != template[4096:ramdisk_at]:
+        raise ValueError('Android kernel slot changed while splicing the ramdisk')
+    out_kernel_size = struct.unpack_from('<I', image, 8)[0]
+    out_ramdisk_size = struct.unpack_from('<I', image, 12)[0]
+    out_header_size = struct.unpack_from('<I', image, 20)[0]
+    out_version = struct.unpack_from('<I', image, 40)[0]
+    out_ramdisk_at = 4096 + page(out_kernel_size)
+    signature_out = out_ramdisk_at + page(out_ramdisk_size)
+    if (image[:8] != b'ANDROID!' or out_version != 4 or out_header_size != 1584 or
+            out_ramdisk_size != len(ramdisk) or out_ramdisk_at != ramdisk_at or
+            len(image) != signature_out + 4096 or any(image[signature_out:])):
+        raise ValueError('Boot image container offsets are inconsistent')
+    if image[ramdisk_at:ramdisk_at + 8] != b'PONGFAT1':
+        raise ValueError('ramdisk is not the packed PONGFAT1 payload')
+    extracted = out / 'extracted-kernel.macho'
+    subprocess.run(['mcopy', '-i', str(fat), '-n', '::/EFI/UniXNU/kernel.macho', str(extracted)],
+                   check=True, env=env)
+    if extracted.read_bytes() != kernel:
+        raise ValueError('FAT kernel.macho does not match the XNU kernel')
+    extracted.unlink()
     boot.write_bytes(image)
     result = {'contains_xnu': True, 'prelinked': bool(report.get('prelink')), 'root_os_included': False,
         'adt_audit': adt_audit, 'hardware_tested': False, 'partition_writes': False, 'image_bytes': len(image),
@@ -174,7 +207,8 @@ def main():
         'kernel_sha256': report['kernel'].get('sha256'),
         'loader_sha256': hashlib.sha256(args.loader.read_bytes()).hexdigest() if not args.skip_image_verification else None,
         'template_sha256': hashlib.sha256(template).hexdigest() if not args.skip_image_verification else None,
-        'image_verification': 'skipped by request' if args.skip_image_verification else 'performed',
+        'image_verification': 'boot container checked; hashes skipped by request' if args.skip_image_verification else 'performed',
+        'system_volume_auth_blob': 'included' if auth_blob is not None else 'absent',
         'firmware_and_dtb_unchanged': True, 'boot_args_abi': 'Darwin 24',
         'allocated_window_bytes': args.window_size, 'fat_mib': args.fat_mib,
         'cpu_count': args.cpus}

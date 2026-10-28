@@ -69,7 +69,14 @@ def main():
    opts.append(item)
  cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(ROOT/'mac-build/darwinboot24/DarwinBoot24.efi'),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification']
  auth=ROOT/'out/ipados18/system-volume-auth-blob.bin'
- if auth.exists():cmd+=['--system-volume-auth-blob',str(auth)]
+ if auth.is_file():
+  cmd+=['--system-volume-auth-blob',str(auth)]
+  auth_record={'packaged':True,'path':str(auth)}
+ else:
+  auth_record={'packaged':False,'path':str(auth),
+               'reason':'system-volume auth blob is absent; the root-hash payload was not packaged'}
+  print(auth_record['reason'],file=sys.stderr)
+ (a.output_dir/'system-volume-auth-blob.json').write_text(json.dumps(auth_record,indent=2)+'\n')
  cmd+=['--kernel-arg='+v for v in opts]
  env=dict(os.environ)
  if report.get('schema_version')==2:

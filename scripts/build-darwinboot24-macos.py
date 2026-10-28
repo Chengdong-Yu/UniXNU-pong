@@ -21,6 +21,9 @@ def main():
     parser.add_argument('--output-dir', type=Path, default=pong_paths.work_root() / 'build/Pong-DarwinBoot24')
     parser.add_argument('--llvm', type=Path, default=pong_paths.llvm_toolchain())
     args = parser.parse_args()
+    if args.llvm is None:
+        raise SystemExit('missing LLVM bin directory for CLANGPDB: pass --llvm or set PONG_LLVM '
+                         '(clang, lld-link, llvm-lib and llvm-rc)')
     source = DEVICE / 'drivers/DarwinBoot24'
     workspace = args.output_dir.resolve()
     conf = workspace / 'Conf'

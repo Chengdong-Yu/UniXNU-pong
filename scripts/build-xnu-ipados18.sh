@@ -3,6 +3,48 @@ set -euo pipefail
 trap 'echo "build-xnu-ipados18.sh: line $LINENO: $BASH_COMMAND failed" >&2' ERR
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
+# Refuse Wi-Fi and backlight before any XNU compile when their trees are absent.
+# The later builders still refuse on their own; this only moves that refusal forward.
+if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ]; then
+  if [ -z "${PONG_NATIVE_DRIVER_SOURCE:-}" ]; then
+    echo 'refusing before compile: PONG_NATIVE_DRIVER_SOURCE is unset, so Wi-Fi and backlight inputs cannot be resolved' >&2
+    exit 1
+  fi
+  python3 - <<'PY'
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ['PONG_NATIVE_DRIVER_SOURCE']) / 'scripts'))
+import pong_paths
+wifi = os.environ.get('XNU_PONG_WIFI') == '1'
+backlight = os.environ.get('XNU_PONG_BACKLIGHT') == '1'
+if wifi:
+    linux = Path(os.environ['PONG_WIFI_SOURCE']) if os.environ.get('PONG_WIFI_SOURCE') else pong_paths.wifi_source()
+    pci = linux / 'drivers/net/wireless/ath/ath11k/pci.c'
+    if not pci.is_file():
+        raise SystemExit(
+            'refusing XNU_PONG_WIFI=1 before compile: Linux ath11k pci.c is not at '
+            f'{pci}. Set PONG_WIFI_SOURCE to a real Linux tree such as v7.0.14. '
+            'No stub driver was written.')
+    sheng = pong_paths.sheng_root()
+    for rel in ('drivers/Ath12kWifi/include/nw_abi.h',
+                'drivers/Ath12kWifi/shim/src/lx_rt.c',
+                'drivers/Ath12kWifi/src/nw_sta.c',
+                'drivers/Ath12kWifi/src/nw_mac80211.c'):
+        path = sheng / rel
+        if not path.is_file():
+            raise SystemExit(
+                'refusing XNU_PONG_WIFI=1 before compile: UniXNU-sheng is missing '
+                f'{path}. Set PONG_SHENG_ROOT. No stub ABI was written.')
+if wifi or backlight:
+    package = pong_paths.sheng_root() / 'package'
+    if not package.is_dir():
+        raise SystemExit(
+            'refusing before compile: Wi-Fi and backlight need the UniXNU-sheng package at '
+            f'{package}. Set PONG_SHENG_ROOT. No substitute package was written.')
+print('wifi/backlight inputs present' if wifi or backlight else 'wifi and backlight are off')
+PY
+fi
 # Pong Darwin 24 migration of the successfully returned Mac build script.
 # First console build uses MACHINE_CONFIGS=PONG; preserve the original baseline artifact.
 XNU_TAG=${UNIXNU_XNU_TAG:-xnu-11417.140.69}

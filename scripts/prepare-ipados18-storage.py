@@ -11,7 +11,14 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--tree',type=Path,required=True)
 p.add_argument('--kernel',type=Path,default=DEVICE/'apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed')
 a=p.parse_args();out=DEVICE/'mac-build/storage-abi18';out.mkdir(parents=True,exist_ok=True)
-source=pong_paths.storage_headers();headers=out/'include/IOKit/storage';headers.mkdir(parents=True,exist_ok=True)
+source=pong_paths.storage_headers()
+IOSTORAGE_323='1b96f8f04b9dff4dc0277ac43625bf694e62c5aa'
+if not source.is_dir() or not any(source.glob('*.h')):
+    raise SystemExit(f'missing IOStorageFamily-323 headers: {source}')
+revision=subprocess.check_output(['git','-C',source,'rev-parse','HEAD'],text=True).strip()
+if revision!=IOSTORAGE_323:
+    raise SystemExit(f'IOStorageFamily-323 must be peeled commit {IOSTORAGE_323} (annotated tag de8da905), found {revision}')
+headers=out/'include/IOKit/storage';headers.mkdir(parents=True,exist_ok=True)
 for f in source.glob('*.h'):shutil.copyfile(f,headers/f.name)
 env=dict(os.environ,DEVELOPER_DIR=str(pong_paths.developer_dir()))
 sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
