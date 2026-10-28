@@ -1,9 +1,11 @@
 # Hosted CI compile. Not the shipping kernel.
-# CONFIG_XNU_PONG_WIFI and CONFIG_XNU_PONG_BACKLIGHT are off because those
-# stages need private modem firmware and tfa98xx.cnt, which this public
-# repository does not carry. Every other switch matches
-# configs/pong_ipados18_defconfig, including NativeUfs and the Adreno
-# platform, so the Intel host gates and the XNU link still run.
+# WIFI, backlight, and the Adreno platform are off because those stages need
+# private firmware this public repository does not carry:
+#   modem amss/m3/regdb and tfa98xx.cnt
+#   Adreno730 gmu_gen70000.bin, a730_sqe.fw, a730_zap.*
+#     (build-pong-adreno-platform.py refuses to continue without them)
+# NativeUfs, the DT platform, and ArmCpu stay on, so the Intel host gates
+# and the XNU link still run.
 # The boot packager defaults to all 8 SM8475 CPU nodes; PSCI starts them.
 # --cpus 1 retains the isolated bring-up option. CPU composition is selected
 # separately by pong_ui_software=1 and the matching 22H374 runtime adapter.
@@ -47,7 +49,7 @@ CONFIG_XNU_OWNER_ROOT_AUDIT=n
 CONFIG_XNU_OWNER_ROOT_TRUST=n
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
 CONFIG_XNU_PONG_APFS_DEBUG=y
-CONFIG_XNU_PONG_ADRENO_PLATFORM=y
+CONFIG_XNU_PONG_ADRENO_PLATFORM=n
 CONFIG_XNU_PONG_BACKLIGHT=n
 CONFIG_XNU_PONG_EARLY_TRACE=n
 CONFIG_XNU_PONG_LEGACY_UACCESS=n
