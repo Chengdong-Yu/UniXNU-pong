@@ -69,7 +69,7 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 
 工作流按 secrets 里有没有 `PONG_FIRMWARE_TOKEN` 分两条路：
 
-- **有 token（Path B）**：用 `configs/pong_ipados18_defconfig`，Wi-Fi、背光、Adreno 730 全开。token 需要能读私有固件仓库 `Chengdong-Yu/UniXNU-pong-firmware`，工作流按固定 commit `c1695a31` 检出 `wifi/`、`audio/`、`adreno730/`、`power/` 四个目录。
+- **有 token（Path B）**：用 `configs/pong_ipados18_defconfig`，Wi-Fi、背光、Adreno 730 全开。token 需要能读私有固件仓库，工作流按固定 commit `c1695a31` 检出 `wifi/`、`audio/`、`adreno730/`、`power/` 四个目录。
 - **没有 token（Path A）**：退回 `configs/pong_ipados18_ci_defconfig`，Wi-Fi、背光、Adreno 730 全部关闭。这条路能编出内核，但不是出货配置。
 
 所以 fork 之后直接跑就是 Path A，不需要配任何 secret。要用完整配置，在 **Settings → Secrets and variables → Actions** 加一个 fine-grained token，只给固件仓库的 `Contents: Read` 权限。固件本身不要提交进仓库，工作流只读取。
