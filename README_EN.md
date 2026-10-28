@@ -46,11 +46,60 @@ If you would rather not prepare Xcode, the Apple open source dependencies and th
 ### Triggering a run
 
 1. Open the repository's **Actions** tab and pick **Pong macOS build** on the left.
-2. Choose **Run workflow**, select the branch to build, and confirm.
-3. Wait for the job whose name starts with `CI kernel`. The `disk probe` job beside it says in its own name that it is not a kernel build; it only measures disk space.
-4. Download `pong-macos-products` under **Artifacts** at the bottom of the run page.
+2. Choose **Run workflow** and select the branch to build.
+3. For the shipping configuration, put the download URL of your firmware archive in `firmware_url` (next section). Leave it empty to build the CI configuration only.
+4. Wait for the job whose name starts with `CI kernel`. The `disk probe` job beside it says in its own name that it is not a kernel build; it only measures disk space.
+5. Download `pong-macos-products` under **Artifacts** at the bottom of the run page.
 
-A push to any branch also triggers the workflow (`on: push`). The concurrency group is `pong-macos-${{ github.ref }}` with `cancel-in-progress: true`, so a newer push to the same branch cancels the run that is still going: do not push to a branch while you want its run to finish.
+A push to any branch also triggers the workflow (`on: push`), but a push event carries no inputs, so it always builds the CI configuration without Wi-Fi, backlight or the GPU. Start the workflow manually for the full one.
+
+The concurrency group is `pong-macos-${{ github.ref }}` with `cancel-in-progress: true`, so a newer push to the same branch cancels the run that is still going: do not push to a branch while you want its run to finish.
+
+### The firmware archive
+
+Wi-Fi, the backlight and the Adreno 730 need firmware that only exists on this phone, and this public repository carries none of it. Pack that firmware into one archive, put it somewhere CI can download from (object storage, a private release, anything that yields an https URL), and give the URL as `firmware_url`.
+
+The archive can be `.zip`, `.tar.gz`, `.tgz` or `.tar`, and after unpacking it must hold at least these four groups. One extra wrapper directory is fine, as when a zip is made from a folder:
+
+```
+wifi/                 # qca6490/ is accepted as the same directory
+  amss.bin
+  amss20.bin
+  m3.bin
+  regdb.bin
+  bdwlan.e01          # at least one bdwlan* board data file
+  ...
+audio/
+  tfa98xx.cnt
+adreno730/
+  gmu_gen70000.bin
+  a730_sqe.fw
+  a730_zap.mdt
+  a730_zap.b01
+  a730_zap.b02
+power/
+  adsp.mbn
+```
+
+Put the whole `wifi/` directory in: the build embeds every file in it into the kernel's firmware pack, including files such as `Data.msc`. `adreno730/` and `audio/` use only the names listed above, and other files there are ignored.
+
+When `firmware_sha256` is set, the archive's digest is checked first and a mismatch fails the run before anything is unpacked. The URL must be https.
+
+An archive in a public location, or a pre-signed object-storage link, needs nothing else configured. When the archive lives on a private GitHub release, the workflow fetches it with an `Authorization: Bearer` header, so add a secret `PONG_FIRMWARE_ARCHIVE_TOKEN` with `Contents: Read` on that repository and give `firmware_url` in API form, such as
+`https://api.github.com/repos/<owner>/<repo>/releases/assets/<asset id>`; curl follows the redirect to the signed storage URL.
+
+To produce the archive locally, use the repository script, which builds the zip above and prints its sha256:
+
+```sh
+python3 scripts/pack-pong-firmware.py \
+  --wifi ../private-inputs/pong-wifi-firmware \
+  --audio ../private-inputs/pong-audio-inputs \
+  --adreno730 out/ipados18/firmware/adreno730 \
+  --adsp ../private-inputs/pong-power \
+  --output ../private-inputs/pong-firmware.zip
+```
+
+Never commit the firmware. The workflow uses it only after the checks pass, and writes the archive's sha256 and the unpacked paths into `ci-manifest.json`.
 
 ### Artifacts
 
@@ -66,14 +115,17 @@ A push to any branch also triggers the workflow (`on: push`). The concurrency gr
 
 `kernel-ci-log` (kept 1 day) holds the kernel build logs; check it first when a run fails.
 
-### Firmware: Path A and Path B
+### A local build still extracts from the phone
 
-The workflow branches on whether the `PONG_FIRMWARE_TOKEN` secret exists:
+A local build needs no archive: it reads the firmware out of the phone. Wi-Fi has a script for it, run in recovery:
 
-- **With the token (Path B)**: `configs/pong_ipados18_defconfig`, with Wi-Fi, backlight and Adreno 730 enabled. The token must read the private `Chengdong-Yu/UniXNU-pong-firmware` repository; the workflow checks out `wifi/`, `audio/`, `adreno730/` and `power/` at the fixed commit `c1695a31`.
-- **Without it (Path A)**: `configs/pong_ipados18_ci_defconfig`, with Wi-Fi, backlight and Adreno 730 off. It produces a kernel, but it is not the shipping configuration.
+```sh
+python3 scripts/prepare-pong-wifi.py --serial <serial> --out ../private-inputs
+```
 
-A fork therefore runs Path A and needs no secrets at all. For the full configuration, add a fine-grained token with `Contents: Read` on the firmware repository under **Settings → Secrets and variables → Actions**. Never commit the firmware: the workflow only reads it.
+It mounts `modem_a` read-only, pulls the whole `image/qca6490` directory into `<out>/qca6490`, and then checks that `amss.bin`, `amss20.bin`, `m3.bin`, `regdb.bin` and at least one `bdwlan*` are present. `adsp.mbn`, `tfa98xx.cnt` and the five Adreno 730 files come out of the same phone's modem and vendor partitions. The build reads them from `PONG_WIFI_FIRMWARE` (default `$PONG_INPUTS/pong-wifi-firmware`) for Wi-Fi, `PONG_AUDIO_INPUTS` (default `$PONG_INPUTS/pong-audio-inputs`, holding `tfa98xx.cnt`) for the backlight, and `PONG_ADRENO_FIRMWARE` (by default the guest's `out/ipados18/firmware/adreno730`). `scripts/pong_paths.py` holds every path rule.
+
+The two inputs can be shared: once the files are in place locally, `scripts/pack-pong-firmware.py` turns them into the zip that Actions takes, so nothing has to be prepared twice.
 
 ### What it does not do
 

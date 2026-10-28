@@ -2,6 +2,17 @@ name: Pong macOS build
 on:
   push:
   workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'Firmware archive URL (zip or tar.gz) with the phone firmware tree. Empty builds the CI config without Wi-Fi, backlight or Adreno.'
+        required: false
+        default: ''
+        type: string
+      firmware_sha256:
+        description: 'Optional sha256 of that archive. A mismatch stops the run before anything is unpacked.'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: read
   actions: write
@@ -63,7 +74,7 @@ jobs:
           if-no-files-found: warn
 
   kernel-ci:
-    name: CI kernel (WIFI and backlight off unless firmware token)
+    name: CI kernel (WIFI and backlight off unless a firmware archive is given)
     runs-on: macos-15-intel
     timeout-minutes: 360
     steps:
@@ -205,77 +216,91 @@ jobs:
       - name: Choose firmware path
         id: firmware
         env:
-          PONG_FIRMWARE_TOKEN: ${{ secrets.PONG_FIRMWARE_TOKEN }}
-          # Full commit of Chengdong-Yu/UniXNU-pong-firmware. Do not guess a branch.
-          FIRMWARE_REVISION: c1695a31eae622e136787ef328f5ed11016d4f4a
+          FIRMWARE_URL: ${{ inputs.firmware_url }}
+          FIRMWARE_SHA256: ${{ inputs.firmware_sha256 }}
+          # Only needed when the archive sits behind authentication, such as a
+          # private GitHub release asset fetched through the API URL.
+          FIRMWARE_ARCHIVE_TOKEN: ${{ secrets.PONG_FIRMWARE_ARCHIVE_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${PONG_FIRMWARE_TOKEN}" ]; then
-            echo "PONG_FIRMWARE_TOKEN is absent."
+          url="$(printf '%s' "${FIRMWARE_URL}" | tr -d '[:space:]')"
+          sha="$(printf '%s' "${FIRMWARE_SHA256}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          if [ -z "${url}" ]; then
+            echo "No firmware_url input."
             echo "Path A: configs/pong_ipados18_ci_defconfig."
             echo "WIFI off, backlight off, Adreno730 off."
-            echo "This is not the shipping kernel. Those stages need the private firmware checkout."
+            echo "This is not the shipping kernel. Start this workflow from the Actions page with a firmware archive to enable those stages."
             echo "pong_ipados18_ci_defconfig" > ci-defconfig-name.txt
             echo "A" > ci-firmware-path.txt
             printf '%s\n' 'path=A' >> "$GITHUB_OUTPUT"
-            printf '%s\n' 'Path A. WIFI off, backlight off, Adreno730 off: private firmware token is absent.' > ci-stages.txt
-          else
-            echo "Path B checks out Chengdong-Yu/UniXNU-pong-firmware at ${FIRMWARE_REVISION}."
-            dest="${RUNNER_TEMP}/pong-firmware"
-            rm -rf "$dest"
-            mkdir -p "$dest"
-            auth="$(printf 'x-access-token:%s' "$PONG_FIRMWARE_TOKEN" | base64 | tr -d '\n')"
-            git -C "$dest" init -q
-            git -C "$dest" remote add origin https://github.com/Chengdong-Yu/UniXNU-pong-firmware.git
-            git -C "$dest" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" fetch --depth 1 origin "${FIRMWARE_REVISION}"
-            unset auth
-            unset PONG_FIRMWARE_TOKEN
-            git -C "$dest" checkout -q FETCH_HEAD
-            test "$(git -C "$dest" rev-parse HEAD)" = "${FIRMWARE_REVISION}"
-            wifi="${dest}/wifi"
-            audio="${dest}/audio"
-            adreno="${dest}/adreno730"
-            missing=0
-            for name in amss.bin amss20.bin m3.bin regdb.bin; do
-              if [ ! -f "${wifi}/${name}" ]; then
-                echo "missing firmware file: wifi/${name}"
-                missing=1
-              fi
-            done
-            if [ ! -f "${audio}/tfa98xx.cnt" ]; then
-              echo "missing audio profile: audio/tfa98xx.cnt"
-              missing=1
-            fi
-            for name in gmu_gen70000.bin a730_sqe.fw a730_zap.mdt a730_zap.b01 a730_zap.b02; do
-              if [ ! -f "${adreno}/${name}" ]; then
-                echo "missing adreno firmware file: adreno730/${name}"
-                missing=1
-              fi
-            done
-            if [ ! -f "${dest}/power/adsp.mbn" ]; then
-              echo "missing power firmware file: power/adsp.mbn"
-              missing=1
-            fi
-            if [ "$missing" -ne 0 ]; then
-              echo "Path B refused: the pinned firmware repo does not contain the expected files."
-              exit 1
-            fi
-            printf '%s\n' "$wifi" > ci-wifi-firmware-path.txt
-            printf '%s\n' "$audio" > ci-audio-inputs-path.txt
-            printf '%s\n' "$adreno" > ci-adreno-firmware-path.txt
-            printf '%s\n' "${dest}/power/adsp.mbn" > ci-adsp-path.txt
-            echo "pong_ipados18_defconfig" > ci-defconfig-name.txt
-            echo "B" > ci-firmware-path.txt
-            printf '%s\n' 'path=B' >> "$GITHUB_OUTPUT"
-            {
-              echo 'Path B uses configs/pong_ipados18_defconfig.'
-              echo 'WIFI on: Linux v7.0.14 ath11k sources 458c6079fc1d41d564c37679c8ace02cd83ee817. UniXNU-sheng supplies Ath12kWifi. Firmware wifi/ supplies amss.bin, amss20.bin, m3.bin and regdb.bin.'
-              echo 'BACKLIGHT on: UniXNU-sheng package plus audio/tfa98xx.cnt. build-pong-power-native.py runs because backlight is on.'
-              echo 'ADRENO on: PONG_ADRENO_FIRMWARE points at the checked-out adreno730 directory (gmu_gen70000.bin, a730_sqe.fw, a730_zap.mdt, a730_zap.b01, a730_zap.b02).'
-              echo 'power/adsp.mbn is present for the runtime firmware path. The power build does not embed that file.'
-            } > ci-stages.txt
+            printf '%s\n' 'Path A. WIFI off, backlight off, Adreno730 off: no firmware archive was supplied.' > ci-stages.txt
             cat ci-stages.txt
+            exit 0
           fi
+          case "${url}" in
+            https://*) ;;
+            *) echo "firmware_url must be an https URL, got: ${url}" >&2; exit 1 ;;
+          esac
+          # Name the download after the URL's last path segment: the staging
+          # script picks the archive format from the file name.
+          base="${url%%\?*}"
+          base="${base%%#*}"
+          base="${base##*/}"
+          case "${base}" in
+            *.zip|*.tar.gz|*.tgz|*.tar) ;;
+            *) echo "firmware_url must point at a .zip, .tar.gz, .tgz or .tar file, got: ${url}" >&2; exit 1 ;;
+          esac
+          archive="${RUNNER_TEMP}/pong-firmware-archive/${base}"
+          rm -rf "${RUNNER_TEMP}/pong-firmware-archive" "${RUNNER_TEMP}/pong-firmware"
+          mkdir -p "$(dirname "${archive}")"
+          echo "Downloading the firmware archive as ${base}."
+          # -f turns a 4xx/5xx into a failure instead of saving an error page.
+          # A public or pre-signed link needs no credentials; a private GitHub
+          # release asset does, so an optional token is sent as a bearer header.
+          # curl keeps the header for the first host only, which is what the API
+          # URL needs before it redirects to signed storage.
+          if [ -n "${FIRMWARE_ARCHIVE_TOKEN:-}" ]; then
+            curl -fsSL --retry 3 --retry-delay 2 \
+              -H "Authorization: Bearer ${FIRMWARE_ARCHIVE_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              -o "${archive}" "${url}"
+            unset FIRMWARE_ARCHIVE_TOKEN
+          else
+            curl -fsSL --retry 3 --retry-delay 2 -o "${archive}" "${url}"
+          fi
+          ls -l "${archive}"
+          stage=(--archive "${archive}" --dest "${RUNNER_TEMP}/pong-firmware" --json-out ci-firmware-archive.json)
+          if [ -n "${sha}" ]; then
+            stage+=(--expect-sha256 "${sha}")
+          fi
+          python3 scripts/stage-pong-firmware.py "${stage[@]}"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('ci-firmware-archive.json').read_text())
+          paths = report['paths']
+          for key, target in (('wifi', 'ci-wifi-firmware-path.txt'),
+                              ('audio', 'ci-audio-inputs-path.txt'),
+                              ('adreno730', 'ci-adreno-firmware-path.txt'),
+                              ('adsp', 'ci-adsp-path.txt')):
+              value = Path(paths[key])
+              if not value.exists():
+                  raise SystemExit('staged firmware path does not exist: ' + str(value))
+              Path(target).write_text(str(value) + '\n')
+          print('staged', report['files'], 'files,', report['bytes'], 'bytes from', report['archive'])
+          print('archive sha256', report['archive_sha256'])
+          PY
+          echo "pong_ipados18_defconfig" > ci-defconfig-name.txt
+          echo "B" > ci-firmware-path.txt
+          printf '%s\n' 'path=B' >> "$GITHUB_OUTPUT"
+          {
+            echo 'Path B uses the supplied firmware archive and configs/pong_ipados18_defconfig.'
+            echo 'WIFI on: Linux v7.0.14 ath11k sources 458c6079fc1d41d564c37679c8ace02cd83ee817. UniXNU-sheng supplies Ath12kWifi. The archive wifi/ directory supplies amss.bin, amss20.bin, m3.bin, regdb.bin and the bdwlan* board data.'
+            echo 'BACKLIGHT on: UniXNU-sheng package plus audio/tfa98xx.cnt. build-pong-power-native.py runs because backlight is on.'
+            echo 'ADRENO on: PONG_ADRENO_FIRMWARE points at the archive adreno730 directory (gmu_gen70000.bin, a730_sqe.fw, a730_zap.mdt, a730_zap.b01, a730_zap.b02).'
+            echo 'power/adsp.mbn is present for the runtime firmware path. The power build does not embed that file.'
+          } > ci-stages.txt
+          cat ci-stages.txt
       - name: Linux 7.0.14 ath11k sources
         if: steps.firmware.outputs.path == 'B'
         run: |
@@ -730,6 +755,7 @@ jobs:
           doc = {
               'firmware_path': (read('ci-firmware-path.txt') or '').strip(),
               'defconfig': (read('ci-defconfig-name.txt') or '').strip(),
+              'firmware_archive': load('ci-firmware-archive.json'),
               'stages': read('ci-stages.txt'),
               'paths': read('ci-paths.txt'),
               'df_before': read('df-before.txt'),
