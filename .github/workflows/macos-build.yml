@@ -37,7 +37,7 @@ jobs:
           df -h | tee df-after.txt
           echo "=== aea ==="
           command -v aea
-          aea --help > aea-help.txt 2>&1 || true
+          aea -h > aea-help.txt 2>&1 || true
           head -n 40 aea-help.txt
           python3 - <<'PY'
           import json
@@ -99,13 +99,16 @@ jobs:
         run: |
           set -euo pipefail
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install dtc lzfse cmake ninja
+          # cmake and ninja are already on the image. Do not upgrade them:
+          # `brew install cmake` on macos-15-intel failed with "cmake: no bottle available".
+          brew install dtc lzfse
           command -v dtc
           command -v lzfse
           command -v cmake
           command -v ninja
           command -v make
           python3 --version
+          python3 -m pip install --disable-pip-version-check pyhpke
       - name: Public Apple OSS pins
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -236,6 +239,7 @@ jobs:
           printf '%s\n' "$PONG_INPUTS" > ci-pong-inputs.txt
           printf '%s\n' "$PONG_DEVELOPER_DIR" > ci-developer-dir.txt
       - name: Compile CI kernel
+        id: kernel
         run: |
           set -euo pipefail
           export PONG_WORK="$(cat ci-pong-work.txt)"
@@ -355,6 +359,7 @@ jobs:
             exit 1
           fi
       - name: Userdata image or the measured disk blocker
+        if: always() && steps.kernel.outcome == 'success'
         run: |
           set -euo pipefail
           echo "=== df before userdata ==="
@@ -379,11 +384,38 @@ jobs:
                   '094-32804-038.dmg.aea and its decrypt at the same time. '
                   'No truncated image was written.'
               )
-          raise SystemExit(
-              'free space would allow the OS AEA decrypt to start, but '
-              'shngroot-ipados18.bin was not produced. Refusing a green userdata result.'
-          )
+          print('free space can hold the OS AEA and its decrypt; extracting those members')
           PY
+          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
+          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
+          export PONG_VOLUME_LAYOUT="$(cat ci-pong-work.txt)/build/volume-layout.json"
+          python3 scripts/prepare-ipados18-components.py --remote \
+            --output-dir "${PONG_INPUTS}/22H374" \
+            --only OS --only Cryptex1,SystemOS --only Cryptex1,AppOS
+          OS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg.aea' -print -quit)"
+          SYS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg.aea' -print -quit)"
+          test -n "$OS_AEA"
+          test -n "$SYS_AEA"
+          python3 scripts/decrypt-ipados18-aea.py --input "$OS_AEA" --output "${OS_AEA%.aea}"
+          rm -f "$OS_AEA"
+          echo "=== df after OS decrypt ==="
+          df -h | tee df-after-os-decrypt.txt
+          python3 scripts/decrypt-ipados18-aea.py --input "$SYS_AEA" --output "${SYS_AEA%.aea}"
+          rm -f "$SYS_AEA"
+          echo "=== df after SystemOS decrypt ==="
+          df -h | tee df-after-systemos-decrypt.txt
+          echo "Decrypted OS and SystemOS. Searching the mounted images for 22H374 roots."
+          find "${PONG_INPUTS}/22H374/components" -type f -exec ls -l {} \;
+          OS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg' -print -quit)"
+          SYS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg' -print -quit)"
+          mkdir -p "${PONG_INPUTS}/mount/os" "${PONG_INPUTS}/mount/systemos"
+          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/os" "$OS_DMG"
+          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/systemos" "$SYS_DMG"
+          find "${PONG_INPUTS}/mount" -name SystemVersion.plist -print
+          if [ ! -f out/ipados18/ufs/shngroot-ipados18.bin ]; then
+            echo "SHNGROOT header was not produced. The decrypted images stayed on the runner and were not uploaded."
+            exit 1
+          fi
       - name: Write manifest
         if: always()
         run: |
