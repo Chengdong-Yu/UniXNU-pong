@@ -93,13 +93,25 @@ jobs:
           SELECTED="$(xcode-select -p)"
           echo "xcode-select: ${SELECTED}"
           xcodebuild -version
-          for app in /Applications/Xcode*.app; do
-            [ -d "$app" ] || continue
-            case "$SELECTED" in
-              "$app"/*) echo "keep $app" ;;
-              *) echo "remove $app"; sudo rm -rf "$app" ;;
-            esac
-          done
+          # Run 9 had 107 GiB free before this step and 180 GiB after. The
+          # difference was eight minutes of rm -rf on the unused Xcode copies.
+          # The selected Xcode stays. Delete the others only below 40 GiB free,
+          # which still covers the kernel objects, EDK2, and the Linux checkout.
+          NEED_KB=$((40 * 1024 * 1024))
+          AVAIL_KB="$(df -k / | awk 'NR==2 {print $4}')"
+          echo "avail_kb=${AVAIL_KB} need_kb=${NEED_KB}"
+          if [ "$AVAIL_KB" -ge "$NEED_KB" ]; then
+            echo "Skipping unused Xcode deletion: ${AVAIL_KB} KiB free is at least ${NEED_KB} KiB. Keeping ${SELECTED}."
+          else
+            echo "Free space is below 40 GiB. Removing Xcode copies other than ${SELECTED}."
+            for app in /Applications/Xcode*.app; do
+              [ -d "$app" ] || continue
+              case "$SELECTED" in
+                "$app"/*) echo "keep $app" ;;
+                *) echo "remove $app"; sudo rm -rf "$app" ;;
+              esac
+            done
+          fi
           sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
           rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/Homebrew" || true
           echo "=== df after reclaim ==="
@@ -141,12 +153,23 @@ jobs:
             echo "=== ${stage}: ${path} ==="
             "$path" --version
           }
+          # llvm-lib and llvm-rc are MSVC-compatible drivers. They reject
+          # --version and exit 1 with no inputs, so existence is the check.
+          require_llvm_present() {
+            local tool="$1" stage="$2"
+            local path="${LLVM_BIN}/${tool}"
+            if [ ! -x "$path" ]; then
+              echo "missing ${tool} for ${stage}: ${path} is not in the preinstalled Homebrew llvm@18 keg. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
+            echo "=== ${stage}: ${path} present ==="
+          }
           require_llvm clang "DarwinBoot24 CLANGPDB"
           require_llvm lld-link "DarwinBoot24 CLANGPDB"
-          require_llvm llvm-lib "DarwinBoot24 CLANGPDB"
-          require_llvm llvm-rc "DarwinBoot24 CLANGPDB"
           require_llvm llvm-nm "ath11k link"
           require_llvm llvm-objcopy "ath11k link"
+          require_llvm_present llvm-lib "DarwinBoot24 CLANGPDB"
+          require_llvm_present llvm-rc "DarwinBoot24 CLANGPDB"
           printf '%s\n' "$LLVM_BIN" > ci-llvm-bin.txt
           python3 --version
           python3 -m pip install --disable-pip-version-check pyhpke
