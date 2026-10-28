@@ -110,24 +110,44 @@ jobs:
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
           # cmake and ninja are already on the image. Do not upgrade them:
           # `brew install cmake` on macos-15-intel failed with "cmake: no bottle available".
-          # llvm stays keg-only. XNU keeps using xcrun; CLANGPDB and llvm-nm use the prefix.
-          brew install dtc lzfse mtools llvm nasm acpica
-          command -v dtc
-          command -v lzfse
-          command -v mformat
-          command -v mcopy
-          command -v cmake
-          command -v ninja
-          command -v make
-          command -v nasm
-          command -v iasl
-          LLVM_BIN="$(brew --prefix llvm)/bin"
-          test -x "${LLVM_BIN}/clang"
-          test -x "${LLVM_BIN}/lld-link"
-          test -x "${LLVM_BIN}/llvm-lib"
-          test -x "${LLVM_BIN}/llvm-rc"
-          test -x "${LLVM_BIN}/llvm-nm"
-          test -x "${LLVM_BIN}/llvm-objcopy"
+          # The current Homebrew llvm formula also has no bottle on this Tier 3 runner.
+          # The image already has the llvm@18 keg. XNU keeps using xcrun.
+          brew install dtc lzfse mtools nasm acpica
+          require_cmd() {
+            local tool="$1" stage="$2"
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "missing ${tool} for ${stage}" >&2
+              exit 1
+            fi
+          }
+          require_cmd dtc "format2 device tree"
+          require_cmd lzfse "kernelcache decompress"
+          require_cmd mformat "boot image packager"
+          require_cmd mcopy "boot image packager"
+          require_cmd nasm "DarwinBoot24 EDK2"
+          require_cmd iasl "DarwinBoot24 EDK2"
+          require_cmd cmake "XNU build"
+          require_cmd ninja "XNU build"
+          require_cmd make "XNU build"
+          # Preinstalled keg. Do not brew install llvm, and do not use Xcode clang for CLANGPDB.
+          LLVM_BIN="$(brew --prefix llvm@18)/bin"
+          require_llvm() {
+            local tool="$1" stage="$2"
+            local path="${LLVM_BIN}/${tool}"
+            if [ ! -x "$path" ]; then
+              echo "missing ${tool} for ${stage}: ${path} is not in the preinstalled Homebrew llvm@18 keg. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
+            echo "=== ${stage}: ${path} ==="
+            "$path" --version
+          }
+          require_llvm clang "DarwinBoot24 CLANGPDB"
+          require_llvm lld-link "DarwinBoot24 CLANGPDB"
+          require_llvm llvm-lib "DarwinBoot24 CLANGPDB"
+          require_llvm llvm-rc "DarwinBoot24 CLANGPDB"
+          require_llvm llvm-nm "ath11k link"
+          require_llvm llvm-objcopy "ath11k link"
+          printf '%s\n' "$LLVM_BIN" > ci-llvm-bin.txt
           python3 --version
           python3 -m pip install --disable-pip-version-check pyhpke
       - name: Public Apple OSS pins
@@ -261,10 +281,14 @@ jobs:
       - name: DarwinBoot24
         run: |
           set -euo pipefail
-          LLVM_BIN="$(brew --prefix llvm)/bin"
+          LLVM_BIN="$(cat ci-llvm-bin.txt)"
           for tool in clang lld-link llvm-lib llvm-rc; do
-            test -x "${LLVM_BIN}/${tool}"
+            if [ ! -x "${LLVM_BIN}/${tool}" ]; then
+              echo "missing ${tool} for DarwinBoot24 CLANGPDB: ${LLVM_BIN}/${tool}. Not falling back to Xcode clang." >&2
+              exit 1
+            fi
           done
+          export PONG_LLVM="$LLVM_BIN"
           test -d "${GITHUB_WORKSPACE}/unixnu/package/UniXNUPkg"
           test -f "${GITHUB_WORKSPACE}/unixnu/package/UniXNUPkg/UniXNUPkg.dec"
           test -d "${GITHUB_WORKSPACE}/sheng/package"
@@ -317,8 +341,13 @@ jobs:
           export PONG_STORAGE_HEADERS="${GITHUB_WORKSPACE}/refer/ipados18/IOStorageFamily-323"
           export PONG_SHENG_ROOT="${GITHUB_WORKSPACE}/sheng"
           export PONG_WIFI_BUILD="${PONG_WORK}/wifi-ath11k-build"
-          export PONG_LLVM_NM="$(brew --prefix llvm)/bin/llvm-nm"
-          export PONG_LLVM_OBJCOPY="$(brew --prefix llvm)/bin/llvm-objcopy"
+          export PONG_LLVM="$(cat ci-llvm-bin.txt)"
+          export PONG_LLVM_NM="${PONG_LLVM}/llvm-nm"
+          export PONG_LLVM_OBJCOPY="${PONG_LLVM}/llvm-objcopy"
+          if [ ! -x "$PONG_LLVM_NM" ] || [ ! -x "$PONG_LLVM_OBJCOPY" ]; then
+            echo "missing llvm-nm or llvm-objcopy for the ath11k link under ${PONG_LLVM}. Not falling back to Xcode clang." >&2
+            exit 1
+          fi
           if [ -f ci-linux-source.txt ]; then
             export PONG_WIFI_SOURCE="$(cat ci-linux-source.txt)"
           fi
@@ -368,6 +397,7 @@ jobs:
             printf 'export PONG_STORAGE_HEADERS=%q\n' "$PONG_STORAGE_HEADERS"
             printf 'export PONG_SHENG_ROOT=%q\n' "$PONG_SHENG_ROOT"
             printf 'export PONG_WIFI_BUILD=%q\n' "$PONG_WIFI_BUILD"
+            printf 'export PONG_LLVM=%q\n' "$PONG_LLVM"
             printf 'export PONG_LLVM_NM=%q\n' "$PONG_LLVM_NM"
             printf 'export PONG_LLVM_OBJCOPY=%q\n' "$PONG_LLVM_OBJCOPY"
             if [ -n "${PONG_WIFI_SOURCE:-}" ]; then
