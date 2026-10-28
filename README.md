@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README_EN.md)
 
-Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。当前 main 面向第七代 iPad 的 **iPadOS 18.7.10（22H374）**，使用 Darwin 24.6.0 / XNU 11417.140.69；系统输入为 iPad7,11 / J171AP，硬件始终是 Pong。iOS16 的实现保留在 Git 历史中。
+Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。当前 main 面向第七代 iPad 的 **iPadOS 18.7.10（22H374）**，使用 Darwin 24.6.0 / XNU 11417.140.69；系统输入为 iPad7,11 / J171AP。iOS16 的实现保留在 Git 历史中。
 
 - 核心构建工具：[UniXNU](https://github.com/UniXNU/UniXNU)
 - 独立固件：[uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)
@@ -21,7 +21,7 @@ Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。
 | 声音 | ADSP、AudioReach、TFA9873 双功放与输出 HAL 已接通；已修补 CoreMedia 路由服务选择，实际 PCM 发声尚未确认 |
 | 按键 / 电源 | PMIC 物理事件已送达 HID / SpringBoard；电源键与音量键当前反馈仍有问题，继续适配系统动作；完整挂起恢复未完成 |
 
-主机编译、服务发布和设备功能分开记录。最新修补见 [SMMU 与音频路由审计](migration/ipados18/services73-smmu-audio.md)，本轮按要求只构建，不临时启动。
+主机编译、服务发布和设备功能分开记录。最新修补见 [SMMU 与音频路由审计](migration/ipados18/services73-smmu-audio.md)
 
 ## 构建
 
@@ -38,12 +38,8 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 
 该入口依次解析 ARM64、SM8475、22H374、Pong 四层配置，编译板级 DTS，再调用已适配的 Darwin24 内核构建器。输出为 `../pong-build/pong/ipados-18.7.10-22H374/pong_ipados18/`。原始镜像下载、用户态处理和 userdata 构建入口见 [系统迁移说明](migration/ipados18/README.zh.md)；配置命令不能代替匹配的本地二进制输入。
 
-默认跳过镜像哈希、全盘校验和设备镜像回读。原有协议需要的 SHNGROOT 头部校验值仍保留。
-
 ## 源码边界与许可证
 
 仓库包含板级源码、补丁、配置和脚本，不包含 IPSW、Apple 私有二进制、固件、认证数据或构建好的 userdata。它们由脚本在本机获取或生成，并存放于 Git 忽略目录。本机路径只写入 `local.toml` 等本地配置。
-
-社区聚合组件使用 `PongPlatform24` 身份，未将 A730/QCA6490 冒充为上游 A740/WCN7850 实现。SM8475 公共层种子单独位于 `migration/format2/soc-seed`，可按固定元数据重建。
 
 设备级代码采用 BSD-2-Clause-Patent；导入组件保留原始许可证及 SPDX 标记，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
