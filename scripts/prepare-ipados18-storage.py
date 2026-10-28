@@ -3,15 +3,17 @@
 import argparse,json,os,re,shutil,struct,subprocess,sys
 from pathlib import Path
 DEVICE=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(DEVICE/'scripts'))
 sys.path.insert(0,str(DEVICE/'kits/NativePrelink'))
+import pong_paths
 import native_prelink as np
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--tree',type=Path,required=True)
 p.add_argument('--kernel',type=Path,default=DEVICE/'apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed')
 a=p.parse_args();out=DEVICE/'mac-build/storage-abi18';out.mkdir(parents=True,exist_ok=True)
-source=DEVICE/'refer/ipados18/IOStorageFamily-323';headers=out/'include/IOKit/storage';headers.mkdir(parents=True,exist_ok=True)
+source=pong_paths.storage_headers();headers=out/'include/IOKit/storage';headers.mkdir(parents=True,exist_ok=True)
 for f in source.glob('*.h'):shutil.copyfile(f,headers/f.name)
-env=dict(os.environ,DEVELOPER_DIR='/Volumes/PongDev/Applications/Xcode.app/Contents/Developer')
+env=dict(os.environ,DEVELOPER_DIR=str(pong_paths.developer_dir()))
 sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
 macsdk=Path(subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],env=env,text=True).strip())
 shutil.copyfile(macsdk/'usr/include/TargetConditionals.h',out/'include/TargetConditionals.h')
@@ -33,7 +35,7 @@ for g in m['segments']:
 methods=[]
 while vt+16+len(methods)*8 in rel:methods.append(rel[vt+16+len(methods)*8])
 if not 150<len(methods)<256:raise SystemExit('Unexpected public storage vtable size')
-b=a.kernel.read_bytes();m=np.macho(b);ex=np.exports(b,m);known={n:v for v,ns in ex.items() for n in ns}
+b=np.arm64_image(a.kernel.read_bytes());m=np.macho(b);ex=np.exports(b,m);known={n:v for v,ns in ex.items() for n in ns}
 s=next(s for g in m['segments'] for s in g['sections'] if s['name']=='__info')
 info=np.unserialize_xml(b[s['fileoff']:s['fileoff']+s['size']].rstrip(b'\0'))
 e=next(e for e in info['_PrelinkInfoDictionary'] if e.get('CFBundleIdentifier')=='com.apple.iokit.IOStorageFamily')

@@ -1,0 +1,455 @@
+name: Pong macOS build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: pong-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disk-probe:
+    name: disk probe (not a kernel build)
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Reclaim disk and record df
+        run: |
+          set -euo pipefail
+          echo "=== df before reclaim ==="
+          df -h | tee df-before.txt
+          SELECTED="$(xcode-select -p)"
+          echo "xcode-select: ${SELECTED}"
+          xcodebuild -version || true
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            case "$SELECTED" in
+              "$app"/*) echo "keep $app" ;;
+              *) echo "remove $app"; sudo rm -rf "$app" ;;
+            esac
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/Homebrew" || true
+          echo "=== df after reclaim ==="
+          df -h | tee df-after.txt
+          echo "=== aea ==="
+          command -v aea
+          aea -h > aea-help.txt 2>&1 || true
+          head -n 40 aea-help.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path('ci-manifest.json').write_text(json.dumps({
+              'job': 'disk-probe',
+              'runner': 'macos-15-intel',
+              'df_before': Path('df-before.txt').read_text(),
+              'df_after': Path('df-after.txt').read_text(),
+              'aea': Path('aea-help.txt').read_text()[:2000],
+          }, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: disk-probe-log
+          retention-days: 1
+          path: |
+            ci-manifest.json
+            df-before.txt
+            df-after.txt
+            aea-help.txt
+          if-no-files-found: warn
+
+  kernel-ci:
+    name: CI kernel (WIFI and backlight off unless firmware token)
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: UniXNU/UniXNU
+          ref: 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
+          path: unixnu
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Reclaim disk
+        run: |
+          set -euo pipefail
+          echo "=== df before reclaim ==="
+          df -h | tee df-before.txt
+          SELECTED="$(xcode-select -p)"
+          echo "xcode-select: ${SELECTED}"
+          xcodebuild -version
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            case "$SELECTED" in
+              "$app"/*) echo "keep $app" ;;
+              *) echo "remove $app"; sudo rm -rf "$app" ;;
+            esac
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Caches/Homebrew" || true
+          echo "=== df after reclaim ==="
+          df -h | tee df-after.txt
+      - name: Tools
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          # cmake and ninja are already on the image. Do not upgrade them:
+          # `brew install cmake` on macos-15-intel failed with "cmake: no bottle available".
+          brew install dtc lzfse
+          command -v dtc
+          command -v lzfse
+          command -v cmake
+          command -v ninja
+          command -v make
+          python3 --version
+          python3 -m pip install --disable-pip-version-check pyhpke
+      - name: Public Apple OSS pins
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: refer/ipados18
+          key: refer-${{ hashFiles('feeds.toml', 'unixnu.lock') }}
+      - name: Fetch refer pins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | while IFS=$'\t' read -r ref url commit; do
+          import tomllib
+          from pathlib import Path
+          for source in tomllib.loads(Path('feeds.toml').read_text())['source']:
+              if source.get('kind') == 'refer':
+                  print(f"{source['ref']}\t{source['git']}\t{source['commit']}")
+          PY
+            dest="refer/ipados18/${ref}"
+            if [ -d "${dest}/.git" ] && [ "$(git -C "$dest" rev-parse HEAD)" = "$commit" ]; then
+              echo "cached ${ref} ${commit}"
+              continue
+            fi
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            git -C "$dest" init -q
+            git -C "$dest" remote add origin "$url"
+            git -C "$dest" fetch --depth 1 origin "$commit"
+            git -C "$dest" checkout -q FETCH_HEAD
+            test "$(git -C "$dest" rev-parse HEAD)" = "$commit"
+            echo "fetched ${ref} ${commit}"
+          done
+      - name: Choose firmware path
+        env:
+          PONG_FIRMWARE_TOKEN: ${{ secrets.PONG_FIRMWARE_TOKEN }}
+          # Full commit of Chengdong-Yu/UniXNU-pong-firmware. Empty until that
+          # private repo has a commit. Path B will not guess a branch.
+          FIRMWARE_REVISION: ""
+        run: |
+          set -euo pipefail
+          if [ -z "${PONG_FIRMWARE_TOKEN}" ]; then
+            echo "PONG_FIRMWARE_TOKEN is absent."
+            echo "Path A: configs/pong_ipados18_ci_defconfig."
+            echo "CONFIG_XNU_PONG_WIFI=n, CONFIG_XNU_PONG_BACKLIGHT=n, CONFIG_XNU_PONG_ADRENO_PLATFORM=n."
+            echo "This is not the shipping kernel. Those stages need private modem, amplifier, and Adreno730 firmware."
+            echo "pong_ipados18_ci_defconfig" > ci-defconfig-name.txt
+            echo "A" > ci-firmware-path.txt
+          else
+            echo "PONG_FIRMWARE_TOKEN is set. Path B checks out Chengdong-Yu/UniXNU-pong-firmware."
+            if [ -z "${FIRMWARE_REVISION}" ]; then
+              echo "Path B refused: FIRMWARE_REVISION in .github/workflows/macos-build.yml is empty, so there is no commit SHA to pin."
+              exit 1
+            fi
+            dest="${RUNNER_TEMP}/pong-firmware"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            auth="$(printf 'x-access-token:%s' "$PONG_FIRMWARE_TOKEN" | base64 | tr -d '\n')"
+            git -C "$dest" init -q
+            git -C "$dest" remote add origin https://github.com/Chengdong-Yu/UniXNU-pong-firmware.git
+            git -C "$dest" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" fetch --depth 1 origin "${FIRMWARE_REVISION}"
+            git -C "$dest" checkout -q FETCH_HEAD
+            test "$(git -C "$dest" rev-parse HEAD)" = "${FIRMWARE_REVISION}"
+            export PONG_WIFI_FIRMWARE="${dest}/wifi"
+            export PONG_AUDIO_INPUTS="${dest}/audio"
+            missing=0
+            for name in amss.bin amss20.bin m3.bin regdb.bin; do
+              if [ ! -f "${PONG_WIFI_FIRMWARE}/${name}" ]; then
+                echo "missing firmware file: ${PONG_WIFI_FIRMWARE}/${name}"
+                missing=1
+              fi
+            done
+            if [ ! -f "${PONG_AUDIO_INPUTS}/tfa98xx.cnt" ]; then
+              echo "missing audio profile: ${PONG_AUDIO_INPUTS}/tfa98xx.cnt"
+              missing=1
+            fi
+            if [ "$missing" -ne 0 ]; then
+              echo "Path B refused: the pinned firmware repo does not contain the expected files."
+              exit 1
+            fi
+            # Persist the paths for later steps without printing the token.
+            printf '%s\n' "$PONG_WIFI_FIRMWARE" > ci-wifi-firmware-path.txt
+            printf '%s\n' "$PONG_AUDIO_INPUTS" > ci-audio-inputs-path.txt
+            echo "pong_ipados18_defconfig" > ci-defconfig-name.txt
+            echo "B" > ci-firmware-path.txt
+          fi
+      - name: Layout, kernelcache, and describe paths
+        run: |
+          set -euo pipefail
+          export PONG_WORK="${RUNNER_TEMP}/pong-work"
+          export PONG_INPUTS="${RUNNER_TEMP}/pong-inputs"
+          export PONG_DEVELOPER_DIR="$(xcode-select -p)"
+          export PONG_BUILD_TREE="${PONG_WORK}/build/Pong-iPadOS18-native/tree"
+          export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
+          export PONG_STORAGE_HEADERS="${GITHUB_WORKSPACE}/refer/ipados18/IOStorageFamily-323"
+          if [ -f ci-wifi-firmware-path.txt ]; then
+            export PONG_WIFI_FIRMWARE="$(cat ci-wifi-firmware-path.txt)"
+            export PONG_AUDIO_INPUTS="$(cat ci-audio-inputs-path.txt)"
+          fi
+          mkdir -p "${PONG_WORK}/build" "${PONG_INPUTS}"
+          python3 - <<'PY'
+          import json, uuid
+          from pathlib import Path
+          import os
+          namespace = uuid.UUID('6f1b6a3e-7c2d-4a91-9e5b-0c4d8f2a1b77')
+          layout = {
+              'ci_placeholder': True,
+              'note': 'uuid5 placeholders for the CI volume names. Not the device SystemOS/Data UUIDs.',
+              'os': {'uuid': str(uuid.uuid5(namespace, 'os'))},
+              'data': {'uuid': str(uuid.uuid5(namespace, 'data'))},
+              'systemos': {'uuid': str(uuid.uuid5(namespace, 'systemos'))},
+          }
+          Path(os.environ['PONG_VOLUME_LAYOUT']).write_text(json.dumps(layout, indent=2) + '\n')
+          text = '\n'.join([
+              '# Generated on the runner. Not a developer machine path.',
+              '[pong_build]',
+              'tree = ' + json.dumps(os.environ['PONG_BUILD_TREE']),
+              'developer_dir = ' + json.dumps(os.environ['PONG_DEVELOPER_DIR']),
+              'volume_layout = ' + json.dumps(os.environ['PONG_VOLUME_LAYOUT']),
+              '',
+          ])
+          Path('local.toml').write_text(text)
+          PY
+          python3 scripts/prepare-ipados18-components.py --remote \
+            --output-dir "${PONG_INPUTS}/22H374" --only KernelCache
+          python3 scripts/decompress-ipados18-kernelcache.py \
+            --im4p "${PONG_INPUTS}/22H374/components/kernelcache.release.ipad7c" \
+            --output apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed
+          python3 scripts/pong_paths.py describe | tee ci-paths.txt
+          echo "=== df after kernelcache ==="
+          df -h | tee df-after-kernelcache.txt
+          printf '%s\n' "$PONG_WORK" > ci-pong-work.txt
+          printf '%s\n' "$PONG_INPUTS" > ci-pong-inputs.txt
+          printf '%s\n' "$PONG_DEVELOPER_DIR" > ci-developer-dir.txt
+      - name: Compile CI kernel
+        id: kernel
+        run: |
+          set -euo pipefail
+          export PONG_WORK="$(cat ci-pong-work.txt)"
+          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
+          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
+          export PONG_BUILD_TREE="${PONG_WORK}/build/Pong-iPadOS18-native/tree"
+          export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
+          export PONG_STORAGE_HEADERS="${GITHUB_WORKSPACE}/refer/ipados18/IOStorageFamily-323"
+          if [ -f ci-wifi-firmware-path.txt ]; then
+            export PONG_WIFI_FIRMWARE="$(cat ci-wifi-firmware-path.txt)"
+            export PONG_AUDIO_INPUTS="$(cat ci-audio-inputs-path.txt)"
+          fi
+          DEFCONFIG="$(cat ci-defconfig-name.txt)"
+          echo "building with ${DEFCONFIG}; firmware path $(cat ci-firmware-path.txt)"
+          set +e
+          python3 scripts/build-pong-format2.py \
+            --unixnu "${GITHUB_WORKSPACE}/unixnu" \
+            --out "${GITHUB_WORKSPACE}/out" \
+            --jobs 3 \
+            --defconfig "${DEFCONFIG}"
+          status=$?
+          set -e
+          echo "=== df after kernel attempt ==="
+          df -h | tee df-after-kernel.txt
+          mkdir -p ci-logs
+          find "${PONG_WORK}" "${GITHUB_WORKSPACE}/out" "${GITHUB_WORKSPACE}/unixnu" \
+            -name 'build-*.log' -o -name 'device-tree.log' 2>/dev/null | while read -r log; do
+            echo "===== ${log} ====="
+            tail -n 80 "$log" || true
+            cp "$log" "ci-logs/$(basename "$log")" || true
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "kernel build exited ${status}"
+            exit "$status"
+          fi
+      - name: Boot image or the reason it was not built
+        run: |
+          set -euo pipefail
+          export PONG_WORK="$(cat ci-pong-work.txt)"
+          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
+          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
+          export PONG_VOLUME_LAYOUT="${PONG_WORK}/build/volume-layout.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          bindings = Path('mac-build/native-ufs/bindings.json')
+          efi = Path('mac-build/darwinboot24/DarwinBoot24.efi')
+          record = {
+              'bindings_json': str(bindings),
+              'bindings_generated': bindings.is_file(),
+              'darwinboot_efi': str(efi),
+              'darwinboot_efi_present': efi.is_file(),
+              'prelinked_boot': 'not-run',
+          }
+          if not bindings.is_file():
+              record['prelinked_boot'] = 'skipped'
+              record['reason'] = (
+                  'scripts/build-ipados18-prelinked-boot.py reads '
+                  'mac-build/native-ufs/bindings.json and that file is not in the repository. '
+                  'The UFS build did not generate it, so the prelinked boot was not run and the file was not fabricated.'
+              )
+          elif not efi.is_file():
+              record['prelinked_boot'] = 'skipped'
+              record['reason'] = (
+                  'bindings.json is present, but mac-build/darwinboot24/DarwinBoot24.efi is not. '
+                  'scripts/build-darwinboot24-macos.py builds that loader from PONG_EDK2 (Mu_Basecore), '
+                  'which this runner does not have. The prelinked boot was not run.'
+              )
+          Path('boot-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print(json.dumps(record, indent=2))
+          PY
+          if [ "$(python3 -c 'import json; print(json.load(open("boot-decision.json"))["prelinked_boot"])')" = "not-run" ]; then
+            ARTIFACT="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          found = list(Path('out').rglob('PONG_FORMAT2_RESULT.json'))
+          if len(found) != 1:
+              raise SystemExit(f'expected one PONG_FORMAT2_RESULT.json, found {found}')
+          print(Path(json.loads(found[0].read_text())['output']) / 'kernel')
+          PY
+          )"
+            python3 scripts/build-ipados18-prelinked-boot.py \
+              --artifact-dir "${ARTIFACT}" \
+              --output-dir out/ipados18/boot-first \
+              --volume-layout "${PONG_VOLUME_LAYOUT}" \
+              --cpus 8
+            python3 - <<'PY'
+            import json
+            from pathlib import Path
+            image = Path('out/ipados18/boot-first/pong-xnu-initial.img')
+            record = json.loads(Path('boot-decision.json').read_text())
+            record['prelinked_boot'] = 'ran'
+            record['image'] = str(image)
+            record['image_bytes'] = image.stat().st_size if image.is_file() else None
+            if image.is_file():
+                record['magic'] = image.read_bytes()[:4].hex()
+            Path('boot-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+            PY
+          fi
+          echo "=== df after boot decision ==="
+          df -h | tee df-after-boot.txt
+          python3 - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          usage = shutil.disk_usage('.')
+          need = 11_800_000_000
+          record = {
+              'free_bytes': usage.free,
+              'need_bytes_for_os_aea_plus_decrypt': need,
+              'fits': usage.free >= need,
+          }
+          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print('userdata disk check', json.dumps(record))
+          PY
+          if [ ! -f out/ipados18/boot-first/pong-xnu-initial.img ]; then
+            echo "boot image was not produced; see boot-decision.json"
+            exit 1
+          fi
+      - name: Userdata image or the measured disk blocker
+        if: always() && steps.kernel.outcome == 'success'
+        run: |
+          set -euo pipefail
+          echo "=== df before userdata ==="
+          df -h | tee df-before-userdata.txt
+          python3 - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          usage = shutil.disk_usage('.')
+          # OS AEA 5.9 GiB plus its decrypt must both exist for a moment: about 11.8 GiB.
+          need = 11_800_000_000
+          record = {
+              'free_bytes': usage.free,
+              'need_bytes_for_os_aea_plus_decrypt': need,
+              'fits': usage.free >= need,
+          }
+          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print(json.dumps(record, indent=2))
+          if usage.free < need:
+              raise SystemExit(
+                  'userdata image was not started: free space '
+                  f'{usage.free} bytes is below the {need} bytes needed to hold '
+                  '094-32804-038.dmg.aea and its decrypt at the same time. '
+                  'No truncated image was written.'
+              )
+          print('free space can hold the OS AEA and its decrypt; extracting those members')
+          PY
+          export PONG_INPUTS="$(cat ci-pong-inputs.txt)"
+          export PONG_DEVELOPER_DIR="$(cat ci-developer-dir.txt)"
+          export PONG_VOLUME_LAYOUT="$(cat ci-pong-work.txt)/build/volume-layout.json"
+          python3 scripts/prepare-ipados18-components.py --remote \
+            --output-dir "${PONG_INPUTS}/22H374" \
+            --only OS --only Cryptex1,SystemOS --only Cryptex1,AppOS
+          OS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg.aea' -print -quit)"
+          SYS_AEA="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg.aea' -print -quit)"
+          test -n "$OS_AEA"
+          test -n "$SYS_AEA"
+          python3 scripts/decrypt-ipados18-aea.py --input "$OS_AEA" --output "${OS_AEA%.aea}"
+          rm -f "$OS_AEA"
+          echo "=== df after OS decrypt ==="
+          df -h | tee df-after-os-decrypt.txt
+          python3 scripts/decrypt-ipados18-aea.py --input "$SYS_AEA" --output "${SYS_AEA%.aea}"
+          rm -f "$SYS_AEA"
+          echo "=== df after SystemOS decrypt ==="
+          df -h | tee df-after-systemos-decrypt.txt
+          echo "Decrypted OS and SystemOS. Searching the mounted images for 22H374 roots."
+          find "${PONG_INPUTS}/22H374/components" -type f -exec ls -l {} \;
+          OS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-32804-038.dmg' -print -quit)"
+          SYS_DMG="$(find "${PONG_INPUTS}/22H374/components" -name '094-33089-038.dmg' -print -quit)"
+          mkdir -p "${PONG_INPUTS}/mount/os" "${PONG_INPUTS}/mount/systemos"
+          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/os" "$OS_DMG"
+          hdiutil attach -nobrowse -readonly -mountpoint "${PONG_INPUTS}/mount/systemos" "$SYS_DMG"
+          find "${PONG_INPUTS}/mount" -name SystemVersion.plist -print
+          if [ ! -f out/ipados18/ufs/shngroot-ipados18.bin ]; then
+            echo "SHNGROOT header was not produced. The decrypted images stayed on the runner and were not uploaded."
+            exit 1
+          fi
+      - name: Write manifest
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          def read(name):
+              path = Path(name)
+              return path.read_text() if path.is_file() else None
+          def load(name):
+              path = Path(name)
+              return json.loads(path.read_text()) if path.is_file() else None
+          doc = {
+              'firmware_path': (read('ci-firmware-path.txt') or '').strip(),
+              'defconfig': (read('ci-defconfig-name.txt') or '').strip(),
+              'paths': read('ci-paths.txt'),
+              'df_before': read('df-before.txt'),
+              'df_after_reclaim': read('df-after.txt'),
+              'df_after_kernelcache': read('df-after-kernelcache.txt'),
+              'df_after_kernel': read('df-after-kernel.txt'),
+              'df_after_boot': read('df-after-boot.txt'),
+              'df_before_userdata': read('df-before-userdata.txt'),
+              'boot': load('boot-decision.json'),
+              'userdata': load('userdata-decision.json'),
+          }
+          Path('ci-manifest.json').write_text(json.dumps(doc, indent=2) + '\n')
+          PY
+          mkdir -p ci-logs
+          cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json ci-logs/ 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kernel-ci-log
+          retention-days: 1
+          path: ci-logs/
+          if-no-files-found: warn

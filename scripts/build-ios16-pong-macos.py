@@ -19,6 +19,8 @@ import sys
 import tomllib
 
 DEVICE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
 PROFILE = 'Pong-iOS16-heartbeat-single-core-20261021'
 
 
@@ -71,11 +73,11 @@ def audit_kernel(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-tree', type=Path,
-                        default=Path('/Volumes/PongDev/build/UniXNU-XNU-iOS16/pong/tree'))
+                        default=pong_paths.build_tree(name='UniXNU-XNU-iOS16/pong'))
     parser.add_argument('--tree', type=Path,
-                        default=Path('/Volumes/PongDev/build/Pong-iOS16-native/tree'))
+                        default=pong_paths.build_tree(name='Pong-iOS16-native'))
     parser.add_argument('--developer-dir', type=Path,
-                        default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+                        default=pong_paths.developer_dir())
     parser.add_argument('--jobs', type=int, default=4)
     parser.add_argument('--artifact-dir', type=Path,
                         help='export this development build separately from the known bootable kernel')
@@ -124,7 +126,8 @@ def main():
         (tree / name).mkdir(exist_ok=True)
 
     env = {k: v for k, v in os.environ.items() if not k.startswith(('XNU_', 'UNIXNU_'))}
-    env['PATH'] = str(Path(sys.executable).parent) + ':/opt/local/bin:/opt/local/sbin:' + env.get('PATH', '')
+    env['PATH'] = pong_paths.path_with(Path(sys.executable).parent,
+        *(['/opt/local/bin', '/opt/local/sbin'] if pong_paths.macports() else []))
     env['DEVELOPER_DIR'] = str(args.developer_dir)
     env['JOBS'] = str(args.jobs)
     env['PONG_NATIVE_DRIVER_SOURCE'] = str(DEVICE)

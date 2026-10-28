@@ -7,16 +7,19 @@ import os
 from pathlib import Path
 import platform
 import subprocess
+import sys
 
 DEVICE = Path(__file__).resolve().parents[1]
-TREE = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree')
-DEVELOPER = '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
+TREE = pong_paths.build_tree(name='Pong-iOS16-native')
+DEVELOPER = pong_paths.developer_dir()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=TREE)
-    parser.add_argument('--developer-dir', type=Path, default=Path(DEVELOPER))
+    parser.add_argument('--developer-dir', type=Path, default=DEVELOPER)
     parser.add_argument('--skip-image-verification', action='store_true')
     args = parser.parse_args()
     tree = args.tree.resolve()

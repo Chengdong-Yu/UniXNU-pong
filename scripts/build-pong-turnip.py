@@ -10,8 +10,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 
 
 def main():
@@ -22,8 +25,7 @@ def main():
     p.add_argument('--venv', type=Path, required=True)
     p.add_argument('--output-dir', type=Path, required=True)
     p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
-    p.add_argument('--developer-dir', type=Path, default=Path(
-        '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+    p.add_argument('--developer-dir', type=Path, default=pong_paths.developer_dir())
     a = p.parse_args()
     backend = a.mesa / 'src/freedreno/vulkan/tu_knl_darwin.cc'
     if 'MIN2(tu_get_system_heap_size(device), info->va_size)' not in backend.read_text():
@@ -43,9 +45,8 @@ def main():
     minimum='18.0' if a.guest_build=='22H374' else '16.6.1'
     env = dict(os.environ, DEVELOPER_DIR=str(a.developer_dir),
                IPHONEOS_DEPLOYMENT_TARGET=minimum)
-    env['PATH'] = ':'.join([str(a.tools_directory), str(a.venv/'bin'),
-        '/Users/desktop/Downloads/Minecraft-Zink-NVK/build-tools/bin',
-        '/opt/local/bin', env['PATH']])
+    env['PATH'] = pong_paths.path_with(a.tools_directory, a.venv / 'bin', pong_paths.extra_path(),
+        *(['/opt/local/bin'] if pong_paths.macports() else []))
     # Do not inherit another Vulkan/IR3 build's diagnostic or compiler knobs.
     for key in list(env):
         if key.startswith(('IR3_', 'FD_MESA_', 'NIR_', 'MESA_SHADER_', 'TU_')):
@@ -92,7 +93,7 @@ def main():
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise SystemExit('Turnip configure failed: '+str(out/'configure.log'))
-    build = ['/opt/local/bin/ninja', '-C', str(out), '-j6']
+    build = [pong_paths.tool('ninja', 'PONG_NINJA', ('/opt/local/bin/ninja',)), '-C', str(out), '-j6']
     with (out/'build.log').open('w') as log:
         result = subprocess.run(build, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:

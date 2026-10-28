@@ -4,16 +4,18 @@
 Firmware is read from the user's local recovery extraction, embedded only in
 ignored build output, never committed here. No images are hashed/read back.
 """
-import argparse,importlib.util,json,os,struct,subprocess
+import argparse,importlib.util,json,os,struct,subprocess,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 def main():
  p=argparse.ArgumentParser(description=__doc__)
  p.add_argument('--tree',type=Path,required=True)
- p.add_argument('--ath11k',type=Path,default=Path('/Volumes/Untitled/Pong-iPadOS18/wifi-ath11k-build/libPongAth11k.a'))
- p.add_argument('--firmware',type=Path,default=Path('/Volumes/Untitled/Pong-iPadOS18/pong-wifi-firmware'))
+ p.add_argument('--ath11k',type=Path,default=pong_paths.wifi_build()/'libPongAth11k.a')
+ p.add_argument('--firmware',type=Path,default=pong_paths.wifi_firmware())
  a=p.parse_args();out=a.tree/'build/pong-wifi';out.mkdir(parents=True,exist_ok=True)
- shared=Path('/Volumes/PongDev/upstream/UniXNU-sheng')
+ shared=pong_paths.sheng_root()
  profile=json.loads((ROOT/'configs/pong-wifi-sm8475.json').read_text())
  if profile['soc']!='SM8475' or profile['pci']['device']!=0x1103:raise RuntimeError('Pong QCA6490 profile required')
  hardware=os.environ.get('PONG_HARDWARE_DTB')
@@ -74,7 +76,7 @@ def main():
    f.seek(off);f.write(path.read_bytes())
  asm=out/'PongWifiFirmware.s';asm.write_text('.section __TEXT,__const\n.p2align 12\n.globl _pong_wifi_firmware\n_pong_wifi_firmware:\n.incbin "'+str(pack)+'"\n.globl _pong_wifi_firmware_end\n_pong_wifi_firmware_end:\n')
  framework=a.tree/'.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
- env=dict(os.environ,DEVELOPER_DIR='/Volumes/PongDev/Applications/Xcode.app/Contents/Developer')
+ env=dict(os.environ,DEVELOPER_DIR=str(pong_paths.developer_dir()))
  sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
  flags=['-target','arm64-apple-ios18.0','-isysroot',sdk,'-mkernel','-ffreestanding','-fno-builtin','-fno-exceptions','-fno-rtti','-fno-stack-protector','-mgeneral-regs-only','-std=gnu++17','-fblocks','-O2','-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_PONG=1','-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),'-I'+str(shared/'drivers/Ath12kWifi/include'),'-I'+str(shared/'package'),'-I'+str(out),'-Wno-deprecated-declarations']
  objects=[]

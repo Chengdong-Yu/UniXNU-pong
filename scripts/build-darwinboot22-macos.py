@@ -11,15 +11,16 @@ import subprocess
 import sys
 
 DEVICE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--edk2', type=Path, default=Path('/Volumes/PongDev/source/Mu_Basecore'))
-    parser.add_argument('--package', type=Path, default=Path(
-        '/Users/desktop/Desktop/Pong-Mac-Handoff/workspace/UniXNU/package'))
-    parser.add_argument('--output-dir', type=Path, default=Path('/Volumes/PongDev/build/Pong-DarwinBoot22'))
-    parser.add_argument('--llvm', type=Path, default=Path('/opt/local/libexec/llvm-18/bin'))
+    parser.add_argument('--edk2', type=Path, default=pong_paths.mu_basecore())
+    parser.add_argument('--package', type=Path, default=pong_paths.unixnu_package())
+    parser.add_argument('--output-dir', type=Path, default=pong_paths.work_root() / 'build/Pong-DarwinBoot22')
+    parser.add_argument('--llvm', type=Path, default=pong_paths.llvm_toolchain())
     args = parser.parse_args()
     source = DEVICE / 'drivers/DarwinBoot22'
     workspace = args.output_dir.resolve()
@@ -38,7 +39,7 @@ def main():
                CLANG_BIN=str(args.llvm) + '/', SOURCE_DATE_EPOCH='1792454400')
     env['PATH'] = os.pathsep.join(map(str, (Path(sys.executable).parent,
         tools / 'BinWrappers/PosixLike', tools / 'Source/C/bin', args.llvm,
-        '/opt/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin')))
+        *(['/opt/local/bin'] if pong_paths.macports() else []), '/usr/bin', '/bin', '/usr/sbin', '/sbin')))
     command = [str(tools / 'BinWrappers/PosixLike/build'),
                '-p', str(source / 'DarwinBootPkg/DarwinBoot.dsc'),
                '-a', 'AARCH64', '-b', 'RELEASE', '-t', 'CLANGPDB', '-n', '2']

@@ -8,10 +8,13 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 
 DEVICE = Path(__file__).resolve().parents[1]
-DEFAULT_TREE = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree')
-DEVELOPER = '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
+DEFAULT_TREE = pong_paths.build_tree(name='Pong-iOS16-native')
+DEVELOPER = pong_paths.developer_dir()
 
 
 def main():

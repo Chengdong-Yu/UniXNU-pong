@@ -10,15 +10,18 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+import pong_paths
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--tree', type=Path, default=Path('/Volumes/PongDev/build/Pong-iPadOS18-native/tree'))
+    p.add_argument('--tree', type=Path, default=pong_paths.build_tree())
     p.add_argument('--output-dir', type=Path, required=True)
-    p.add_argument('--developer-dir', type=Path, default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+    p.add_argument('--developer-dir', type=Path, default=pong_paths.developer_dir())
     a = p.parse_args(); out = a.output_dir.resolve(); out.mkdir(parents=True, exist_ok=True)
     profile = json.loads((ROOT / 'configs/pong-wifi-sm8475.json').read_text())
     if profile['soc'] != 'SM8475' or profile['pci']['device'] != 0x1103 or profile['driver_family'] != 'ath11k':

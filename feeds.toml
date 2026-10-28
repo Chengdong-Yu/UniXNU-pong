@@ -32,6 +32,15 @@ git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
 ref = "AvailabilityVersions-143.7"
 commit = "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f"
 
+# Annotated tag IOStorageFamily-323 is de8da905f97cd719b666b6af44f17c0f31fd011e.
+# git rev-parse HEAD on a checkout of that tag is the peeled commit below.
+[[source]]
+name = "IOStorageFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
+ref = "IOStorageFamily-323"
+commit = "1b96f8f04b9dff4dc0277ac43625bf694e62c5aa"
+
 # SM8475 public source is pinned independently within this repository.
 [[source]]
 name = "sm8475"

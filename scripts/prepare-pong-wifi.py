@@ -10,6 +10,11 @@ import json
 from pathlib import Path
 import struct
 import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+import pong_paths
 
 
 def fdt_nodes(data):
@@ -136,7 +141,7 @@ def describe(data, pci):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--adb', type=Path, default=Path('/Volumes/PongDev/tools/platform-tools/adb'))
+    p.add_argument('--adb', type=Path, default=pong_paths.adb())
     p.add_argument('--port', type=int, default=5038)
     p.add_argument('--serial', required=True)
     p.add_argument('--out', type=Path, required=True)

@@ -19,6 +19,8 @@ from pong_adt_contract import audit_adt
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
 
 
 def main():
@@ -27,7 +29,7 @@ def main():
     parser.add_argument('--kernel', type=Path, default=DEVICE / 'out/ipados18/kernel/mach.development.pong')
     parser.add_argument('--result', type=Path, default=DEVICE / 'out/ipados18/kernel/PONG_BUILD_RESULT.json')
     parser.add_argument('--loader', type=Path, default=DEVICE / 'mac-build/darwinboot24/DarwinBoot24.efi')
-    parser.add_argument('--template', type=Path, default=Path('/Volumes/PongDev/handoffs/Pong-iOS16-Mac-Next-20261020/images/pong-window-vectors.img'))
+    parser.add_argument('--template', type=Path, default=pong_paths.boot_template())
     parser.add_argument('--output-dir', type=Path, default=DEVICE / 'out/ipados18/boot')
     parser.add_argument('--fat-mib', type=int, default=32)
     parser.add_argument('--window-size', type=lambda value: int(value, 0), default=0x10000000,

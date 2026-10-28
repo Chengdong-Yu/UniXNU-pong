@@ -8,13 +8,16 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--translator',required=True,type=Path)
 p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
 p.add_argument('--output-dir',required=True,type=Path)
-p.add_argument('--developer-dir',type=Path,default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+p.add_argument('--developer-dir',type=Path,default=pong_paths.developer_dir())
 a=p.parse_args();out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
 policy=a.translator/'crates/metal2vulkan-runtime/src/metal_level.rs'
 if 'IOS16_6_1' not in policy.read_text():
@@ -62,7 +65,7 @@ manifest.write_text('\n'.join([
     'metal2vulkan-runtime={path='+json.dumps(str(a.translator/'crates/metal2vulkan-runtime'))+'}',
     'libc="0.2"','[profile.release]','panic="unwind"','debug=0','',
 ]))
-env['PATH']='/Users/desktop/.cargo/bin:'+env['PATH']
+env['PATH']=os.pathsep.join(p for p in (str(Path.home()/'.cargo/bin'), pong_paths.extra_path(), env['PATH']) if p)
 env['SDKROOT']=sdk
 env['RUSTFLAGS']='-C link-arg=-miphoneos-version-min='+minimum
 cargo=['cargo','build','--release','--manifest-path',str(manifest),

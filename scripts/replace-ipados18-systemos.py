@@ -3,11 +3,15 @@
 import argparse,json,os,struct,subprocess,zlib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];MIB=1<<20
+import sys
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--layout',type=Path,default=ROOT/'out/ipados18/ufs/ufs-layout.json')
 p.add_argument('--old-installation',type=Path,default=ROOT/'out/ipados18/install/installation.json')
 p.add_argument('--boot-image',type=Path,required=True)
 p.add_argument('--serial',required=True);p.add_argument('--port',type=int,default=5038)
+p.add_argument('--adb',type=Path,default=pong_paths.adb())
 p.add_argument('--output-dir',type=Path,default=ROOT/'out/ipados18/install-systemos4')
 p.add_argument('--stream-compression',choices=('none','gzip'),default='none',help='compress only the USB stream; leave the installed filesystem uncompressed')
 p.add_argument('--resume',action='store_true');a=p.parse_args()
@@ -24,7 +28,7 @@ delta=dst['offset']-src['offset']
 if delta<0 or 0<delta<64*MIB:raise SystemExit('Keep Data in place or relocate it higher by at least 64 MiB')
 if any(w['offset']%MIB or w['size']%4096 for w in new['windows']):raise SystemExit('Unaligned layout')
 if Path(system['image']).stat().st_size!=system['size']:raise SystemExit('SystemOS input size changed')
-cmd=['/Volumes/PongDev/tools/platform-tools/adb','-P',str(a.port),'-s',a.serial]
+cmd=[str(a.adb),'-P',str(a.port),'-s',a.serial]
 def run(args,**kw):return subprocess.run(args,check=True,**kw)
 def shell(s):return run(cmd+['shell',s],capture_output=True,text=True).stdout.strip()
 if run(cmd+['get-state'],capture_output=True,text=True).stdout.strip()!='recovery':raise SystemExit('Enter recovery first')
