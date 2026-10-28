@@ -35,7 +35,7 @@ for g in m['segments']:
 methods=[]
 while vt+16+len(methods)*8 in rel:methods.append(rel[vt+16+len(methods)*8])
 if not 150<len(methods)<256:raise SystemExit('Unexpected public storage vtable size')
-b=a.kernel.read_bytes();m=np.macho(b);ex=np.exports(b,m);known={n:v for v,ns in ex.items() for n in ns}
+b=np.arm64_image(a.kernel.read_bytes());m=np.macho(b);ex=np.exports(b,m);known={n:v for v,ns in ex.items() for n in ns}
 s=next(s for g in m['segments'] for s in g['sections'] if s['name']=='__info')
 info=np.unserialize_xml(b[s['fileoff']:s['fileoff']+s['size']].rstrip(b'\0'))
 e=next(e for e in info['_PrelinkInfoDictionary'] if e.get('CFBundleIdentifier')=='com.apple.iokit.IOStorageFamily')

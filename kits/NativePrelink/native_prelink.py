@@ -11,6 +11,27 @@ import struct
 import xml.etree.ElementTree as ET
 
 
+def arm64_image(data):
+    """Return the ordinary little-endian ARM64 Mach-O from a thin or fat image.
+
+    The 22H374 kernelcache is a cafebabe universal file. Its ARM64 slice is the
+    image the prelink and storage parsers read; file offsets in that slice are
+    relative to the slice, so callers must parse these bytes rather than the
+    fat container.
+    """
+    if len(data) >= 8 and struct.unpack_from('>I', data)[0] in (0xCAFEBABE, 0xCAFEBABF):
+        count = struct.unpack_from('>I', data, 4)[0]
+        for index in range(count):
+            cpu, subtype, offset, size, _align = struct.unpack_from('>5I', data, 8 + index * 20)
+            if cpu == 0x0100000C and (subtype & 0x00FFFFFF) == 0:
+                end = offset + size
+                if end > len(data):
+                    raise ValueError('ARM64 slice extends past the fat image')
+                return data[offset:end]
+        raise ValueError('Fat Mach-O has no ordinary ARM64 slice')
+    return data
+
+
 def macho(data, at=0):
     if at < 0 or at + 32 > len(data):
         raise ValueError('Mach-O header outside image')

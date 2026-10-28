@@ -28,7 +28,7 @@ def main():
  if active.exists():
   current=json.loads(active.read_text())
   if not current.get('build_complete') or current.get('log')!=report.get('log'):raise SystemExit('Kernel build/export still pending; package after the current build completes')
- native=(a.artifact_dir/'mach.development.pong').read_bytes();original=a.original.read_bytes();m=macho(original)
+ native=(a.artifact_dir/'mach.development.pong').read_bytes();original=arm64_image(a.original.read_bytes());m=macho(original)
  bindings=json.loads((ROOT/'mac-build/native-ufs/bindings.json').read_text())
  if bindings['build']!='22H374':raise SystemExit('Storage imports belong to another restore')
  base=min(s['va'] for s in m['segments'] if s['name'] in COALESCED and s['size']);slide=int(bindings['fixed_prelink_base'],16)-base
