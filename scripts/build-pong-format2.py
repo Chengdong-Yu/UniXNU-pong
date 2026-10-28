@@ -16,13 +16,15 @@ def main():
     p.add_argument('--out', type=Path, default=ROOT / 'out')
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--prepare-only', action='store_true')
+    p.add_argument('--defconfig', default='pong_ipados18_defconfig',
+                   help='configs/<name> selected before the kernel build')
     a = p.parse_args(); up=a.unixnu.resolve(); out=a.out.resolve()
     spec=importlib.util.spec_from_file_location('pong_format2',ROOT/'scripts/migrate-pong-format2.py')
     migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
     state=migration.install(up, ROOT.parent/'UniXNU-sm8475-common')
     command=[sys.executable,str(up/'unixnu')]
     common=['-D',str(ROOT),'--out',str(out)]
-    subprocess.run(command+['defconfig','pong_ipados18_defconfig',*common],cwd=up,check=True)
+    subprocess.run(command+['defconfig', a.defconfig, *common],cwd=up,check=True)
     report=json.loads(subprocess.check_output(command+['status','--json',*common],cwd=up,text=True))
     work=Path(report['output']);work.mkdir(parents=True,exist_ok=True)
     (work/'resolved-profile.json').write_text(json.dumps(report,indent=2)+'\n')

@@ -3,6 +3,8 @@
 import argparse, datetime, json, os, shutil, subprocess, sys, tomllib
 from pathlib import Path
 DEVICE=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(DEVICE/'scripts'))
+import pong_paths
 
 def link(src,dst):
     src=src.resolve()
@@ -12,12 +14,12 @@ def link(src,dst):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--tree',type=Path,default=Path('/Volumes/PongDev/build/Pong-iPadOS18-native/tree'))
-    p.add_argument('--developer-dir',type=Path,default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+    p.add_argument('--tree',type=Path,default=pong_paths.build_tree())
+    p.add_argument('--developer-dir',type=Path,default=pong_paths.developer_dir())
     p.add_argument('--artifact-dir',type=Path,default=DEVICE/'out/ipados18/kernel')
     p.add_argument('--jobs',type=int,default=4)
     p.add_argument('--debug-symbols',action='store_true',help='also generate the large DWARF dSYM; ordinary kernel symbols are always retained')
-    p.add_argument('--volume-layout',type=Path,default=Path('/Volumes/PongDev/build/Pong-iPadOS18-inputs/volume-layout.json'))
+    p.add_argument('--volume-layout',type=Path,default=pong_paths.volume_layout())
     p.add_argument('--prepare-only',action='store_true')
     p.add_argument('--config-path',type=Path,help='resolved format2 configuration')
     p.add_argument('--hardware-dtb',type=Path,help='compiled format2 SM8475/Pong hardware description')
@@ -43,14 +45,19 @@ def main():
     if a.hardware_dtb:env['PONG_HARDWARE_DTB']=str(a.hardware_dtb.resolve())
     tools=tree/'.tools';tools.mkdir(exist_ok=True)
     link(Path(sys.executable),tools/'python3')
-    env['PATH']=str(tools)+':/opt/local/bin:/opt/local/sbin:'+env.get('PATH','')
+    env['PATH']=pong_paths.path_with(tools, *(['/opt/local/bin','/opt/local/sbin'] if pong_paths.macports() else []))
     gh=shutil.which('gh',path=env['PATH'])
     if gh:
         credential=subprocess.run([gh,'auth','token'],capture_output=True,text=True)
         if credential.returncode==0:env['GH_TOKEN']=credential.stdout.strip()
     prefixes={'xnu':'XNU','libplatform':'LIBPLATFORM','libdispatch':'LIBDISPATCH','AvailabilityVersions':'AVAILABILITYVERSIONS'}
     for ref in refs:
-        prefix=prefixes[ref['name']];env['UNIXNU_'+prefix+'_TAG']=ref['ref'];env['UNIXNU_'+prefix+'_COMMIT']=ref['commit']
+        # Header-only refer pins (IOStorageFamily) are checked out and
+        # revision-checked above. They are not XNU build env vars.
+        prefix=prefixes.get(ref['name'])
+        if not prefix:
+            continue
+        env['UNIXNU_'+prefix+'_TAG']=ref['ref'];env['UNIXNU_'+prefix+'_COMMIT']=ref['commit']
         if ref['name']=='xnu':
             for key in ('darwin','version','driverkit_tag','trustcache_tag'):env['UNIXNU_'+('XNU_'+key if key in ('darwin','version') else key).upper()]=ref[key]
     config_path=a.config_path or DEVICE/'configs/pong_ipados18_defconfig'

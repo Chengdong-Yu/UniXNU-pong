@@ -7,15 +7,18 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--bridge-directory',type=Path,required=True)
 p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
 p.add_argument('--turnip-library',type=Path,required=True)
 p.add_argument('--output-dir',type=Path,required=True)
 p.add_argument('--clients',help='comma-separated process names, or * for system-wide native discovery')
-p.add_argument('--developer-dir',type=Path,default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+p.add_argument('--developer-dir',type=Path,default=pong_paths.developer_dir())
 a=p.parse_args()
 # The upstream catalog separates hardware support from the selected OS ABI.
 # Do not link a 22H374 discovery bundle against a cached 20G81 object bridge.

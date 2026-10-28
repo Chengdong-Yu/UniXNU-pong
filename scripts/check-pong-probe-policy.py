@@ -5,10 +5,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 DEVICE = Path(__file__).resolve().parents[1]
-SOURCE = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree/.cache/xnu-work/osfmk/arm64/pong_early_trace.h')
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
+SOURCE = pong_paths.xnu_work(pong_paths.build_tree(name='Pong-iOS16-native')) / 'osfmk/arm64/pong_early_trace.h'
 
 
 def main():
@@ -65,7 +68,7 @@ int main(void) {
     return 0;
 }
 '''
-    env = dict(os.environ, DEVELOPER_DIR='/Volumes/PongDev/Applications/Xcode.app/Contents/Developer')
+    env = dict(os.environ, DEVELOPER_DIR=str(pong_paths.developer_dir()))
     with tempfile.TemporaryDirectory(prefix='pong-probe-policy-') as scratch:
         path = Path(scratch)
         (path / 'journal.c').write_text(harness)

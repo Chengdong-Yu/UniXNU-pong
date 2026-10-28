@@ -16,6 +16,8 @@ import sys
 import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 DEVICE = Path(__file__).resolve().parents[1]
 BASE = 0xfffffff007004000
 
@@ -38,8 +40,7 @@ def main():
     parser.add_argument('--template', type=Path, default=ROOT / 'images/pong-window-vectors.img')
     parser.add_argument('--audit', type=Path, default=ROOT / 'evidence/returned-kernel-audit.json')
     parser.add_argument('--darwin22-loader', type=Path, help='Test the new Darwin 22 loader and boot_args layout')
-    parser.add_argument('--driver-dir', type=Path, default=Path(
-        '/Volumes/PongDev/build/UniXNU-XNU-iOS16/pong/tree/drivers/DarwinBoot/DarwinBootPkg/Driver'))
+    parser.add_argument('--driver-dir', type=Path, default=pong_paths.build_tree(name='UniXNU-XNU-iOS16/pong') / 'drivers/DarwinBoot/DarwinBootPkg/Driver')
     args = parser.parse_args()
     out = args.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)

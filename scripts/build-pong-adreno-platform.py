@@ -11,8 +11,11 @@ from pathlib import Path
 import re
 import subprocess
 import struct
+import sys
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -20,11 +23,10 @@ def main():
         help='regenerate hardware facts from the matching vendor gen7_reg.h')
     p.add_argument('--output-dir',required=True,type=Path)
     p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
-    p.add_argument('--tree',type=Path,default=Path('/Volumes/PongDev/build/Pong-iOS16-v45-high-scratch/tree'))
+    p.add_argument('--tree',type=Path,default=pong_paths.build_tree(name='Pong-iOS16-v45-high-scratch'))
     p.add_argument('--firmware-dir',type=Path,
         help='local REC-extracted Adreno730 firmware; defaults to this guest branch output')
-    p.add_argument('--developer-dir',type=Path,
-        default=Path('/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'))
+    p.add_argument('--developer-dir',type=Path,default=pong_paths.developer_dir())
     a=p.parse_args();out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     if a.firmware_dir is None:
         a.firmware_dir=ROOT/('out/ipados18' if a.guest_build=='22H374' else 'out')/'firmware/adreno730'

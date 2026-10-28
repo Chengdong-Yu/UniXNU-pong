@@ -12,6 +12,9 @@ commit = "934ff27e48ab7a6ee799442c5f19ebbb990567e8"
 [source."AvailabilityVersions"]
 commit = "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f"
 
+[source."IOStorageFamily"]
+commit = "1b96f8f04b9dff4dc0277ac43625bf694e62c5aa"
+
 [source."sm8475"]
 commit = "f62243e56a30472deed9112631b2480ab461df3e"
 

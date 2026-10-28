@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Read-only Pong inventory for the XNU/iPadOS port; never boots or flashes."""
 import json
+import os
+import shutil
 from pathlib import Path
 import re
 import struct
@@ -8,6 +10,20 @@ import subprocess
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_fastboot():
+    """fastboot from the environment, then the Android SDK, then PATH."""
+    configured = os.environ.get('PONG_FASTBOOT')
+    if configured:
+        return Path(configured)
+    for base in (os.environ.get('ANDROID_SDK_ROOT'), os.environ.get('ANDROID_HOME')):
+        if base:
+            candidate = Path(base) / 'platform-tools' / 'fastboot'
+            if candidate.is_file() or candidate.with_suffix('.exe').is_file():
+                return candidate
+    located = shutil.which('fastboot')
+    return Path(located) if located else None
 
 
 def fdt_nodes(path):
@@ -75,9 +91,9 @@ def main():
     sec = (uefi / 'Silicon/Silicium/SiliciumPkg/Sec/Sec.c').read_text()
     entry = (uefi / 'Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S').read_text()
     dsc = (uefi / 'Platforms/Nothing/pongPkg/pong.dsc').read_text()
-    fastboot = Path('C:/Users/desktop/AppData/Local/Android/Sdk/platform-tools/fastboot.exe')
+    fastboot = resolve_fastboot()
     variables = {}
-    if fastboot.is_file():
+    if fastboot and fastboot.is_file():
         for name in ('product', 'current-slot', 'unlocked', 'partition-size:userdata',
                      'partition-type:userdata', 'partition-size:boot_b', 'max-download-size'):
             try:

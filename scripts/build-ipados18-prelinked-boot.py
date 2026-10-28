@@ -3,7 +3,9 @@
 import argparse,json,os,subprocess,sys,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
 sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+import pong_paths
 from emit_prelink import emit,COALESCED
 from native_prelink import macho,plan
 
@@ -11,7 +13,7 @@ def main():
  p=argparse.ArgumentParser(description=__doc__)
  p.add_argument('--artifact-dir',type=Path,default=ROOT/'out/ipados18/kernel')
  p.add_argument('--original',type=Path,default=ROOT/'apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed')
- p.add_argument('--volume-layout',type=Path,default=Path('/Volumes/PongDev/build/Pong-iPadOS18-inputs/volume-layout.json'))
+ p.add_argument('--volume-layout',type=Path,default=pong_paths.volume_layout())
  p.add_argument('--output-dir',type=Path,required=True)
  p.add_argument('--cpus',type=int,choices=range(1,9),default=8,
                 help='actual Pong CPU nodes; use --cpus 1 for isolated bring-up')

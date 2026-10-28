@@ -15,6 +15,39 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def restore_source(out, args, remote):
+    """Resolve which restore a run reads.
+
+    A local --ipsw names its own file, so it never needs download metadata. The
+    remote path reads whichever checkpoint the download step published: the
+    explicit download-source.json when one was written, else the progress file
+    that download-ipados18-restore.py maintains, else the pinned restore that
+    script already knows about. Previously only download-source.json was read,
+    and nothing in this repository ever wrote it.
+    """
+    if not remote:
+        return dict(url='file: ' + str(Path(args.ipsw).resolve()), size=Path(args.ipsw).stat().st_size)
+    if args.url:
+        if not args.size:
+            raise SystemExit('--url also needs --size so ranges can be bounded')
+        return dict(url=args.url, size=args.size)
+    explicit = out / 'download-source.json'
+    if explicit.is_file():
+        declared = json.loads(explicit.read_text())
+        return dict(url=declared['url'], size=declared.get('expected_download_bytes') or declared.get('bytes'))
+    progress = out / 'download-progress.json'
+    if progress.is_file():
+        state = json.loads(progress.read_text())
+        if state.get('state') != 'downloaded':
+            raise SystemExit('the restore download has not finished; run --remote after it completes '
+                             'or extract a component with download-ipados18-restore.py first')
+        return dict(url=state['url'], size=state['bytes'])
+    spec = importlib.util.spec_from_file_location('restore_download', ROOT / 'scripts/download-ipados18-restore.py')
+    pinned = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pinned)
+    return dict(url=pinned.URL, size=pinned.SIZE)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -22,17 +55,19 @@ def main():
     source.add_argument('--remote', action='store_true')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--only', action='append', default=[])
+    parser.add_argument('--url', help='restore URL for --remote; defaults to the pinned Apple restore')
+    parser.add_argument('--size', type=int, help='restore byte length for --remote')
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location('restore_reader', ROOT / 'scripts/fetch-ios16-assets.py')
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)
     out = args.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    origin = json.loads((out / 'download-source.json').read_text())
+    origin = restore_source(out, args, remote=args.remote)
     class CurlRangeFile(reader.RangeFile):
         def __init__(self):
             self.url = origin['url']
-            self.size = origin['expected_download_bytes']
+            self.size = origin['size']
             self.position = 0
             self.blocks = {}
 

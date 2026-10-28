@@ -6,6 +6,7 @@ The driver is not replaced by success stubs. Missing core symbols fail the
 link recipe; power/DMA/MSI remain the consuming Pong board's responsibility.
 """
 import argparse
+import sys
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -14,12 +15,14 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--linux', type=Path, required=True)
-    p.add_argument('--shared', type=Path, default=Path('/Volumes/PongDev/upstream/UniXNU-sheng/drivers/Ath12kWifi'))
+    p.add_argument('--shared', type=Path, default=pong_paths.sheng_root()/'drivers/Ath12kWifi')
     p.add_argument('--output-dir', type=Path, required=True)
     p.add_argument('--jobs', type=int, default=4)
     a = p.parse_args(); linux = a.linux.resolve(); shared = a.shared.resolve(); out = a.output_dir.resolve()
@@ -105,7 +108,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     common = out / 'common.h'
     if common.exists() or common.is_symlink(): common.unlink()
     common.symlink_to(linux / 'drivers/bus/mhi/common.h')
-    env = dict(os.environ, DEVELOPER_DIR='/Volumes/PongDev/Applications/Xcode.app/Contents/Developer')
+    env = dict(os.environ, DEVELOPER_DIR=str(pong_paths.developer_dir()))
     clang = subprocess.check_output(['xcrun', '-f', 'clang'], env=env, text=True).strip()
     resource = subprocess.check_output([clang, '-print-resource-dir'], text=True).strip() + '/include'
     overlay = ROOT / 'drivers/PongWifi/ath11k/compat'
@@ -145,7 +148,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     archive = out / 'libPongAth11k.a'
     linked = out / 'ath11k-combined.o'
     subprocess.run(['xcrun', 'ld', '-r', '-arch', 'arm64', *[str(o) for _, o, _ in jobs], '-o', str(linked)], env=env, check=True)
-    nm = '/opt/local/bin/llvm-nm-mp-18'
+    nm = pong_paths.tool('llvm-nm', 'PONG_LLVM_NM', ('/opt/local/bin/llvm-nm-mp-18',))
     undefined = subprocess.check_output([nm, '-u', '-j', str(linked)], text=True).splitlines()
     (out / 'undefined-symbols.txt').write_text('\n'.join(undefined) + '\n')
     allowed = {'_PongWifiRandom','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
@@ -157,7 +160,9 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     renames = {n: '_pong11_' + n[1:] for n in defined if not n.startswith('_nw_wifi_') and n not in exports}
     mapping = out / 'symbol-map.txt'; mapping.write_text(''.join(k + ' ' + v + '\n' for k, v in renames.items()))
     namespaced = out / 'PongAth11k-linked.o'
-    subprocess.run(['/opt/local/bin/llvm-objcopy-mp-18', '--redefine-syms=' + str(mapping), str(linked), str(namespaced)], check=True)
+    subprocess.run([pong_paths.tool('llvm-objcopy', 'PONG_LLVM_OBJCOPY',
+                                    ('/opt/local/bin/llvm-objcopy-mp-18',)),
+                    '--redefine-syms=' + str(mapping), str(linked), str(namespaced)], check=True)
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), str(namespaced)], env=env, check=True)
     (out / 'build-report.json').write_text(json.dumps(dict(linux='v7.0.14', shared=str(shared),

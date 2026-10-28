@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Write prepared iPadOS18 windows in REC, committing SHNGROOT last. No readback."""
 import argparse,json,os,struct,subprocess,sys,zlib
+import sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 sys.path.insert(0,str(ROOT/'tools'))
 from sparsebundle import LogicalImage,snapshot,storage_for
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--layout',type=Path,default=ROOT/'out/ipados18/ufs/ufs-layout.json')
 p.add_argument('--boot-image',type=Path,required=True)
-p.add_argument('--adb',type=Path,default=Path('/Volumes/PongDev/tools/platform-tools/adb'))
+p.add_argument('--adb',type=Path,default=pong_paths.adb())
 p.add_argument('--serial',required=True);p.add_argument('--port',type=int,default=5038)
 p.add_argument('--output-dir',type=Path,default=ROOT/'out/ipados18/install')
 p.add_argument('--chunk-mib',type=int,default=512);p.add_argument('--resume',action='store_true')

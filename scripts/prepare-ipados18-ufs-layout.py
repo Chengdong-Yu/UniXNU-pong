@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Describe 22H374 UFS windows using existing images; do not copy/hash them."""
-import argparse,hashlib,json,struct
+import argparse,hashlib,json,struct,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];MIB=1<<20
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 FIRST=0x413248;LAST=0x75a40ea
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--userland',type=Path,default=Path('/Volumes/Untitled/Pong-iPadOS18/22H374/prepared'))
+p.add_argument('--userland',type=Path,default=pong_paths.prepared_userland())
 p.add_argument('--systemos',type=Path,default=ROOT/'apple/ipados18-22H374/prepared/pong-ipados18-systemos.cdr')
 p.add_argument('--output-dir',type=Path,default=ROOT/'out/ipados18/ufs')
-p.add_argument('--volume-layout',type=Path,default=Path('/Volumes/PongDev/build/Pong-iPadOS18-inputs/volume-layout.json'))
+p.add_argument('--volume-layout',type=Path,default=pong_paths.volume_layout())
 a=p.parse_args();state=json.loads((a.userland/'result.json').read_text())
 if state.get('build')!='22H374' or not (a.userland/'apply-complete.json').exists():raise SystemExit('Apply the matching iPadOS18 userland first')
 volumes=json.loads(a.volume_layout.read_text());cursor=MIB;records=[]

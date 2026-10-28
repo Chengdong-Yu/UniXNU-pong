@@ -8,10 +8,13 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 
 DEVICE = Path(__file__).resolve().parents[1]
-DEFAULT_TREE = Path('/Volumes/PongDev/build/Pong-iPadOS18-native/tree')
-DEVELOPER = '/Volumes/PongDev/Applications/Xcode.app/Contents/Developer'
+sys.path.insert(0, str(DEVICE / 'scripts'))
+import pong_paths
+DEFAULT_TREE = pong_paths.build_tree(name='Pong-iPadOS18-native')
+DEVELOPER = pong_paths.developer_dir()
 
 
 def main():
@@ -29,7 +32,7 @@ def main():
     subprocess.run([os.sys.executable, str(DEVICE/'scripts/prepare-ipados18-storage.py'), '--tree', str(tree)],check=True)
     source = DEVICE / 'drivers/NativeUfs/NativeUfs.cpp'
     framework = tree / '.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
-    env = dict(os.environ, DEVELOPER_DIR=DEVELOPER)
+    env = dict(os.environ, DEVELOPER_DIR=str(DEVELOPER))
     sdk = subprocess.check_output(
         ['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, env=env).strip()
     obj = out / 'NativeUfs.o'

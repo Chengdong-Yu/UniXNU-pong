@@ -5,10 +5,15 @@ The public reference object annotates the ABI and is never linked or executed.
 import hashlib, json, os, re, shutil, struct, subprocess, sys
 from pathlib import Path
 DEVICE = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(DEVICE/'scripts'))
+import pong_paths
 ROOT = DEVICE.parent
 sys.path.insert(0, str(DEVICE / 'kits/NativePrelink'))
 import native_prelink as np
-source = DEVICE / 'reference/IOStorageFamily'
+source = Path(os.environ.get('PONG_IOS16_STORAGE_REFERENCE', DEVICE / 'reference/IOStorageFamily'))
+if not source.is_dir():
+    raise SystemExit(f'missing the Darwin 22 IOStorageFamily reference checkout: {source}\n'
+                     'check it out there or set PONG_IOS16_STORAGE_REFERENCE')
 revision = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'],text=True).strip()
 if revision != '609cbbdf9fa8fd5eae973d9135c7d44b47e6502e':
     raise SystemExit('Unexpected Darwin 22 storage reference source')
@@ -19,11 +24,11 @@ headers.mkdir(parents=True, exist_ok=True)
 for path in source.glob('*.h'):
     shutil.copyfile(path, headers / path.name)
 obj_path = out / 'reference.o'
-env = dict(os.environ, DEVELOPER_DIR='/Volumes/PongDev/Applications/Xcode.app/Contents/Developer')
+env = dict(os.environ, DEVELOPER_DIR=str(pong_paths.developer_dir()))
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, env=env).strip()
 macsdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True, env=env).strip())
 shutil.copyfile(macsdk / 'usr/include/TargetConditionals.h', out / 'include/TargetConditionals.h')
-framework = Path('/Volumes/PongDev/build/Pong-iOS16-native/tree/.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A')
+framework = pong_paths.build_tree(name='Pong-iOS16-native') / '.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
 command = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-target', 'arm64-apple-ios16.0',
     '-isysroot', sdk, '-mkernel', '-ffreestanding', '-fno-builtin', '-fno-exceptions',
     '-fno-rtti', '-std=gnu++17', '-fblocks', '-O2', '-g',
