@@ -148,8 +148,9 @@ jobs:
           set -euo pipefail
           if [ -z "${PONG_FIRMWARE_TOKEN}" ]; then
             echo "PONG_FIRMWARE_TOKEN is absent."
-            echo "Path A: configs/pong_ipados18_ci_defconfig with CONFIG_XNU_PONG_WIFI=n and CONFIG_XNU_PONG_BACKLIGHT=n."
-            echo "This is not the shipping kernel. Private modem firmware and tfa98xx.cnt are not in this repository."
+            echo "Path A: configs/pong_ipados18_ci_defconfig."
+            echo "CONFIG_XNU_PONG_WIFI=n, CONFIG_XNU_PONG_BACKLIGHT=n, CONFIG_XNU_PONG_ADRENO_PLATFORM=n."
+            echo "This is not the shipping kernel. Those stages need private modem, amplifier, and Adreno730 firmware."
             echo "pong_ipados18_ci_defconfig" > ci-defconfig-name.txt
             echo "A" > ci-firmware-path.txt
           else

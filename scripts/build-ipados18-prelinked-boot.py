@@ -7,7 +7,7 @@ sys.path.insert(0,str(ROOT/'scripts'))
 sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
 import pong_paths
 from emit_prelink import emit,COALESCED
-from native_prelink import macho,plan
+from native_prelink import arm64_image,macho,plan
 
 def main():
  p=argparse.ArgumentParser(description=__doc__)
