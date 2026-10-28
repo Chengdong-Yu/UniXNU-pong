@@ -101,6 +101,57 @@ python3 scripts/pack-pong-firmware.py \
 
 Never commit the firmware. The workflow uses it only after the checks pass, and writes the archive's sha256 and the unpacked paths into `ci-manifest.json`.
 
+### The userdata image
+
+CI can also produce the userdata layout and the whole image, but **the inputs can only come from you**. The workflow does not run `userland/build-ipados18.py` and does not download an Apple restore: that prepared userland exists only after prepare / apply / finish have run on a Mac that has the 22H374 restore, and this public repository has none of it. CI cannot invent it.
+
+Pack one prepared directory into an archive somewhere https can reach and put its URL in `userland_url`. The archive may be `.zip`, `.tar.gz`, `.tgz` or `.tar` and, once unpacked (1-4 wrapper directories are fine), must hold these five files:
+
+```
+result.json                          # build must be 22H374
+apply-complete.json
+pong-ipados18-system.cdr             # OS, a 4 KiB-aligned raw APFS disk
+pong-ipados18-systemos.cdr           # the output of build-systemos18.py
+pong-ipados18-data.cdr               # Data
+```
+
+A `volume-layout.json` (see below) may sit beside them; it is optional.
+
+`pong-ipados18-systemos.cdr` is not inside `prepared/`; locally it lives in `apple/ipados18-22H374/prepared/`. Put it in the same directory when packing. If `os-storage.json` says `ready: true` (the OS was switched to a tracked sparsebundle) the archive is refused: the layout script sizes the raw image and would disagree with what the installer streams.
+
+The workflow reads each volume's UUID from its APFS volume header, writes `ci-volume-layout.json`, and hands those UUIDs to the kernel's `XNU_OWNER_*_VOLUME_UUID` values and to the boot manifest's root-match value. So **one archive belongs to one kernel build**: the UUIDs are compiled in, and a mismatch mounts nothing. When the headers cannot be read (an unusual container, say), put a `volume-layout.json` in the archive naming `os`, `systemos` and `data`:
+
+```json
+{
+  "os": {"uuid": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"},
+  "systemos": {"uuid": "..."},
+  "data": {"uuid": "..."}
+}
+```
+
+Filling `userland_sha256` checks the whole archive first; a mismatch stops the run before a byte is unpacked. A run with the archive does three things: unpack and validate (`scripts/stage-pong-userdata.py`), write the SHNGROOT directory (`scripts/prepare-ipados18-ufs-layout.py`, which has to read all three images, about 19 GiB, and is the slow part), then assemble the whole image from that directory (`scripts/build-pong-userdata-image.py`).
+
+`userdata_image` is on by default. The product is uploaded as four artifacts, `pong-userdata-part0` through `part3` (about 5 GiB each, kept 30 days). One artifact is capped at 10 GiB and the image is about 19.4 GiB, so it has to be split; concatenate the parts in order:
+
+```sh
+cat pong-userdata-part0 pong-userdata-part1 pong-userdata-part2 pong-userdata-part3 > pong-ipados18-userdata.img
+```
+
+The image stops at the end of the last window rather than filling the whole 454 GiB partition; everything the directory does not describe is zero. Flashing still goes through `scripts/install-ipados18-ufs.py`, one window at a time with the SHNGROOT directory committed last. This whole-disk image is the same bytes in another wrapper, for inspection, diffing and keeping a copy; CI never pushes it at a device.
+
+Pack it locally with the repository's script. It checks the five files, the `result.json` build and the image alignment, folds in `pong-ipados18-systemos.cdr`, and prints the sha256:
+
+```sh
+python3 scripts/pack-pong-userland.py \
+  --prepared ../private-inputs/22H374/prepared \
+  --systemos out/ipados18/systemos/pong-ipados18-systemos.cdr \
+  --output ../private-inputs/pong-userland.zip
+```
+
+Never commit the images. The workflow uses them only after the checks pass, and writes the archive's sha256, the three volume UUIDs it read and the unpacked paths into `ci-manifest.json`.
+
+With no `userland_url` (every push-triggered run), the step only writes `userdata-decision.json` with `skipped` and exits 0. That is not a failure.
+
 ### Artifacts
 
 `pong-macos-products` (kept 14 days):
@@ -114,6 +165,8 @@ Never commit the firmware. The workflow uses it only after the checks pass, and 
 | `boot-decision.json` | Whether the `prelink` or the `initial` path was taken, plus the container validation result |
 
 `kernel-ci-log` (kept 1 day) holds the kernel build logs; check it first when a run fails.
+
+With a prepared userland there are also `pong-userdata-part0` through `part3` (kept 30 days): the whole userdata image cut into four ordered parts, which `cat` back into `pong-ipados18-userdata.img`. The run's `ci-manifest.json` records the layout, the image size and each part's size under `userdata`.
 
 ### A local build still extracts from the phone
 
@@ -130,7 +183,8 @@ The two inputs can be shared: once the files are in place locally, `scripts/pack
 ### What it does not do
 
 - It never flashes a device; a run only produces files.
-- It does not build the userdata image. That step needs a prepared userland (`result.json`, `apply-complete.json`, and the OS, SystemOS and Data images), and CI has none of those inputs, so `userdata-decision.json` records `skipped` rather than a failure.
+- It does not invent the userdata inputs. The layout and image are built only when `userland_url` is supplied, because a prepared userland (`result.json`, `apply-complete.json`, and the OS, SystemOS and Data images) can only be produced on a machine that has the 22H374 restore. Without it, `userdata-decision.json` records `skipped` and exits 0; that is not a failure.
+- It never pushes the userdata image at a device and never reads a device back. The whole-disk image is the same window bytes in one file.
 - The prelink path skips image hashing and the ADT audit (`build-ipados18-prelinked-boot.py` passes `--skip-image-verification` to `build-ipados18-bootimg-local.py`), which leaves fields such as `image_sha256` as `null`; both paths still check the container structure.
 - Nothing is verified on hardware. CI validates the container and its packed contents only; it never boots anything.
 
