@@ -13,6 +13,21 @@ on:
         required: false
         default: ''
         type: string
+      userland_url:
+        description: 'Prepared 22H374 userland archive URL (zip or tar.gz): result.json, apply-complete.json and the OS, SystemOS and Data images. Empty skips the userdata layout.'
+        required: false
+        default: ''
+        type: string
+      userland_sha256:
+        description: 'Optional sha256 of that archive. A mismatch stops the run before anything is unpacked.'
+        required: false
+        default: ''
+        type: string
+      userdata_image:
+        description: 'Assemble one userdata .img from the prepared userland and upload it in 8 GiB parts. Needs that userland; otherwise ignored.'
+        required: false
+        default: true
+        type: boolean
 permissions:
   contents: read
   actions: write
@@ -76,6 +91,10 @@ jobs:
   kernel-ci:
     name: CI kernel (WIFI and backlight off unless a firmware archive is given)
     runs-on: macos-15-intel
+    # 360 is the maximum GitHub honours on a hosted runner; a larger number is
+    # not a longer allowance, it is a run that fails at six hours. The userdata
+    # stage below is disk bound, not CPU bound, and shares this budget with the
+    # kernel build.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -301,6 +320,81 @@ jobs:
             echo 'power/adsp.mbn is present for the runtime firmware path. The power build does not embed that file.'
           } > ci-stages.txt
           cat ci-stages.txt
+      - name: Stage the prepared userland
+        # Runs on every job and records its decision, the way Choose firmware path
+        # does: a push event carries no inputs context at all, so an `if:` on
+        # inputs.userland_url would be reading a value that does not exist.
+        id: userland
+        env:
+          USERLAND_URL: ${{ inputs.userland_url }}
+          USERLAND_SHA256: ${{ inputs.userland_sha256 }}
+          # Only needed when the archive sits behind authentication, such as a
+          # private GitHub release asset fetched through the API URL. The same
+          # token the firmware archive uses; the two inputs differ, not the access.
+          USERLAND_ARCHIVE_TOKEN: ${{ secrets.PONG_FIRMWARE_ARCHIVE_TOKEN }}
+        run: |
+          set -euo pipefail
+          url="$(printf '%s' "${USERLAND_URL}" | tr -d '[:space:]')"
+          sha="$(printf '%s' "${USERLAND_SHA256}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          if [ -z "${url}" ]; then
+            echo "No userland_url input."
+            echo "The userdata layout and image stages will record a skip."
+            printf '%s\n' 'staged=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "${url}" in
+            https://*) ;;
+            *) echo "userland_url must be an https URL, got: ${url}" >&2; exit 1 ;;
+          esac
+          # Name the download after the URL's last path segment: the staging
+          # script picks the archive format from the file name.
+          base="${url%%\?*}"
+          base="${base%%#*}"
+          base="${base##*/}"
+          case "${base}" in
+            *.zip|*.tar.gz|*.tgz|*.tar) ;;
+            *) echo "userland_url must point at a .zip, .tar.gz, .tgz or .tar file, got: ${url}" >&2; exit 1 ;;
+          esac
+          archive="${RUNNER_TEMP}/pong-userland-archive/${base}"
+          rm -rf "${RUNNER_TEMP}/pong-userland-archive" "${RUNNER_TEMP}/pong-userland"
+          mkdir -p "$(dirname "${archive}")"
+          echo "Downloading the prepared userland archive as ${base}."
+          echo "=== df before userland download ==="
+          df -h | tee df-before-userland.txt
+          if [ -n "${USERLAND_ARCHIVE_TOKEN:-}" ]; then
+            curl -fsSL --retry 3 --retry-delay 2 \
+              -H "Authorization: Bearer ${USERLAND_ARCHIVE_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              -o "${archive}" "${url}"
+            unset USERLAND_ARCHIVE_TOKEN
+          else
+            curl -fsSL --retry 3 --retry-delay 2 -o "${archive}" "${url}"
+          fi
+          ls -l "${archive}"
+          stage=(--archive "${archive}" --dest "${RUNNER_TEMP}/pong-userland"
+                 --json-out ci-userland-archive.json
+                 --volume-layout-out ci-volume-layout.json)
+          if [ -n "${sha}" ]; then
+            stage+=(--expect-sha256 "${sha}")
+          fi
+          python3 scripts/stage-pong-userdata.py "${stage[@]}"
+          # The archive has done its job. The three windows and the output image
+          # need roughly three times its size, and this runner's disk is already
+          # shared with the kernel build.
+          rm -f "${archive}"
+          rmdir "${RUNNER_TEMP}/pong-userland-archive" 2>/dev/null || true
+          printf '%s\n' "${RUNNER_TEMP}/pong-userland" > ci-userland-path.txt
+          echo "=== df after userland staging ==="
+          df -h | tee df-after-userland-stage.txt
+          {
+            echo 'Prepared 22H374 userland staged from the archive.'
+            echo "result.json build 22H374, apply-complete.json present."
+            echo 'Volume UUIDs for OS/SystemOS/Data came out of the supplied images.'
+            echo 'The userdata layout and image stages run after the kernel build.'
+          } > ci-userdata-stages.txt
+          cat ci-userdata-stages.txt
+          printf '%s\n' 'staged=true' >> "$GITHUB_OUTPUT"
+
       - name: Linux 7.0.14 ath11k sources
         if: steps.firmware.outputs.path == 'B'
         run: |
@@ -429,15 +523,33 @@ jobs:
           import json, uuid
           from pathlib import Path
           import os
-          namespace = uuid.UUID('6f1b6a3e-7c2d-4a91-9e5b-0c4d8f2a1b77')
-          layout = {
-              'ci_placeholder': True,
-              'note': 'uuid5 placeholders for the CI volume names. Not the device SystemOS/Data UUIDs.',
-              'os': {'uuid': str(uuid.uuid5(namespace, 'os'))},
-              'data': {'uuid': str(uuid.uuid5(namespace, 'data'))},
-              'systemos': {'uuid': str(uuid.uuid5(namespace, 'systemos'))},
-          }
-          Path(os.environ['PONG_VOLUME_LAYOUT']).write_text(json.dumps(layout, indent=2) + '\n')
+          staged = Path('ci-volume-layout.json')
+          if staged.is_file():
+              # The prepared userland named the images that will actually be
+              # installed, so these UUIDs go into the kernel (XNU_OWNER_*_VOLUME_UUID)
+              # and into the boot manifest's root-match value. A placeholder here
+              # would build a kernel that mounts nothing.
+              layout = json.loads(staged.read_text())
+              if layout.get('ci_placeholder'):
+                  raise SystemExit('ci-volume-layout.json still holds placeholders')
+              for key in ('os', 'systemos', 'data'):
+                  value = layout.get(key, {}).get('uuid', '')
+                  if len(value) != 36:
+                      raise SystemExit('ci-volume-layout.json has no usable %s uuid' % key)
+              Path(os.environ['PONG_VOLUME_LAYOUT']).write_text(json.dumps(layout, indent=2) + '\n')
+              print('volume layout from the prepared userland:',
+                    {key: layout[key]['uuid'] for key in ('os', 'systemos', 'data')})
+          else:
+              namespace = uuid.UUID('6f1b6a3e-7c2d-4a91-9e5b-0c4d8f2a1b77')
+              layout = {
+                  'ci_placeholder': True,
+                  'note': 'uuid5 placeholders for the CI volume names. Not the device SystemOS/Data UUIDs.',
+                  'os': {'uuid': str(uuid.uuid5(namespace, 'os'))},
+                  'data': {'uuid': str(uuid.uuid5(namespace, 'data'))},
+                  'systemos': {'uuid': str(uuid.uuid5(namespace, 'systemos'))},
+              }
+              Path(os.environ['PONG_VOLUME_LAYOUT']).write_text(json.dumps(layout, indent=2) + '\n')
+              print('volume layout: uuid5 placeholders; no prepared userland was supplied')
           text = '\n'.join([
               '# Generated on the runner. Not a developer machine path.',
               '[pong_build]',
@@ -657,56 +769,58 @@ jobs:
           test -s ci-products/DarwinBoot24.efi
           echo "=== df after boot ==="
           df -h | tee df-after-boot.txt
-      - name: Userdata image or the missing prepared userland
+      - name: Userdata layout or the reason it was not built
         if: always() && steps.kernel.outcome == 'success'
+        # 360 minutes is the hard maximum for one job on a GitHub-hosted runner,
+        # so a longer job timeout is not available. Bound each new stage instead:
+        # if one overruns, that step fails on its own clock and the always() steps
+        # below still upload the kernel. This stage hashes about 19 GiB; the one
+        # measurement available is 1075 MiB/s on a Linux box, which projects to
+        # about 20 seconds, so the allowance here is for a runner far slower than
+        # that, not a normal budget. Nothing has been timed on macos-15-intel.
+        timeout-minutes: 120
         run: |
           set -euo pipefail
           source ci-env.sh
-          # This workflow never runs userland/build-ipados18.py, so
-          # ${PONG_INPUTS}/22H374/prepared is absent. That is a recorded skip
-          # (exit 0), not a failed stage. The layout script runs only when
-          # result.json, apply-complete.json, and the three cdr images are
-          # already there with build 22H374.
-          echo "=== df before userdata ==="
+          # Two ways to get here:
+          #   * userland_url was filled in, so Stage the prepared userland put the
+          #     five inputs under $RUNNER_TEMP/pong-userland and this step writes
+          #     the SHNGROOT layout from them;
+          #   * it was empty (every push run), so there is nothing to lay out and
+          #     userdata-decision.json records a skip with exit 0. A skip is not a
+          #     failure, and the kernel above still gets built and packaged.
+          echo "=== df before userdata layout ==="
           df -h | tee df-before-userdata.txt
+          prepared="$(cat ci-userland-path.txt 2>/dev/null || true)"
           set +e
-          python3 - <<'PY'
+          python3 - "$prepared" <<'PY'
           import json
-          import os
+          import sys
           from pathlib import Path
-          prepared = Path(os.environ['PONG_INPUTS']) / '22H374' / 'prepared'
-          systemos = Path('apple/ipados18-22H374/prepared/pong-ipados18-systemos.cdr')
-          required = {
-              'result.json': prepared / 'result.json',
-              'apply-complete.json': prepared / 'apply-complete.json',
-              'pong-ipados18-system.cdr': prepared / 'pong-ipados18-system.cdr',
-              'pong-ipados18-data.cdr': prepared / 'pong-ipados18-data.cdr',
-              'pong-ipados18-systemos.cdr': systemos,
-          }
-          missing = [name for name, path in required.items() if not path.is_file()]
-          build = None
-          result_path = required['result.json']
-          if result_path.is_file():
-              build = json.loads(result_path.read_text()).get('build')
-              if build != '22H374':
-                  missing.append('result.json build %s' % build)
-          record = {
-              'status': 'skipped' if missing else 'ready',
-              'prepared': str(prepared),
-              'build': build,
-              'missing': missing,
-          }
-          if missing:
+          prepared = Path(sys.argv[1]) if sys.argv[1] else None
+          record = {'status': 'skipped', 'prepared': str(prepared) if prepared else None,
+                    'build': None, 'missing': []}
+          if prepared is None:
               record['reason'] = (
-                  'userdata image was not built. scripts/prepare-ipados18-ufs-layout.py needs a prepared '
-                  '22H374 userland (result.json build 22H374, apply-complete.json, and the OS, SystemOS, '
-                  'and Data images). Missing: ' + ', '.join(missing) + '. No SHNGROOT header was written.'
-              )
+                  'userdata layout was not built. No userland_url input was given, so this run '
+                  'has no prepared 22H374 userland (result.json build 22H374, apply-complete.json, '
+                  'and the OS, SystemOS and Data images). No SHNGROOT directory was written. '
+                  'Start the workflow from the Actions page with userland_url to build it.')
+          elif not (prepared / 'result.json').is_file():
+              record['missing'].append('result.json')
+              record['reason'] = ('ci-userland-path.txt names ' + str(prepared) + ' but result.json '
+                                  'is not there; staging did not finish')
           else:
-              record['reason'] = 'prepared 22H374 userland is present'
+              record['build'] = json.loads((prepared / 'result.json').read_text()).get('build')
+              if record['build'] != '22H374':
+                  record['reason'] = ('result.json names build %r, not 22H374; the layout was not '
+                                      'written' % record['build'])
+              else:
+                  record['status'] = 'ready'
+                  record['reason'] = 'prepared 22H374 userland is staged; writing the layout'
           Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
           print(record['reason'])
-          raise SystemExit(0 if missing else 10)
+          raise SystemExit(0 if record['status'] == 'skipped' else (10 if record['status'] == 'ready' else 1))
           PY
           status=$?
           set -e
@@ -716,8 +830,12 @@ jobs:
           if [ "$status" -ne 10 ]; then
             exit "$status"
           fi
+          mkdir -p out/ipados18/ufs
+          # This hashes all three windows to record the SHNGROOT SHA-256 fields,
+          # and it is the slow part: it reads every byte of roughly 19 GiB.
           python3 scripts/prepare-ipados18-ufs-layout.py \
-            --userland "${PONG_INPUTS}/22H374/prepared" \
+            --userland "${prepared}" \
+            --systemos "${prepared}/pong-ipados18-systemos.cdr" \
             --volume-layout "${PONG_VOLUME_LAYOUT}" \
             --output-dir out/ipados18/ufs
           test -s out/ipados18/ufs/shngroot-ipados18.bin
@@ -727,15 +845,61 @@ jobs:
           header = Path('out/ipados18/ufs/shngroot-ipados18.bin').read_bytes()
           record = json.loads(Path('userdata-decision.json').read_text())
           record['status'] = 'built'
+          record['header'] = 'out/ipados18/ufs/shngroot-ipados18.bin'
           record['header_bytes'] = len(header)
           record['magic'] = header[:8].decode('ascii', 'replace')
+          record['window_names'] = [window['name'] for window in
+                                    json.loads(Path('out/ipados18/ufs/ufs-layout.json').read_text())['windows']]
           if header[:8] != b'SHNGROOT' or len(header) != 4096:
               raise SystemExit('SHNGROOT header is not a 4096-byte directory')
-          if header[24+32+8+8+4+4:24+32+8+8+4+4+32] == bytes(32):
+          if header[24 + 32 + 8 + 8 + 4 + 4:24 + 32 + 8 + 8 + 4 + 4 + 32] == bytes(32):
               raise SystemExit('SHNGROOT window digest is still 32 zero bytes')
+          if record['window_names'] != ['OS', 'SystemOS', 'Data']:
+              raise SystemExit('layout windows are %s, not OS/SystemOS/Data' % record['window_names'])
           Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
-          print('userdata header', len(header), 'bytes')
+          print('userdata directory', len(header), 'bytes for', ', '.join(record['window_names']))
           PY
+          echo "=== df after userdata layout ==="
+          df -h | tee df-after-userdata-layout.txt
+      - name: Userdata image parts
+        if: always() && steps.kernel.outcome == 'success' && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        # Writes about 19 GiB more. Same reasoning as above: bounded so the four
+        # artifact uploads that follow still have time inside the six-hour job.
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          source ci-env.sh
+          test -s out/ipados18/ufs/shngroot-ipados18.bin
+          # upload-artifact caps one artifact at 10 GiB, and this image is about
+          # 19.4 GiB of OS, SystemOS and Data windows. Four parts puts each near
+          # 5 GiB, and a failed upload costs one part instead of the whole run.
+          python3 scripts/build-pong-userdata-image.py \
+            --layout out/ipados18/ufs/ufs-layout.json \
+            --header out/ipados18/ufs/shngroot-ipados18.bin \
+            --output out/ipados18/ufs/pong-ipados18-userdata.img \
+            --max-parts 4 \
+            --part-max-mib 8192 \
+            --delete-sources \
+            --json-out userdata-image.json
+          mkdir -p ci-products
+          cp -f userdata-image.json ci-products/userdata-image.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          image = json.loads(Path('userdata-image.json').read_text())
+          record = json.loads(Path('userdata-decision.json').read_text())
+          record['status'] = 'built'
+          record['image'] = image
+          if image['image_bytes'] <= 0 or not image['parts']:
+              raise SystemExit('the image builder wrote no parts')
+          total = sum(part['bytes'] for part in image['parts'])
+          if total != image['image_bytes']:
+              raise SystemExit('parts hold %d bytes, the image is %d' % (total, image['image_bytes']))
+          Path('userdata-decision.json').write_text(json.dumps(record, indent=2) + '\n')
+          print('userdata image', image['image_bytes'], 'bytes in', len(image['parts']), 'part(s)')
+          PY
+          echo "=== df after userdata image ==="
+          df -h | tee df-after-userdata-image.txt
       - name: Write manifest
         if: always()
         run: |
@@ -764,6 +928,11 @@ jobs:
               'df_after_kernel': read('df-after-kernel.txt'),
               'df_after_boot': read('df-after-boot.txt'),
               'df_before_userdata': read('df-before-userdata.txt'),
+              'df_after_userland_stage': read('df-after-userland-stage.txt'),
+              'df_after_userdata_layout': read('df-after-userdata-layout.txt'),
+              'df_after_userdata_image': read('df-after-userdata-image.txt'),
+              'userland_archive': load('ci-userland-archive.json'),
+              'volume_layout': load('ci-volume-layout.json'),
               'boot': load('boot-decision.json'),
               'userdata': load('userdata-decision.json'),
               'product_bytes': products,
@@ -773,7 +942,8 @@ jobs:
           PY
           mkdir -p ci-logs ci-products
           cp -f ci-manifest.json ci-products/ci-manifest.json
-          cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json ci-stages.txt ci-logs/ 2>/dev/null || true
+          cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json \
+            ci-stages.txt ci-userdata-stages.txt userdata-image.json ci-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -781,6 +951,48 @@ jobs:
           retention-days: 1
           path: ci-logs/
           if-no-files-found: warn
+      - name: Upload userdata part 0
+        # upload-artifact cannot upload one name twice and caps an artifact at
+        # 10 GiB, and a strategy matrix is a job attribute rather than a step one.
+        # So the split is fixed at four parts and the builder sizes them: about
+        # 5 GiB each for the 19.4 GiB layout, fewer files for a smaller userland.
+        # Kept for 30 days because a device install needs it and a rebuild costs
+        # the whole six-hour job; APFS windows barely compress, so store them.
+        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pong-userdata-part0
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: ignore
+          path: out/ipados18/ufs/pong-ipados18-userdata.img.part00
+      - name: Upload userdata part 1
+        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pong-userdata-part1
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: ignore
+          path: out/ipados18/ufs/pong-ipados18-userdata.img.part01
+      - name: Upload userdata part 2
+        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pong-userdata-part2
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: ignore
+          path: out/ipados18/ufs/pong-ipados18-userdata.img.part02
+      - name: Upload userdata part 3
+        if: always() && steps.userland.outputs.staged == 'true' && inputs.userdata_image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pong-userdata-part3
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: ignore
+          path: out/ipados18/ufs/pong-ipados18-userdata.img.part03
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
