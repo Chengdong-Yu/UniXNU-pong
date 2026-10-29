@@ -54,6 +54,25 @@
 
 UEFI 基础固件与 Qualcomm 固件沿用 Pong；新 loader 替换协议仍在内存中完成。先完成内核及组件链接，再写入新系统窗口并进行 fastboot 临时启动。
 
+## 在 CI runner 上从 IPSW 生成 userland
+
+`.github/workflows/macos-build.yml` 的 userdata 阶段不再接收事先做好的 prepared userland 压缩包，而是接收 **IPSW 下载地址**（`ipsw_url`），并在 runner 上把下面这些步骤跑完。串起来的是 `scripts/prepare-pong-userland-from-ipsw.py`：
+
+| 步骤 | 命令 | 要点 |
+| --- | --- | --- |
+| 下载 | `scripts/download-ipados18-restore.py --url --output-dir` | 分段并发、可续传；`--sha256` 可选 |
+| 取组件 | `scripts/prepare-ipados18-components.py --ipsw --output-dir --only` | 核对 18.7.10 / 22H374 与 iPad7,11\|7,12 |
+| AEA 解密 | `scripts/decrypt-ipados18-aea.py --input --output` | profile 1；只读 12 字节序言，不整包读入内存 |
+| OS 裸盘 | `hdiutil convert -format UDTO` | `--os-image` 必须是裸盘，因为它被原样复制 |
+| SystemOS | `hdiutil create -size 5242880k -fs APFS` + `userland/build-systemos18.py` | 5 GiB 普通 APFS 副本，root |
+| Data | `hdiutil create -size 8388608k -fs APFS` + `hdiutil convert` | 全新 8 GiB，不沿用 iOS 16 Data |
+| userland | `userland/build-ipados18.py prepare/apply/finish` | `apply` 需要 root |
+| 校验 | `scripts/stage-pong-userdata.py` 的 `validate_tree` / `volume_identity` | 复用同一份规则，不重新实现 |
+
+与本节其余部分记录的本机流程相比，两点差别值得注意：本机流程里 `--os-image` 用的是已经解出来并转换好的 `.cdr`，本机 Data 模板是一份早先建好、留在 `apple/ipados18-22H374/` 下的空 APFS 镜像；runner 上没有这些历史文件，所以两者都按上面的方式现场生成。`Ap,SystemVolumeCanonicalMetadata`、`SystemVolume`、`Cryptex1,SystemVolume`、`Cryptex1,SystemTrustCache` 四个组件会被取出并记进报告，但本仓库目前没有任何脚本读它们，报告里标为 `consumed_by: null`。
+
+磁盘上最紧的时刻是 `prepare` 之后：`--out` 里已经有 OS 和 Data 两份副本，`--work-dir` 里还留着它们的原图。脚本在 `prepare` 之后就卸载三个源卷、删掉 SystemOS 的 dmg，`apply` 一结束就删掉那两张原图。每个阶段的余量都记在 `ci-userland-from-ipsw.json` 的 `disk` 一节。
+
 ## 首版安装
 
 `install-ipados18-ufs.py` 在 REC 中检查 Pong 的 userdata 几何布局，并从镜像直接流式写入三个窗口。每个已完成的区块记录在 `out/ipados18/install/installation.json`，中断后可用 `--resume` 继续；所有窗口完成后才提交 SHNGROOT 目录。新的 Data 起点在 OS 与 SystemOS 之后，不再沿用 iOS 16 的 8 GiB 起点。

@@ -19,12 +19,20 @@ from pyhpke import AEADId, CipherSuite, KDFId, KEMId, KEMKey
 
 
 def auth_fields(path):
-    data = path.read_bytes()
-    if data[:4] != b'AEA1':
-        raise SystemExit(f'{path} does not start with AEA1')
-    profile = int.from_bytes(data[4:8], 'little') & 0xFFFFFF
-    length = int.from_bytes(data[8:12], 'little')
-    blob = data[12:12 + length]
+    # Only the prologue is needed. Reading the whole archive would allocate its
+    # full size (5.9 GB for the 22H374 OS) just to parse twelve header bytes,
+    # which does not fit comfortably beside the other work on a CI runner.
+    with path.open('rb') as handle:
+        header = handle.read(12)
+        if len(header) != 12:
+            raise SystemExit(f'{path} is too short to be an AEA archive')
+        if header[:4] != b'AEA1':
+            raise SystemExit(f'{path} does not start with AEA1')
+        profile = int.from_bytes(header[4:8], 'little') & 0xFFFFFF
+        length = int.from_bytes(header[8:12], 'little')
+        if length > 16 * 1024 * 1024:
+            raise SystemExit(f'{path} declares {length} bytes of auth data; that is not an AEA prologue')
+        blob = handle.read(length)
     if len(blob) != length:
         raise SystemExit(f'{path} auth data is truncated')
     fields = {}
