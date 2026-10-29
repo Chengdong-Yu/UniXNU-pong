@@ -48,8 +48,9 @@ If you would rather not prepare Xcode, the Apple open source dependencies and th
 1. Open the repository's **Actions** tab and pick **Pong macOS build** on the left.
 2. Choose **Run workflow** and select the branch to build.
 3. For the shipping configuration, put the download URL of your firmware archive in `firmware_url` (next section). Leave it empty to build the CI configuration only.
-4. Wait for the job whose name starts with `CI kernel`. The `disk probe` job beside it says in its own name that it is not a kernel build; it only measures disk space.
-5. Download `pong-macos-products` under **Artifacts** at the bottom of the run page.
+4. To build the userdata image as well, put the download URL of Apple's iPadOS 18.7.10 (22H374) restore in `ipsw_url` (next section). Leave it empty to skip it and download nothing.
+5. Wait for the job whose name starts with `CI kernel`. The `disk probe` job beside it says in its own name that it is not a kernel build; it only measures disk space.
+6. Download `pong-macos-products` under **Artifacts** at the bottom of the run page, and, when a userdata image was built, `pong-userdata-part0` through `part3`.
 
 A push to any branch also triggers the workflow (`on: push`), but a push event carries no inputs, so it always builds the CI configuration without Wi-Fi, backlight or the GPU. Start the workflow manually for the full one.
 
@@ -103,33 +104,28 @@ Never commit the firmware. The workflow uses it only after the checks pass, and 
 
 ### The userdata image
 
-CI can also produce the userdata layout and the whole image, but **the inputs can only come from you**. The workflow does not run `userland/build-ipados18.py` and does not download an Apple restore: that prepared userland exists only after prepare / apply / finish have run on a Mac that has the 22H374 restore, and this public repository has none of it. CI cannot invent it.
+CI can produce the userdata layout and the whole image from **one input**: the download URL of Apple's iPadOS 18.7.10 / 22H374 restore, given as `ipsw_url`. Decryption, mounting and assembly all happen on the runner, so nothing has to be prepared on another machine first.
 
-Pack one prepared directory into an archive somewhere https can reach and put its URL in `userland_url`. The archive may be `.zip`, `.tar.gz`, `.tgz` or `.tar` and, once unpacked (1-4 wrapper directories are fine), must hold these five files:
+The URL must be https and must end in `.ipsw`. Filling `ipsw_sha256` checks the whole IPSW after the download; a mismatch stops the run before a byte is unpacked.
 
-```
-result.json                          # build must be 22H374
-apply-complete.json
-pong-ipados18-system.cdr             # OS, a 4 KiB-aligned raw APFS disk
-pong-ipados18-systemos.cdr           # the output of build-systemos18.py
-pong-ipados18-data.cdr               # Data
-```
+On the runner the chain is (`scripts/prepare-pong-userland-from-ipsw.py` drives it, and every step is a script that already exists in this repository):
 
-A `volume-layout.json` (see below) may sit beside them; it is optional.
+1. Download the IPSW (`scripts/download-ipados18-restore.py`: bounded parallel ranges, resumable), check its length and, if asked, its sha256.
+2. Extract the components with `scripts/prepare-ipados18-components.py --ipsw`, which refuses anything that is not 18.7.10 / 22H374 on an iPad7,11 or 7,12.
+3. Decrypt the OS and SystemOS `.dmg.aea` archives with `scripts/decrypt-ipados18-aea.py` (AEA profile 1: the public FCS key unwraps the archive key, which `/usr/bin/aea` then uses).
+4. Expand the decrypted OS UDIF to a raw disk with `hdiutil convert -format UDTO`, mount it as `--os-root`, and hand the same raw disk as `--os-image`.
+5. Create a fresh 5 GiB ordinary APFS volume and copy the original SystemOS files into it with `userland/build-systemos18.py`, producing `pong-ipados18-systemos.cdr`.
+6. Create a fresh empty 8 GiB APFS volume and convert it to a raw disk as the Data starting point; the iOS 16 Data is not reused.
+7. Run `userland/build-ipados18.py prepare` / `apply` / `finish`, which produce `result.json`, `apply-complete.json` and the OS and Data images.
+8. Check the five files with `scripts/stage-pong-userdata.py`'s own validators: all five present, `result.json` build 22H374, every image 4 KiB aligned with an APFS container (or a GPT holding one) at the front, and three readable, distinct volume UUIDs.
 
-`pong-ipados18-systemos.cdr` is not inside `prepared/`; locally it lives in `apple/ipados18-22H374/prepared/`. Put it in the same directory when packing. If `os-storage.json` says `ready: true` (the OS was switched to a tracked sparsebundle) the archive is refused: the layout script sizes the raw image and would disagree with what the installer streams.
+It then writes `ci-userland-path.txt` and `ci-volume-layout.json` in exactly the shapes the later steps already read, so the layout and image stages need no change: the SHNGROOT directory (`scripts/prepare-ipados18-ufs-layout.py`, which reads all three images, about 19 GiB, and is the slow part), then the whole image (`scripts/build-pong-userdata-image.py`).
 
-The workflow reads each volume's UUID from its APFS volume header, writes `ci-volume-layout.json`, and hands those UUIDs to the kernel's `XNU_OWNER_*_VOLUME_UUID` values and to the boot manifest's root-match value. So **one archive belongs to one kernel build**: the UUIDs are compiled in, and a mismatch mounts nothing. When the headers cannot be read (an unusual container, say), put a `volume-layout.json` in the archive naming `os`, `systemos` and `data`:
+The workflow reads each volume's UUID from its APFS volume header, writes `ci-volume-layout.json`, and hands those UUIDs to the kernel's `XNU_OWNER_*_VOLUME_UUID` values and to the boot manifest's root-match value. So **one run's kernel and userland belong together**: the UUIDs are compiled in, and a mismatch mounts nothing.
 
-```json
-{
-  "os": {"uuid": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"},
-  "systemos": {"uuid": "..."},
-  "data": {"uuid": "..."}
-}
-```
+This step needs macOS and passwordless `sudo`: `apply` and `build-systemos18.py` must run as root to write Apple's original uid/gid onto the copies. A failing `sudo -n true` stops the run instead of skipping a root step, because the resulting userland would look complete and then fail on the device over shared-cache ownership.
 
-Filling `userland_sha256` checks the whole archive first; a mismatch stops the run before a byte is unpacked. A run with the archive does three things: unpack and validate (`scripts/stage-pong-userdata.py`), write the SHNGROOT directory (`scripts/prepare-ipados18-ufs-layout.py`, which has to read all three images, about 19 GiB, and is the slow part), then assemble the whole image from that directory (`scripts/build-pong-userdata-image.py`).
+`ci-userland-from-ipsw.json` records the input, every command, each stage's bytes and timings; `ci-manifest.json` points at it under `userland_from_ipsw`. A query string on the IPSW URL (a pre-signed link) is replaced with `?<redacted>` in that report.
 
 `userdata_image` is on by default. The product is uploaded as four artifacts, `pong-userdata-part0` through `part3` (about 5 GiB each, kept 30 days). One artifact is capped at 10 GiB and the image is about 19.4 GiB, so it has to be split; concatenate the parts in order:
 
@@ -139,7 +135,7 @@ cat pong-userdata-part0 pong-userdata-part1 pong-userdata-part2 pong-userdata-pa
 
 The image stops at the end of the last window rather than filling the whole 454 GiB partition; everything the directory does not describe is zero. Flashing still goes through `scripts/install-ipados18-ufs.py`, one window at a time with the SHNGROOT directory committed last. This whole-disk image is the same bytes in another wrapper, for inspection, diffing and keeping a copy; CI never pushes it at a device.
 
-Pack it locally with the repository's script. It checks the five files, the `result.json` build and the image alignment, folds in `pong-ipados18-systemos.cdr`, and prints the sha256:
+If a prepared userland already exists on your Mac you can still pack it for local keeping with `scripts/pack-pong-userland.py`: it checks the five files, the `result.json` build and the image alignment, folds in `pong-ipados18-systemos.cdr`, and prints the sha256. That path is now for local archiving and comparison only; CI no longer reads it, though `stage-pong-userdata.py`'s validators still apply to it and to the last step of the runner chain.
 
 ```sh
 python3 scripts/pack-pong-userland.py \
@@ -148,9 +144,9 @@ python3 scripts/pack-pong-userland.py \
   --output ../private-inputs/pong-userland.zip
 ```
 
-Never commit the images. The workflow uses them only after the checks pass, and writes the archive's sha256, the three volume UUIDs it read and the unpacked paths into `ci-manifest.json`.
+Never commit the images or an IPSW. The workflow uses them only after every step succeeds, and writes the IPSW URL, the extracted component sizes, the three volume UUIDs it read and the resulting paths into `ci-userland-from-ipsw.json`.
 
-With no `userland_url` (every push-triggered run), the step only writes `userdata-decision.json` with `skipped` and exits 0. That is not a failure.
+With no `ipsw_url` (every push-triggered run), the step only writes `userdata-decision.json` with `skipped` and exits 0. That is not a failure.
 
 ### Artifacts
 
@@ -166,7 +162,7 @@ With no `userland_url` (every push-triggered run), the step only writes `userdat
 
 `kernel-ci-log` (kept 1 day) holds the kernel build logs; check it first when a run fails.
 
-With a prepared userland there are also `pong-userdata-part0` through `part3` (kept 30 days): the whole userdata image cut into four ordered parts, which `cat` back into `pong-ipados18-userdata.img`. The run's `ci-manifest.json` records the layout, the image size and each part's size under `userdata`.
+With `ipsw_url` filled there are also `pong-userdata-part0` through `part3` (kept 30 days): the whole userdata image cut into four ordered parts, which `cat` back into `pong-ipados18-userdata.img`. The run's `ci-manifest.json` records the layout, the image size and each part's size under `userdata`, and how the userland was built from the IPSW under `userland_from_ipsw`.
 
 ### A local build still extracts from the phone
 
@@ -183,7 +179,8 @@ The two inputs can be shared: once the files are in place locally, `scripts/pack
 ### What it does not do
 
 - It never flashes a device; a run only produces files.
-- It does not invent the userdata inputs. The layout and image are built only when `userland_url` is supplied, because a prepared userland (`result.json`, `apply-complete.json`, and the OS, SystemOS and Data images) can only be produced on a machine that has the 22H374 restore. Without it, `userdata-decision.json` records `skipped` and exits 0; that is not a failure.
+- It does not invent the userdata inputs. The layout and image are built only when `ipsw_url` is supplied, and the userland itself is built on the runner from that IPSW. Without it, `userdata-decision.json` records `skipped` and exits 0; that is not a failure.
+- It never degrades silently. A failure anywhere in the chain (download, component build check, AEA decryption, `sudo`, `apply`, the five-file check) fails that step; it never leaves a userland that merely looks complete.
 - It never pushes the userdata image at a device and never reads a device back. The whole-disk image is the same window bytes in one file.
 - The prelink path skips image hashing and the ADT audit (`build-ipados18-prelinked-boot.py` passes `--skip-image-verification` to `build-ipados18-bootimg-local.py`), which leaves fields such as `image_sha256` as `null`; both paths still check the container structure.
 - Nothing is verified on hardware. CI validates the container and its packed contents only; it never boots anything.
