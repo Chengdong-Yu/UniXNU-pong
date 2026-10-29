@@ -238,6 +238,46 @@ def merge_tree(source, target):
         shutil.copy2(source, target)
 
 
+APP_CRYPTEX_ALIAS = '/private/preboot/Cryptexes/App'
+
+
+def restore_app_alias(value):
+    """The path a restore's /System/Cryptexes/App alias names, or a hard failure.
+
+    The restore writes the alias the way the running system sees it, so the
+    text is absolute or relative to /System/Cryptexes depending on the image.
+    Both name the same mount point; anything else is a different OS and must
+    stop the build rather than be overwritten.
+    """
+    resolved = value if value.startswith('/') else posixpath.join('/System/Cryptexes', value)
+    if posixpath.normpath(resolved) != APP_CRYPTEX_ALIAS:
+        raise RuntimeError('unexpected App cryptex alias: /System/Cryptexes/App -> ' + value)
+    return posixpath.normpath(resolved)
+
+
+def drop_restore_app_alias(root, overlay):
+    """Replace the restore's dangling App cryptex alias with the OS-resident directory.
+
+    prepare() puts the matching AppOS files at overlay/System/Cryptexes/App,
+    because Pong keeps AppOS inside the OS instead of mounting a separate
+    cryptex from /private/preboot. A restore OS carries that same path as a
+    symlink to the cryptex mount, and merge_tree deliberately refuses to merge
+    a directory into a destination symlink -- without this the App files are
+    staged but never installed. A real directory at the destination is left
+    for merge_tree to merge into.
+    """
+    source = overlay / 'System/Cryptexes/App'
+    target = root / 'System/Cryptexes/App'
+    if source.is_symlink() or not source.is_dir():
+        return None
+    if not target.is_symlink():
+        return None
+    destination = os.readlink(target)
+    restore_app_alias(destination)
+    target.unlink()
+    return destination
+
+
 def source_path(root, cryptex, path, app_cryptex=None):
     """Resolve iOS absolute symlinks inside the source volumes, never the host root."""
     for _ in range(40):
@@ -1022,7 +1062,14 @@ def apply(a):
         (root / 'sbin/launchd').rename(root / 'sbin/launchd.ios')
         shutil.copyfile(root / 'sbin/launchd.ios', stock / 'launchd.original')
         adapt_launchd18(stock / 'launchd.original', root / 'sbin/launchd.ios', out)
+        replaced_app_alias = drop_restore_app_alias(root, out / 'overlay')
         merge_tree(out / 'overlay', root)
+        if replaced_app_alias is not None and not (
+                root / 'System/Cryptexes/App/usr/libexec/webbookmarksd').is_file():
+            # The App files are now a real directory on the OS copy; check the
+            # merge landed while the image is still mounted, not from the
+            # host path after the detach.
+            raise RuntimeError('App cryptex files were not installed on the OS copy')
         # The generated overlay may live on a host filesystem without Unix
         # owners/modes. Canonical system jobs must have target-side metadata.
         job_dir = root / 'System/Library/LaunchDaemons'
@@ -1062,6 +1109,7 @@ def apply(a):
     finally:
         run(['hdiutil', 'detach', device])
     dump(out / 'apply-complete.json', {'original_cryptex_link': original_link,
+                                      'replaced_app_cryptex_alias': replaced_app_alias,
                                       'relocated_22H374_apps': moved, 'phone_written': False})
     print('Applied userland changes to independent OS and Data image copies.')
 
@@ -1206,9 +1254,7 @@ def install_app_cryptex(source, root, numeric_owners=True):
         # The restore alias points into a separately mounted App cryptex.
         # Pong mounts SystemOS at /private/preboot; AppOS is OS-resident in
         # this port, so replace only this known dangling restore mount alias.
-        if os.readlink(target) not in ('../../private/preboot/Cryptexes/App',
-                                      '/private/preboot/Cryptexes/App'):
-            raise RuntimeError('unexpected App cryptex alias')
+        restore_app_alias(os.readlink(target))
         target.unlink()
     target.mkdir(parents=True, exist_ok=True)
     for child in source.iterdir():
