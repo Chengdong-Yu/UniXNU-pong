@@ -301,7 +301,7 @@ bool ArmCpu::start(IOService *provider)
     return true;
   }
 
-  // Register every processor before waking any of them, as in HackiOS.
+  // Register every processor before waking any of them.
   OSIterator *iter = provider->getProvider()->getChildIterator(gIOServicePlane);
   if (iter) {
     IOService *nub;

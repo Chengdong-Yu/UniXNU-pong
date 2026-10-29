@@ -4,7 +4,6 @@
   "kernel": "XNU 8796.141.3 / Darwin 22.6.0",
   "restore_build": "20G81",
   "device_source": "/Volumes/PongDev/handoffs/Pong-iOS16-Mac-Next-20261020/UniXNU-pong",
-  "userland_source": "/Users/desktop/Downloads/hackios-xnu-userland-main/pong",
   "latest_boot_artifacts": "/Volumes/PongDev/build/Pong-iOS16-v117-wallpaper-upstream",
   "latest_boot": "Fastboot temporary boot returned OKAY; visual result of the latest wallpaper repair is not confirmed",
   "migration_state": "Darwin 24 kernel port in progress; DarwinBoot24/DT/CPU/UFS and 22H374 userland images built; full native kernel and hardware boot not complete",

@@ -1,5 +1,5 @@
 /*
- * Pong / UniXNU adaptation of HackiOS stage0 and init (MIT; see ../LICENSE).
+ * Pong / UniXNU stage0 and init for the native Darwin24 APFS port.
  * Static init; the build selects the matching restore and runtime UI adapter.
  */
 #include "mini.h"

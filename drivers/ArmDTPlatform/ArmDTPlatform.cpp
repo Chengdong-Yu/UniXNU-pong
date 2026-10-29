@@ -56,7 +56,7 @@ private:
 
 OSDefineMetaClassAndStructors (ArmDTPlatform, IODTPlatformExpert)
 
-// HackiOS's boot-epoch clock, backed by a supplied host/firmware UTC sample
+// Boot-epoch clock, backed by a supplied host/firmware UTC sample
 // and the real arch timer. This is a software clock, not a claimed PMIC RTC.
 long ArmDTPlatform::getGMTTimeOfDay (void)
 {
