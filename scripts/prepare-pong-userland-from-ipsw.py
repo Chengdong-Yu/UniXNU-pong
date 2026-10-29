@@ -349,9 +349,11 @@ def image_kind(path):
     only way to avoid converting something that is already raw.
     """
     path = Path(path)
-    # A sparseimage is a bundle directory, so this test comes before any open.
+    # A sparse *bundle* is a directory of bands; `hdiutil create -type SPARSE`
+    # makes a single file instead, so both shapes have to be recognised before
+    # anything is opened.
     if path.is_dir():
-        return 'sparseimage'
+        return 'sparsebundle'
     with path.open('rb') as handle:
         head = handle.read(4096)
         size = handle.seek(0, os.SEEK_END)
@@ -359,6 +361,11 @@ def image_kind(path):
         trailer = handle.read(512)
     if trailer[:4] == b'koly':
         return 'udif'
+    # UDSP, the single-file sparse image: an `sprs` header and a band map, not
+    # a raw disk. It is what `hdiutil create -type SPARSE` writes, and it is
+    # converted exactly like a UDIF.
+    if head[:4] == b'sprs':
+        return 'sparseimage'
     if len(head) >= 4096 and head[32:36] == b'NXSB':
         return 'apfs'
     if len(head) >= 1024 and head[512:520] == b'EFI PART':
@@ -383,7 +390,7 @@ def materialize_raw(rec, source, destination, label):
         fail('refusing to overwrite ' + str(destination))
     if kind in ('apfs', 'gpt'):
         os.replace(source, destination)
-    elif kind in ('udif', 'sparseimage'):
+    elif kind in ('udif', 'sparseimage', 'sparsebundle'):
         rec.run(label, ['hdiutil', 'convert', str(source), '-format', 'UDTO',
                         '-o', str(destination)])
         # hdiutil appends .cdr when the requested name does not already end in it.
@@ -404,10 +411,24 @@ def materialize_raw(rec, source, destination, label):
 
 
 def create_apfs_image(rec, path, mib, volume_name, label):
+    """An empty APFS volume of `mib` KiB, as `hdiutil create -type SPARSE` writes it.
+
+    The result is a single sparse *file* (a UDSP image), not the directory a
+    sparsebundle is: that is what the local recipe's command produces, and it is
+    what build-systemos18.py accepts as `--image`. Only allocated blocks reach
+    the disk, which is why a 5 GiB and an 8 GiB volume cost far less than 13 GiB
+    while they are being filled.
+    """
     rec.run(label, ['hdiutil', 'create', '-size', '%dk' % mib, '-type', 'SPARSE',
                     '-layout', 'NONE', '-fs', 'APFS', '-volname', volume_name, str(path)])
-    if not path.is_dir():
-        fail('hdiutil create did not produce the sparseimage ' + str(path))
+    if path.is_dir():
+        fail('%s came back as a directory; this chain expects the single-file sparse image '
+             '`hdiutil create -type SPARSE` writes' % path)
+    if not path.is_file() or path.stat().st_size == 0:
+        fail('hdiutil create did not produce the sparse image ' + str(path))
+    if image_kind(path) != 'sparseimage':
+        fail('%s is not the sparse image the create reported' % path)
+    return path.stat().st_size
 
 
 def load_stage_module():
@@ -705,8 +726,10 @@ def main():
              % (cache, len(cache_files)))
 
     systemos_sparse = work / 'PongSystemOS18.sparseimage'
-    create_apfs_image(rec, systemos_sparse, SYSTEMOS_MIB, 'Pong-iPadOS18-SystemOS',
-                      'create SystemOS volume')
+    systemos_sparse_bytes = create_apfs_image(
+        rec, systemos_sparse, SYSTEMOS_MIB, 'Pong-iPadOS18-SystemOS', 'create SystemOS volume')
+    rec.stage('systemos-created', image=systemos_sparse.name, bytes=systemos_sparse_bytes,
+              mib=SYSTEMOS_MIB)
     systemos_cdr = out / 'pong-ipados18-systemos.cdr'
     # Root for the same reason the local recipe is run with sudo: ditto has to
     # write Apple's original uid/gid onto the copy, and hdiutil needs ownership
@@ -723,7 +746,9 @@ def main():
              % (systemos_bytes, systemos_cdr))
     probe_volume(rec, stage, systemos_cdr, 'systemos', None)
     if not args.keep_work:
-        shutil.rmtree(systemos_sparse, ignore_errors=True)
+        # A single-file image, so unlink; rmtree would only swallow the error and
+        # leave 5 GiB of sparse bands behind for the rest of the run.
+        systemos_sparse.unlink(missing_ok=True)
     rec.stage('systemos-built', bytes=systemos_bytes, cache_pieces=len(cache_files))
 
     # -- 6. AppOS: mount it for --app-cryptex ------------------------------
@@ -753,7 +778,7 @@ def main():
              % (data_raw_bytes, DATA_MIB * 1024, DATA_MIB))
     probe_volume(rec, stage, data_raw, 'data', 0x40)
     if not args.keep_work:
-        shutil.rmtree(data_sparse, ignore_errors=True)
+        data_sparse.unlink(missing_ok=True)
     rec.stage('data-created', bytes=data_raw_bytes)
 
     # -- 8. prepare -------------------------------------------------------
