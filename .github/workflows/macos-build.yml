@@ -13,18 +13,18 @@ on:
         required: false
         default: ''
         type: string
-      userland_url:
-        description: 'Prepared 22H374 userland archive URL (zip or tar.gz): result.json, apply-complete.json and the OS, SystemOS and Data images. Empty skips the userdata layout.'
+      ipsw_url:
+        description: 'https URL of the Apple iPad 18.7.10 / 22H374 restore (the .ipsw itself). The runner downloads it, decrypts it and builds the prepared userland, then the userdata layout and image. Empty skips all of that.'
         required: false
         default: ''
         type: string
-      userland_sha256:
-        description: 'Optional sha256 of that archive. A mismatch stops the run before anything is unpacked.'
+      ipsw_sha256:
+        description: 'Optional sha256 of that IPSW. A mismatch stops the run after the download and before anything is unpacked.'
         required: false
         default: ''
         type: string
       userdata_image:
-        description: 'Assemble one userdata .img from the prepared userland and upload it in 8 GiB parts. Needs that userland; otherwise ignored.'
+        description: 'Assemble one userdata .img from the userland built from ipsw_url and upload it in 8 GiB parts. Needs ipsw_url; otherwise ignored.'
         required: false
         default: true
         type: boolean
@@ -125,15 +125,20 @@ jobs:
           xcodebuild -version
           # Run 9 had 107 GiB free before this step and 180 GiB after. The
           # difference was eight minutes of rm -rf on the unused Xcode copies.
-          # The selected Xcode stays. Delete the others only below 40 GiB free,
-          # which still covers the kernel objects, EDK2, and the Linux checkout.
-          NEED_KB=$((40 * 1024 * 1024))
+          # The selected Xcode stays. Delete the others below 80 GiB free.
+          #
+          # 80 rather than the old 40 because this job now builds the prepared
+          # userland here: the peak of that chain is about 37 GiB, held at the
+          # same time as the kernel's objects, EDK2, the Linux checkout and the
+          # refer pins. 40 GiB would have been enough when the userland arrived
+          # as an archive that was consumed and deleted window by window.
+          NEED_KB=$((80 * 1024 * 1024))
           AVAIL_KB="$(df -k / | awk 'NR==2 {print $4}')"
           echo "avail_kb=${AVAIL_KB} need_kb=${NEED_KB}"
           if [ "$AVAIL_KB" -ge "$NEED_KB" ]; then
             echo "Skipping unused Xcode deletion: ${AVAIL_KB} KiB free is at least ${NEED_KB} KiB. Keeping ${SELECTED}."
           else
-            echo "Free space is below 40 GiB. Removing Xcode copies other than ${SELECTED}."
+            echo "Free space is below 80 GiB. Removing Xcode copies other than ${SELECTED}."
             for app in /Applications/Xcode*.app; do
               [ -d "$app" ] || continue
               case "$SELECTED" in
@@ -320,80 +325,101 @@ jobs:
             echo 'power/adsp.mbn is present for the runtime firmware path. The power build does not embed that file.'
           } > ci-stages.txt
           cat ci-stages.txt
-      - name: Stage the prepared userland
+      - name: Build the prepared userland from the IPSW
         # Runs on every job and records its decision, the way Choose firmware path
         # does: a push event carries no inputs context at all, so an `if:` on
-        # inputs.userland_url would be reading a value that does not exist.
+        # inputs.ipsw_url would be reading a value that does not exist.
+        #
+        # This step is the one that changed shape: it used to unpack a prepared
+        # userland someone had built on a Mac. It now fetches the Apple restore
+        # itself, decrypts it and assembles the same five files here, so the
+        # input is the IPSW URL and nothing has to be pre-made off-runner.
         id: userland
         env:
-          USERLAND_URL: ${{ inputs.userland_url }}
-          USERLAND_SHA256: ${{ inputs.userland_sha256 }}
-          # Only needed when the archive sits behind authentication, such as a
-          # private GitHub release asset fetched through the API URL. The same
-          # token the firmware archive uses; the two inputs differ, not the access.
-          USERLAND_ARCHIVE_TOKEN: ${{ secrets.PONG_FIRMWARE_ARCHIVE_TOKEN }}
+          IPSW_URL: ${{ inputs.ipsw_url }}
+          IPSW_SHA256: ${{ inputs.ipsw_sha256 }}
         run: |
           set -euo pipefail
-          url="$(printf '%s' "${USERLAND_URL}" | tr -d '[:space:]')"
-          sha="$(printf '%s' "${USERLAND_SHA256}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          url="$(printf '%s' "${IPSW_URL}" | tr -d '[:space:]')"
+          sha="$(printf '%s' "${IPSW_SHA256}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
           if [ -z "${url}" ]; then
-            echo "No userland_url input."
+            echo "No ipsw_url input."
             echo "The userdata layout and image stages will record a skip."
             printf '%s\n' 'staged=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           case "${url}" in
             https://*) ;;
-            *) echo "userland_url must be an https URL, got: ${url}" >&2; exit 1 ;;
+            *) echo "ipsw_url must be an https URL, got: ${url}" >&2; exit 1 ;;
           esac
-          # Name the download after the URL's last path segment: the staging
-          # script picks the archive format from the file name.
-          base="${url%%\?*}"
-          base="${base%%#*}"
-          base="${base##*/}"
-          case "${base}" in
-            *.zip|*.tar.gz|*.tgz|*.tar) ;;
-            *) echo "userland_url must point at a .zip, .tar.gz, .tgz or .tar file, got: ${url}" >&2; exit 1 ;;
+          # The name is only a hint: the extractor reads BuildManifest.plist and
+          # refuses anything that is not 18.7.10 / 22H374 on iPad7,11|7,12.
+          case "${url%%\?*}" in
+            *.ipsw) ;;
+            *) echo "ipsw_url must end in .ipsw, got: ${url}" >&2; exit 1 ;;
           esac
-          archive="${RUNNER_TEMP}/pong-userland-archive/${base}"
-          rm -rf "${RUNNER_TEMP}/pong-userland-archive" "${RUNNER_TEMP}/pong-userland"
-          mkdir -p "$(dirname "${archive}")"
-          echo "Downloading the prepared userland archive as ${base}."
-          echo "=== df before userland download ==="
+          # Everything Apple's is written under $RUNNER_TEMP and removed stage by
+          # stage inside the script; the prepared userland is the only thing that
+          # has to survive, because the layout step reads it after the kernel.
+          rm -rf "${RUNNER_TEMP}/pong-userland" "${RUNNER_TEMP}/pong-ipsw-work"
+          echo "=== df before the userland build ==="
           df -h | tee df-before-userland.txt
-          if [ -n "${USERLAND_ARCHIVE_TOKEN:-}" ]; then
-            curl -fsSL --retry 3 --retry-delay 2 \
-              -H "Authorization: Bearer ${USERLAND_ARCHIVE_TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              -o "${archive}" "${url}"
-            unset USERLAND_ARCHIVE_TOKEN
-          else
-            curl -fsSL --retry 3 --retry-delay 2 -o "${archive}" "${url}"
-          fi
-          ls -l "${archive}"
-          stage=(--archive "${archive}" --dest "${RUNNER_TEMP}/pong-userland"
-                 --json-out ci-userland-archive.json
-                 --volume-layout-out ci-volume-layout.json)
+          args=(--ipsw-url "${url}"
+                --work-dir "${RUNNER_TEMP}/pong-ipsw-work"
+                --out "${RUNNER_TEMP}/pong-userland"
+                --developer "$(xcode-select -p)"
+                --json-out ci-userland-from-ipsw.json
+                --volume-layout-out ci-volume-layout.json)
           if [ -n "${sha}" ]; then
-            stage+=(--expect-sha256 "${sha}")
+            args+=(--ipsw-sha256 "${sha}")
           fi
-          python3 scripts/stage-pong-userdata.py "${stage[@]}"
-          # The archive has done its job. The three windows and the output image
-          # need roughly three times its size, and this runner's disk is already
-          # shared with the kernel build.
-          rm -f "${archive}"
-          rmdir "${RUNNER_TEMP}/pong-userland-archive" 2>/dev/null || true
+          # Not under `set +e`: a chain that stops halfway must fail this step.
+          # Every Apple image it produced is discarded by the next run anyway,
+          # and a half-built userland that looked staged would fail much later,
+          # inside the layout step, for a reason that points at the wrong place.
+          python3 scripts/prepare-pong-userland-from-ipsw.py "${args[@]}"
+          # Same contract the archive path wrote: a path file and a layout file
+          # with the shapes the steps below already read.
           printf '%s\n' "${RUNNER_TEMP}/pong-userland" > ci-userland-path.txt
-          echo "=== df after userland staging ==="
+          python3 - ci-volume-layout.json ci-userland-from-ipsw.json <<'REPORT'
+          import json
+          import sys
+          from pathlib import Path
+          layout = json.loads(Path(sys.argv[1]).read_text())
+          report = json.loads(Path(sys.argv[2]).read_text())
+          if layout.get('ci_placeholder'):
+              raise SystemExit('ci-volume-layout.json still holds placeholders')
+          for key in ('os', 'systemos', 'data'):
+              if len(layout.get(key, {}).get('uuid', '')) != 36:
+                  raise SystemExit('ci-volume-layout.json has no usable %s uuid' % key)
+          if report.get('build') != '22H374':
+              raise SystemExit('the userland report names build %r' % report.get('build'))
+          print('userland built from', report['inputs']['ipsw_url'])
+          print('userland bytes', report['userland_bytes'], 'in', report['seconds'], 'seconds')
+          for name, image in sorted(report['images'].items()):
+              print(' ', name, image['bytes'], 'bytes, volume', image['volume_uuid'])
+          REPORT
+          echo "=== df after the userland build ==="
           df -h | tee df-after-userland-stage.txt
           {
-            echo 'Prepared 22H374 userland staged from the archive.'
-            echo "result.json build 22H374, apply-complete.json present."
-            echo 'Volume UUIDs for OS/SystemOS/Data came out of the supplied images.'
+            echo 'Prepared 22H374 userland built on this runner from the IPSW.'
+            echo 'IPSW downloaded, components extracted, OS and SystemOS decrypted with AEA,'
+            echo 'SystemOS and Data assembled as fresh APFS volumes, then prepare/apply/finish.'
+            echo 'Volume UUIDs for OS/SystemOS/Data were read out of the images this run made.'
             echo 'The userdata layout and image stages run after the kernel build.'
           } > ci-userdata-stages.txt
           cat ci-userdata-stages.txt
           printf '%s\n' 'staged=true' >> "$GITHUB_OUTPUT"
+        # The six-hour job ceiling is the real limit, not a per-step number. The
+        # stages that measured fast on this runner add up to roughly 95 minutes
+        # (reclaim 8, tools 5, refer 2, DarwinBoot24 10, layout 2, kernel 25-30,
+        # boot 2, userdata layout ~20, image ~15). This step is the new one: a
+        # 7.35 GiB download, a 7.5 GiB extract, two AEA decryptions, one UDIF
+        # conversion, a 3.7 GiB file-by-file SystemOS copy, 14.4 GiB of image
+        # copies at prepare and a 8 GiB Data pack. None of it has been timed on
+        # macos-15-intel, so the bound is generous; if it overruns, this step
+        # fails on its own clock and the always() uploads still keep the kernel.
+        timeout-minutes: 120
 
       - name: Linux 7.0.14 ath11k sources
         if: steps.firmware.outputs.path == 'B'
@@ -783,9 +809,9 @@ jobs:
           set -euo pipefail
           source ci-env.sh
           # Two ways to get here:
-          #   * userland_url was filled in, so Stage the prepared userland put the
-          #     five inputs under $RUNNER_TEMP/pong-userland and this step writes
-          #     the SHNGROOT layout from them;
+          #   * ipsw_url was filled in, so Build the prepared userland from the
+          #     IPSW put the five inputs under $RUNNER_TEMP/pong-userland and this
+          #     step writes the SHNGROOT layout from them;
           #   * it was empty (every push run), so there is nothing to lay out and
           #     userdata-decision.json records a skip with exit 0. A skip is not a
           #     failure, and the kernel above still gets built and packaged.
@@ -802,10 +828,11 @@ jobs:
                     'build': None, 'missing': []}
           if prepared is None:
               record['reason'] = (
-                  'userdata layout was not built. No userland_url input was given, so this run '
-                  'has no prepared 22H374 userland (result.json build 22H374, apply-complete.json, '
-                  'and the OS, SystemOS and Data images). No SHNGROOT directory was written. '
-                  'Start the workflow from the Actions page with userland_url to build it.')
+                  'userdata layout was not built. No ipsw_url input was given, so this run has no '
+                  'prepared 22H374 userland (result.json build 22H374, apply-complete.json, and '
+                  'the OS, SystemOS and Data images). No SHNGROOT directory was written. Start '
+                  'the workflow from the Actions page with the Apple restore URL in ipsw_url to '
+                  'build it on the runner.')
           elif not (prepared / 'result.json').is_file():
               record['missing'].append('result.json')
               record['reason'] = ('ci-userland-path.txt names ' + str(prepared) + ' but result.json '
@@ -937,7 +964,7 @@ jobs:
               'df_after_userland_stage': read('df-after-userland-stage.txt'),
               'df_after_userdata_layout': read('df-after-userdata-layout.txt'),
               'df_after_userdata_image': read('df-after-userdata-image.txt'),
-              'userland_archive': load('ci-userland-archive.json'),
+              'userland_from_ipsw': load('ci-userland-from-ipsw.json'),
               'volume_layout': load('ci-volume-layout.json'),
               'boot': load('boot-decision.json'),
               'userdata': load('userdata-decision.json'),
@@ -949,7 +976,8 @@ jobs:
           mkdir -p ci-logs ci-products
           cp -f ci-manifest.json ci-products/ci-manifest.json
           cp -f ci-manifest.json ci-paths.txt boot-decision.json userdata-decision.json \
-            ci-stages.txt ci-userdata-stages.txt userdata-image.json ci-logs/ 2>/dev/null || true
+            ci-stages.txt ci-userdata-stages.txt userdata-image.json \
+            ci-userland-from-ipsw.json ci-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
