@@ -719,7 +719,7 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     /* Every process that runs the Adreno plugin opens with its type: on Apple hardware every Metal process opens the AGX user client, and the
      * original profiles here name no class of this driver for the render server (MACF 1 for the plugin's types at every boot since int-038).
      * The plugin's two open types are granted here, by this driver: the grant is a property of the client object that the kernel's open path
-     * (patches/xnu/native-adreno-sandbox-grant.patch) honours in place of the sandbox verdict. The verdict is still taken above and logged.
+     * (native_sandbox_grant in patches/xnu-ipados18/0001-pong-darwin24.patch) honours in place of the sandbox verdict. The verdict is still taken above and logged.
      * Which processes run the plugin at all is the plugin's allow-list (NativeAdrenoMetal.clients). */
     const bool kernel=owningTask==kernel_task;
     char opener[20]={};

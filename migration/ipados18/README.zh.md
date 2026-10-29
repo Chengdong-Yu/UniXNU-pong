@@ -10,7 +10,7 @@
 
 ## 已落地的迁移
 
-- `board.toml`、`feeds.toml` 和独立的 `pong_ipados18_defconfig` 已切到 22H374 / Darwin 24；iOS 16 构建树继续保留。
+- `board.toml`、`feeds.toml` 和独立的 `pong_ipados18_defconfig` 已切到 22H374 / Darwin 24；iOS 16 构建树与补丁集不再随仓库发布，只保留在 Git 历史中。
 - `patches/xnu-ipados18/` 保存重定位到 Darwin 24 的 Pong 4 KiB 页、PAN、DT/CPU、控制台与 pstore、APFS 挂载、静态 init、开发签名策略、软件 keybag、输入及基础显示修补。
 - 新增 `DarwinBoot24` 并完成编译。Darwin 24 ARM64 的 `CommandLine` 为 1024 字节，`BootFlags` 位于 `0x470`，`MemorySizeActual` 位于 `0x478`，`boot_args` 大小为 `0x480`。不能用 DarwinBoot22 的 608 字节布局直接交接。
 - Pong 的 DT 平台、PSCI/GICv3 CPU、UFS 驱动和匹配 libdispatch 的 firehose 库已用新内核 SDK 重新编译。
