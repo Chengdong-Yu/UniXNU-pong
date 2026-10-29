@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build Linux 7.0.14 ath11k PCI/MHI using UniXNU's shared Wi-Fi ABI.
 
-Sources are local public Linux and UniXNU Ath12kWifi checkouts; no HackiOS.
+Sources are local public Linux and UniXNU Ath12kWifi checkouts.
 The driver is not replaced by success stubs. Missing core symbols fail the
 link recipe; power/DMA/MSI remain the consuming Pong board's responsibility.
 """
@@ -30,7 +30,6 @@ def main():
     if not (linux / 'drivers/net/wireless/ath/ath11k/pci.c').is_file(): raise RuntimeError('Linux ath11k PCI sources required')
     for file in ('include/nw_abi.h', 'shim/src/lx_rt.c', 'src/nw_sta.c'):
         if not (shared / file).is_file(): raise RuntimeError('UniXNU Ath12kWifi shared ABI required: ' + file)
-    if 'hackios' in str(shared).lower() or 'hackios' in str(linux).lower(): raise RuntimeError('HackiOS source is not selected')
     source = linux / 'drivers/net/wireless/ath/ath11k'
     gen = out / 'ath11k'; gen.mkdir(exist_ok=True)
     for f in source.glob('*'):

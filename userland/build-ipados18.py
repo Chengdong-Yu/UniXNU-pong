@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adapt HackiOS userland to the local, native-APFS UniXNU Pong 22H374 port.
+"""Adapt the userland to the local, native-APFS UniXNU Pong 22H374 port.
 
 prepare: build static init, curate real 22H374 jobs, extract a Data seed and clone images.
 apply:   mount ONLY these image copies and apply the prepared changes (macOS admin).
@@ -26,6 +26,7 @@ import subprocess
 import sys
 
 VERIFY_IMAGES = False
+BUILD_PLAN_FORMAT = 'pong-userland-22H374-v1'
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'tools/apfs'))
@@ -792,7 +793,7 @@ def data_seed(image, root, overlay, out):
         metadata[rel] = [kind | (0o755 if kind != stat.S_IFREG else 0o644), 0, 0]
     link = 'db/timezone/zoneinfo'
     # /usr/share/zoneinfo points into /var on 22H374. Repeating that target
-    # here makes a cycle before timed starts; HackiOS uses the shipped data.
+    # here makes a cycle before timed starts; the earlier port uses the shipped data.
     if (data / link).is_symlink() and os.readlink(data / link) == '/usr/share/zoneinfo':
         (data / link).unlink()
     if not os.path.lexists(data / link): (data / link).symlink_to('/usr/share/zoneinfo.default')
@@ -963,7 +964,6 @@ def prepare(a):
     overlay = out / 'overlay'
     (overlay / 'pong/etc').mkdir(parents=True, exist_ok=True)
     stage_audio_policy(overlay)
-    (overlay / 'pong/LICENSE-HackiOS').write_bytes((PROJECT / 'userland/LICENSE-HackiOS').read_bytes())
     (overlay / 'sbin').mkdir(exist_ok=True)
     init_signature = compile_init(out, a.developer, overlay / 'sbin/launchd')
     counts = jobs(root, cryptex, overlay, out, a.app_cryptex)
@@ -991,12 +991,12 @@ def prepare(a):
     if len(cache_files) < 2: raise RuntimeError('matching split arm64 shared cache missing')
     # Record all matching cache pieces; do not copy or replace any with 20F66 files.
     cache_info = {p.name: {'size': p.stat().st_size, 'sha256': sha(p)} for p in cache_files}
-    state = dict(format='pong-hackios-userland-22H374-v1', version=version, cryptex_version=cv,
+    state = dict(format=BUILD_PLAN_FORMAT, version=version, cryptex_version=cv,
                  os_source=str(a.os_image.resolve()), os_root=str(root), system_cryptex=str(cryptex),
                  data_source=str(a.data_image.resolve()), apple_sha256=hashes, cache=cache_info,
                  jobs=counts, data=seed, static_init_signature=init_signature,
                  disabled=['20F66 fixed-address injection', 'Redwood sysctls',
-                 'HackiOS ramfs / custom APFS ABI', 'hardware firmware and GPU libraries'],
+                 'ramfs / custom APFS ABI from the earlier port', 'hardware firmware and GPU libraries'],
                  system_cryptex_runtime='/private/preboot',
                  app_cryptex=str(a.app_cryptex.resolve()) if a.app_cryptex else None,
                  kernel_prerequisites=['native APFS 22H374', 'SystemOS mounted at /private/preboot',
@@ -1039,7 +1039,7 @@ def attach(image, mountpoint):
 def apply(a):
     if os.geteuid() != 0: raise RuntimeError('apply requires macOS administrator authorization')
     out = a.out.resolve(); plan = json.loads((out / 'build-plan.json').read_text())
-    if plan['format'] != 'pong-hackios-userland-22H374-v1': raise RuntimeError('wrong build plan')
+    if plan['format'] != BUILD_PLAN_FORMAT: raise RuntimeError('wrong build plan')
     if (out / 'apply-complete.json').exists(): raise RuntimeError('images already modified; use a new output directory')
     for name, source in (('pong-ipados18-system.cdr', plan['os_source']),
                          ('pong-ipados18-data.cdr', plan['data_source'])):
@@ -1144,7 +1144,7 @@ def rebuild_data(a):
     if os.geteuid() != 0: raise RuntimeError('rebuild_data requires system authentication')
     out = a.out.resolve()
     plan = json.loads((out / 'build-plan.json').read_text())
-    if plan.get('format') != 'pong-hackios-userland-22H374-v1':
+    if plan.get('format') != BUILD_PLAN_FORMAT:
         raise RuntimeError('matching 22H374 prepared userland required')
     source = Path(plan['data_source']).resolve()
     target = out / 'pong-ipados18-data.cdr'

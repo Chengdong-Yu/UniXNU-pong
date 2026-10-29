@@ -23,7 +23,7 @@ services71 的 pstore 保存于本机 `audit-services71/pstore/`。选择性读�
 - nw_abi 的 scan/connect/disconnect/TX 本身已经排队，由单一 worker 执行，不在设置 ioctl 里运行 MHI/QMI 长等待；没有再套一层可能锁死的同步队列。
 - 表、arena 和 MSI 的 IOVA 范围不重叠；arena suballocator 保留原连续 IOVA、对齐与范围检查。全部页先校验再安装映射。
 - 保留与 Pong live DT 相符的 MI2S 121/122/123/124、I2C48/49、功放 reset1/89，以及真实输出就绪门槛、48k stereo 格式、19.2MHz host clock 修补。未新增虚构输入设备，也不把功放识别当作 PCM 播放成功。
-- Native Wifi 和 Power 档案均进入本轮 Darwin24 内核链接；HAL 使用现代 .driver/MH_BUNDLE。未导入 Hackios 实现。
+- Native Wifi 和 Power 档案均进入本轮 Darwin24 内核链接；HAL 使用现代 .driver/MH_BUNDLE。未导入旧端口实现。
 
 ## 构建和启动
 

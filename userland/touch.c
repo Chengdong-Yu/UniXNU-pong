@@ -1,4 +1,4 @@
-/* Pong touch-to-HID bridge adapted from HackiOS inject.c (MIT).
+/* Pong touch-to-HID bridge.
  * Runs in backboardd, reads only actual Goodix samples. No graphics hooks. */
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>

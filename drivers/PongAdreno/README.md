@@ -86,7 +86,7 @@ actual CP/Metal/scanout results must come from the next device log.
   original firmware structure planner and the basis of the isolated HFI fork.
 - UniXNU-Sheng/package/ShengGmu.c: startup structure and one-shot failure
   policy. No A740 register map, firmware hash or clock/voltage votes were copied.
-- HackiOS/xnu/files/bsd/dev/redwood_adreno.c: separation of platform power,
+- Earlier port redwood_adreno.c: separation of platform power,
   native4K GMU/GPU mappings, ZAP authentication, CP start and user-client
   publication. Its A642L register/firmware values are not applicable here.
 

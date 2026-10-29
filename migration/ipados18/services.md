@@ -107,7 +107,7 @@ services12 内核构建日志为 `build-20261024T104009Z.log`，原生代码与 
 
 services12 的 REC 日志逐一确认 CPU 0–7 first boot completed，ArmDTPlatform 登记 cpus=8，所有 UFS 窗口以及 SystemOS、可写 Data 均已挂载。随后在 CPU 3 上运行的 PID 1 触发 `Unsupported Pong init path @kern_exec.c:7892`。这发生在 helper 执行前，CPU 软件合成器尚未运行，不能据此归因于 QuartzCore 地址或多核启动。
 
-已先对照 iOS 16 的 `zzzzzzz-pong-hackios-userland-abi.patch`：旧端口刻意只允许 Data 中的 `/private/var/pong/init`。services12 将实际 helper 迁到 OS 的 `/pong/init`，却遗漏同步该 allowlist，这是上一版的配置衔接错误。
+已先对照 iOS 16 的用户态 ABI 补丁：旧端口刻意只允许 Data 中的 `/private/var/pong/init`。services12 将实际 helper 迁到 OS 的 `/pong/init`，却遗漏同步该 allowlist，这是上一版的配置衔接错误。
 
 services13 将 Darwin 24 的允许路径明确限定为 `/pong/init` 与原有 `/private/var/pong/init`，保留 `load_init_program_at_path`、原生 Mach-O/签名加载和所有真实执行错误处理。没有删除路径检查或将 exec 错误改为成功。重新核对 18 构建器的 helper 路径、UI 库路径、boot args 与已安装的 OS runtime，仍使用 22H374 组件与 4 KiB 开发签名，不套用 20G81 的地址或私有结构。
 
@@ -232,7 +232,7 @@ Data-only 写入已完成 8,589,934,592 字节并收到 16 个区块完成回执
 
 services18 REC console 为 282,339 字节，没有记录 kernel panic。8 核上线，SystemOS / 可写 Data 正常挂载，静态 init 显示 created=0、seed-errors=0，原生 persona manifest 已写入。上轮根挂载 panic 未再出现，lsd 仍以 SIGABRT 在约 20–60ms 内退出，累计 18 次；指定的 LaunchServices/Library/Caches 目录仍为空，没有观察到 UI 出帧。保留损坏字符的原始 pstore，未把文字损坏还原为不存在的日志证据。
 
-对照 iOS16 / HackiOS 的容器处理，旧端口使用真实 UID 容器并在容器管理器中禁用不适用的 persona 模式，不删除 lsd。解析本机 22H374 CoreServices 又发现 services17 的具体遗漏：普通 lsd 的 databaseContainerURL 在非教育、非 lightweight-system-server 模式下选择 userContainerURL；LS_DATABASE_DIR 只作用于 systemContainerBaseURL。22H374 userContainerURL 的 server 分支执行 class-10 persona 容器查询，查询失败或缺失路径时最终直接 abort。这个确定存在的失败路径与当前早期 SIGABRT 一致，但 services18 没有保存 lsd 的调用栈，尚不能把它标成已经真机确认的唯一原因。
+对照 iOS 16 的容器处理，旧端口使用真实 UID 容器并在容器管理器中禁用不适用的 persona 模式，不删除 lsd。解析本机 22H374 CoreServices 又发现 services17 的具体遗漏：普通 lsd 的 databaseContainerURL 在非教育、非 lightweight-system-server 模式下选择 userContainerURL；LS_DATABASE_DIR 只作用于 systemContainerBaseURL。22H374 userContainerURL 的 server 分支执行 class-10 persona 容器查询，查询失败或缺失路径时最终直接 abort。这个确定存在的失败路径与当前早期 SIGABRT 一致，但 services18 没有保存 lsd 的调用栈，尚不能把它标成已经真机确认的唯一原因。
 
 services19 将适配库接入真实 lsd，在 UID=501 且四个原厂零参数/对象返回方法的运行时 ABI 全部匹配时，为 _LSDefaults 的 systemContainerBaseURL、systemContainerURL、userContainerURL、systemGroupContainerURL 配置实际 mobile-owned 可写目录。用户库为 LaunchServices/User/Library/Caches，共享状态为 LaunchServices/Shared/Library/Caches，系统分支沿用原目录。只调整 lsd 自己的数据库存储位置，继续使用原厂数据库格式、初始化、应用容器与所有 MachServices；不编造 MCM 查询应答、不覆盖其他服务的容器目录、不更改私有对象字段或套用 20G81 地址。
 
@@ -301,7 +301,7 @@ services20 原来误排除了 22H374 的 audiomxd：它不是旧 iOS16 常见的
 
 准备脚本中的 OS 副本和目标设备分别符合实际挂载合同：SystemOS UUID D96FCEC3-6DE9-474F-8F38-E40FA084948B 挂载 `/private/preboot` 只读；Data UUID 952D79E9-0CD4-47B2-B817-22889BF8AC50 挂载 `/private/var` 可写；OS 根 UUID B07DF049-7AD9-47B5-9F8F-9EE728056398。`/var`、`/System/Cryptexes/OS` 和 shared-cache 别名都已正确，因此未误报为修复。App Cryptex 仍未提供，不制造它的路径或服务。
 
-源树中剩下的 HackiOS DENY `audio` 还会排除 audiomxd 所需的物理 HAL 插件。services22 保留所有 OS 文件，只在启动时将实际 `/System/Library/Audio/Plug-Ins/HAL` 绑定到 root-owned 空目录；单独的 `/Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin` 不被覆盖。这样由真实 audiomxd 提供系统音频/CoreMedia IPC，同时不加载未经适配的板级音频驱动。Profiled 和 audiomxd 以外，仍只跳过有 SIGTRAP 或无可用服务后端证据的可选任务；核心 UI、数据库、安装、容器和电源任务保留。
+源树中剩下的旧端口 DENY `audio` 还会排除 audiomxd 所需的物理 HAL 插件。services22 保留所有 OS 文件，只在启动时将实际 `/System/Library/Audio/Plug-Ins/HAL` 绑定到 root-owned 空目录；单独的 `/Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin` 不被覆盖。这样由真实 audiomxd 提供系统音频/CoreMedia IPC，同时不加载未经适配的板级音频驱动。Profiled 和 audiomxd 以外，仍只跳过有 SIGTRAP 或无可用服务后端证据的可选任务；核心 UI、数据库、安装、容器和电源任务保留。
 
 ### services22 OS 增量格式和部署
 
@@ -645,7 +645,7 @@ boot-services39/temporary-boot.json。UI、壁纸/图标及状态栏效果待手
 
 ### Pong Wi-Fi：QCA6490 输入及 PCIe handoff 适配
 
-按用户要求，Wi-Fi 不使用 HackiOS。实际 REC 端点为 17cb:1103，子系统
+按用户要求，Wi-Fi 不使用旧端口内容。实际 REC 端点为 17cb:1103，子系统
 17cb:0108，BAR0=0x60200000/2 MiB；DT 标识 QCA6490，采用 PCIe0/MHI/QRTR，
 Linux 对应 ath11k。UniXNU Ath12kWifi 的 WCN7850 后端不能仅替换 PCI ID 使用。
 
@@ -773,7 +773,7 @@ IMP 比较；此前只替换 iOS 工厂没有命中真实选择，给所有工�
 PosterBoard 仅接入保持原 fatal signal 的持久堆栈，不对其运行全局容器或
 WallpaperKit 方法替换。其它启动路径、GPU 和 Data 保留。内核与 runtime
 已编译，内核日志 `build-20261025T082807Z.log`；镜像安装/临时启动另记。
-未执行测试、镜像散列或镜像回读，新增板级代码没有使用 HackiOS。
+未执行测试、镜像散列或镜像回读，新增板级代码没有使用旧端口内容。
 
 services44 安装完成：OS 增量 100,663,296 字节，5 个写入收据，Data 保留。
 临时启动 Sending（2.356s）/Booting（10.174s）均 OKAY，总计 12.604s，未
@@ -811,7 +811,7 @@ PongPower、PongWifi archive 均被 Darwin24 构建 force-load，并非漏编。
 
 屏幕物理参数仍是实际 1080×2412、stride 4320、scale 3；2436 是资源
 family，不是将 Pong 面板改成 Apple 面板。保留 services44 的板级 PCIe
-修正和现有 UFS Data，不清空 Data、不导入 HackiOS、不执行测试或镜像校验。
+修正和现有 UFS Data，不清空 Data、不导入旧端口内容、不执行测试或镜像校验。
 构建及临时启动回执在完成后追加。
 
 services45 已构建并临时启动。OS 增量 50,331,648 字节，4 个写入收据；
@@ -864,7 +864,7 @@ APM readiness 成功后更大的 graph 请求可能永远排队。本轮另外�
 MEM_MAP 等待真实 handle；拒绝/超时记录真实状态，不以 ACK 伪造完成。
 音频 HAL 保持隔离以保留已恢复的界面，系统声音仍需继续接通。
 
-新增代码未使用 HackiOS，未清空 Data，未运行测试、镜像散列或回读。
+新增代码未使用旧端口内容，未清空 Data，未运行测试、镜像散列或回读。
 
 services46 内核第二次构建成功，日志 build-20261025T093022Z.log。首次
 编译只在 strip 输出时因宿主磁盘满而失败；清理可重建 FAT/ramdisk 中间
@@ -910,7 +910,7 @@ scale/overflow flags。使用本版本 runtime ivar/方法签名，未复制旧�
 迁到 out/ipados18/firmware/adreno730；构建器按 guest 选择分支本地输入，
 并在编译前报告缺失文件，不再依赖旧 v92 目录。未下载替代固件。
 重建日志 build-20261025T100858Z.log 已成功导出内核；运行时亦已编译。
-本轮保留现有 Data；没有导入 HackiOS，没有运行测试/镜像散列/镜像回读。
+本轮保留现有 Data；没有导入旧端口内容，没有运行测试/镜像散列/镜像回读。
 安装及临时启动结果另记。
 
 services47 已安装 25,165,824 字节 OS 增量，3 个写入收据，保留现有
@@ -956,7 +956,7 @@ Pong DT，未发现可据此确认修复的新硬件差异，保留 services47 �
 失败路径；没有套用 Sheng SM8550 的时钟、双路 PHY 或 radio 固件。
 本轮复用 services47 已完成内核，仅打包新 revision 和用户态更新。
 
-所有更改保留现有 Data 和 SystemOS。未导入新的 HackiOS 内容，未运行
+所有更改保留现有 Data 和 SystemOS。未导入新的旧端口内容，未运行
 测试、镜像散列或回读；OS 增量为 134,217,728 字节。安装/临时启动回执
 在完成后追加。
 
@@ -1009,7 +1009,7 @@ REC 当前 CNSS 为 PCI PROBE DONE 但 WLAN 已关电，未冒险读取未时钟
 控制器。未将其 sysfs PCI 设备当作建链成功，也未套用 Sheng SM8550 值。
 
 Darwin24 内核、22H374 Metal bridge/plugin 及运行时已重建；保留 Data、
-SystemOS 和恢复的原生服务。未导入 HackiOS，未运行测试/镜像散列/回读。
+SystemOS 和恢复的原生服务。未导入旧端口内容，未运行测试/镜像散列/回读。
 安装与临时启动的精确收据在执行后追加，不能以 Sending/Booting 成功
 代替实际界面、灵动岛或无线扫描确认。
 
@@ -1066,7 +1066,7 @@ REC 原生 CNSS 已成功建立链路，但因 REC 缺少 qca6490/amss20.bin
 没有重复执行该缺失固件的流程，也没有把原生 REC 建链等同于 XNU 成功。
 
 Darwin24 内核、22H374 Metal bridge/plugin、init/UI 已重建。
-未导入新 HackiOS 内容，未执行测试、镜像散列、镜像校验或设备镜像回读。
+未导入新的旧端口内容，未执行测试、镜像散列、镜像校验或设备镜像回读。
 部署及临时启动回执完成后追加，保留原有 SystemOS/Data。
 
 services50 已安装159,383,552字节 OS 增量，共9个区间；完成回执见

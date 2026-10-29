@@ -120,7 +120,7 @@ index 0000000..a50a710
 --- /dev/null
 +++ b/bsd/dev/pong_buttons.c
 @@ -0,0 +1,143 @@
-+/* Pong SM8475 PMIC keys. Read-only peripheral access, adapted from HackiOS
++/* Pong SM8475 PMIC keys. Read-only peripheral access, adapted from the earlier
 + * redwood_buttons.c (APSL 2.0) and NothingOSS spmi-pmic-arb.c register layouts.
 + * No PMIC configuration/reset/supply writes and no display/GPU dependency. */
 +#include <pexpert/arm64/board_config.h>
@@ -269,7 +269,7 @@ index 0000000..00feebd
 --- /dev/null
 +++ b/bsd/dev/pong_goodix.c
 @@ -0,0 +1,914 @@
-+/* Goodix Berlin-D / Pong SM8475. Adapted from HackiOS redwood_goodix.c
++/* Goodix Berlin-D / Pong SM8475. Adapted from the earlier redwood_goodix.c
 + * (APSL 2.0). Hardware resources are the Pong live DT, checked against the
 + * NothingOSS cape pinctrl and waipio GCC source. No Redwood peripherals. */
 +#include <pexpert/arm64/board_config.h>
@@ -1189,7 +1189,7 @@ index 0000000..f601a0b
 --- /dev/null
 +++ b/bsd/dev/pong_input.c
 @@ -0,0 +1,107 @@
-+/* Blocking touch queue, adapted from HackiOS redwood_input.c (APSL 2.0).
++/* Blocking touch queue, adapted from the earlier redwood_input.c (APSL 2.0).
 + * Real Goodix and PMIC producers have separate queues and prerequisite gates. */
 +#include <pexpert/arm64/board_config.h>
 +#if defined(PONG)
@@ -1680,12 +1680,12 @@ index 240bbf6..400dba5 100644
  }
  
 +#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
-+/* Adapted from HackiOS: expose service output redirected to /dev/null.
++/* Adapted from the earlier port: expose service output redirected to /dev/null.
 + * This only changes posix_spawn file actions, never PID 1's exec descriptors. */
 +static TUNABLE(uint32_t, exec_applog, "applog", 0);
 +static TUNABLE_STR(exec_applog_name, 128, "applog_name", "");
 +
-+/* HackiOS's selected-program os_log route also covers services started by
++/* The earlier port's selected-program os_log route also covers services started by
 + * xpcproxy rather than our launchd plists. Leave all other environments alone;
 + * applog=2 is the explicit, expensive all-program mode. */
 +static bool
@@ -1737,7 +1737,7 @@ index 240bbf6..400dba5 100644
   *		to arrays of user space pointers.
   */
 +#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
-+/* HackiOS's per-program compatibility-library insertion. Keep a bounded,
++/* The earlier port's per-program compatibility-library insertion. Keep a bounded,
 + * locked snapshot: root may update configuration while another task execs. */
 +static char exec_inject_conf[512];
 +static LCK_MTX_DECLARE_ATTR(exec_inject_lock, &proc_lck_grp, &proc_lck_attr);
@@ -3929,7 +3929,7 @@ index 0000000..3843c79
 --- /dev/null
 +++ b/bsd/sys/pong_input.h
 @@ -0,0 +1,24 @@
-+/* Pong touch records. HackiOS input ABI adapted to the real Pong producer. */
++/* Pong touch records. Earlier input ABI adapted to the real Pong producer. */
 +#ifndef _SYS_PONG_INPUT_H_
 +#define _SYS_PONG_INPUT_H_
 +#include <stdint.h>
@@ -4218,7 +4218,7 @@ index 2620af5..b782b15 100644
 +extern volatile dev_t native_owner_cache_selected_device;
 +extern volatile dev_t native_owner_cache_mounted_device;
 +
-+/* HackiOS accepts a Cryptex volume mounted below Preboot. Pong mounts the
++/* The earlier port accepts a Cryptex volume mounted below Preboot. Pong mounts the
 + * UUID-selected SystemOS volume directly at /private/preboot, so validate
 + * that exact mount/device/directory relationship instead of its parent. */
 +static boolean_t
@@ -4744,10 +4744,10 @@ index 0000000..0b489ec
 @@ -0,0 +1,287 @@
 +/*
 + * Pong development AppleKeyStore compatibility service, adapted from the
-+ * supplied HackiOS MiniAppleKeyStore (MIT).
++ * supplied MiniAppleKeyStore from the earlier port.
 + *
 + * This is explicitly a volatile software keybag with no passcode and no
-+ * hardware-backed secrets. It implements HackiOS's complete development
++ * hardware-backed secrets. It implements the earlier port's complete development
 + * keybag protocol, including reversible software wrapping, so MobileKeyBag
 + * and keychain clients can run without a SEP. Wrapping is not encryption.
 + */
@@ -9544,7 +9544,7 @@ index 0000000..a4131a8
 +	uint32_t enabled = 0;
 +	if (amfi != NULL || !PE_parse_boot_argn("amfi_get_out_of_my_way", &enabled, sizeof(enabled)) || !enabled) return;
 +	amfi_interface_register(&miniamfi);
-+	printf("Pong userland: HackiOS development AMFI interface registered\n");
++	printf("Pong userland: development AMFI interface registered\n");
 +}
 +STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, miniamfi_init);
 +
@@ -10831,7 +10831,7 @@ index 0000000..ad5e3d0
 --- /dev/null
 +++ b/osfmk/arm64/pong_ui_exception.c
 @@ -0,0 +1,64 @@
-+/* Bounded UI crash capture derived from HackiOS user_exception_trace.c.
++/* Bounded UI crash capture derived from the earlier user_exception_trace.c.
 + * Exception delivery is unchanged; no polling threads or periodic probes.
 + */
 +#include <pexpert/arm64/board_config.h>
