@@ -512,8 +512,26 @@ def main():
 
     developer = args.developer or Path(subprocess.check_output(
         ['xcode-select', '-p'], text=True).strip())
-    if not (developer / 'usr/bin/xcrun').is_file():
-        fail('%s is not an Xcode developer directory (no usr/bin/xcrun)' % developer)
+    # Test the thing the build actually needs, not a guessed file layout.
+    # build-ipados18.py compiles with `xcrun --sdk iphoneos` under DEVELOPER_DIR,
+    # and on the macOS runner image `$DEVELOPER_DIR/usr/bin/xcrun` does not
+    # exist while /usr/bin/xcrun resolves the same Xcode correctly. Asking
+    # xcrun for the iPhoneOS SDK is both the real precondition and the check
+    # that the selected Xcode is a full one with an iOS SDK rather than
+    # CommandLineTools.
+    sdk_env = dict(os.environ, DEVELOPER_DIR=str(developer))
+    try:
+        probe = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'],
+                               capture_output=True, text=True, env=sdk_env)
+    except OSError as error:
+        fail('could not run xcrun: %s. This needs a macOS host with Xcode.' % error)
+    sdk_path = probe.stdout.strip()
+    if probe.returncode != 0 or not sdk_path or not Path(sdk_path).is_dir():
+        fail('`xcrun --sdk iphoneos --show-sdk-path` failed with DEVELOPER_DIR=%s (exit %d): %s\n'
+             'The userland build needs a full Xcode with the iPhoneOS SDK; if only '
+             'CommandLineTools are selected, run `sudo xcode-select -s /Applications/Xcode.app`.'
+             % (developer, probe.returncode,
+                (probe.stderr or probe.stdout).strip()[-600:] or 'no output'))
 
     work = args.work_dir.expanduser().resolve()
     out = args.out.expanduser().resolve()
@@ -526,7 +544,8 @@ def main():
     report['inputs'] = {'ipsw_url': redacted(args.ipsw_url)[0],
                         'ipsw_url_has_query': '?' in args.ipsw_url,
                         'ipsw_sha256': args.ipsw_sha256.strip().lower() or None,
-                        'work_dir': str(work), 'out': str(out), 'developer': str(developer)}
+                        'work_dir': str(work), 'out': str(out), 'developer': str(developer),
+                        'iphoneos_sdk': sdk_path}
 
     rec.df('start', work)
     rec.require('start:required', work, MIN_FREE_BYTES, 'the userland chain')
