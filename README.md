@@ -62,7 +62,7 @@ python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out ../po
 
 `package` job 需要仓库 secret `UNIXNU_UNIQUE_CHIP_ID`，值是这个设备的 8 位十六进制平台种子；没有它 `payload` 步骤会直接拒绝运行，因为种子是编进镜像的每芯片取值。
 
-并发组是 `package-${{ github.ref }}` 且 `cancel-in-progress: true`，同一个分支上新推送会取消还在跑的那一轮。
+并发组是 `package-${{ github.ref }}` 且 `cancel-in-progress: true`，同一个分支上再手动触发会取消还在跑的那一轮。工作流只由 `workflow_dispatch` 触发，推送不会自动跑。
 
 ### 打包 job 做的事
 

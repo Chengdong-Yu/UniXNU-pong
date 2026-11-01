@@ -24,11 +24,13 @@ name: package
 # are not 512/1. The device scripts therefore own this chain; see the packaging
 # area of porting.toml.
 #
-# Why boot/boot.img.pong: the firmware (uefi-pong Platforms/Nothing/pongPkg/
+# Why a second boot image: the firmware (uefi-pong Platforms/Nothing/pongPkg/
 # Drivers/PongBootMemoryDxe) publishes an initrd only when it carries the
 # PONGFAT1 envelope, and `release` puts payload.img in the ramdisk slot unchanged.
-# The package job writes boot.img.pong with payload.img wrapped as well, so one
-# image is the document's artifact and the other is the flashable one.
+# The package job also writes boot/pong-xnu-initial.img with payload.img wrapped
+# and the container the local flow produces, so one image is the document's
+# artifact and the other is the flashable one. scripts/finalize-pong-adt.py
+# writes it under the same ADT parameters the local build uses.
 #
 # Nothing Apple's is committed: the IPSW is downloaded on the runner and goes
 # away with it. The platform seed comes from the repository secret

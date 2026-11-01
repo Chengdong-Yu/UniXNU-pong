@@ -63,7 +63,7 @@ The jobs are split by disk, not by CPU: the userdata chain peaks near 37 GiB, th
 
 The `package` job needs a repository secret named `UNIXNU_UNIQUE_CHIP_ID`: the device's 8-digit hexadecimal platform seed. Without it the payload step refuses to run, because the seed is compiled into the image and differs per chip.
 
-The concurrency group is `package-${{ github.ref }}` with `cancel-in-progress: true`, so a new push to the same branch cancels a run still going.
+The concurrency group is `package-${{ github.ref }}` with `cancel-in-progress: true`, so starting another run on the same branch cancels the one still going. Only `workflow_dispatch` triggers the workflow; pushing does not start a run.
 
 ### What the packaging job does
 
