@@ -41,3 +41,13 @@ artwork-scale-factor = 3
 device-perf-memory-class = 3
 [adt.defaults.u32]
 sleep-disabled = 1
+
+[userdata]
+# Disk images of this OS, in window order; the device sets the partition geometry
+# (board.toml [userdata]) and the volume UUIDs of the image it writes.
+# `unixnu userdata` writes these two windows and nothing else, which this board's
+# NativeUfs transport does not accept: it requires a "Data" window and reads the
+# manifest as version 1 only. scripts/prepare-ipados18-ufs-layout.py therefore
+# builds the three-window directory the image is made from, and this table records
+# what the profile contributes to it. See the packaging area of porting.toml.
+windows = [{ name = "OS", component = "OS" }, { name = "SystemOS", component = "Cryptex1,SystemOS", optional = true }]

@@ -13,12 +13,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: 0fc0fc1f9ddd0fbd4787738afef38667df5e0a95
+          ref: c96b29975645b711dc06bc435c3ad27321ce817c
           path: tools
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Add Pong community component metadata
-        run: cat device/migration/format2/components.toml >> tools/components.toml
+      - name: Install the device inputs the record is checked against
+        # The same script the package workflow runs: the 22H374 OS profile, and
+        # the PongPlatform24 entry the record's component check resolves.
+        run: python3 device/scripts/install-unixnu-inputs.py --unixnu tools
       - name: Check porting record
         run: python3 tools/scripts/porting-record.py check --device device

@@ -29,9 +29,12 @@ def install(unixnu, soc):
         raise RuntimeError('SM8475 source differs from the selected source pin')
     if not (unixnu / 'scripts/unixnu/profiles.py').is_file():
         raise RuntimeError('A main UniXNU checkout with format2 support is required')
-    for source in (overlay / 'profiles').rglob('*'):
+    profiles = ROOT / 'os-profiles'
+    if not profiles.is_dir():
+        raise RuntimeError('os-profiles/ is missing: the 22H374 profile ships there')
+    for source in profiles.rglob('*'):
         if source.is_file():
-            target = unixnu / source.relative_to(overlay)
+            target = unixnu / 'profiles/os' / source.relative_to(profiles)
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and target.read_bytes() != source.read_bytes():
                 raise RuntimeError(f'Existing OS profile edits retained: {target}')

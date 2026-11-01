@@ -4,6 +4,9 @@ schema_version = 2
 name = "pong"
 soc = "SM8475"
 soc_source = "sm8475"
+# The 22H374 profile ships in this repository at os-profiles/ and is installed into the
+# UniXNU checkout before resolving (scripts/install-device-profile.py), because
+# UniXNU/profiles/os/ has no 18.x profile yet.
 os_profile = "ipados-18.7.10-22H374"
 description = "Nothing Phone (2): UniXNU UEFI bring-up"
 kit = "pong"
@@ -21,6 +24,8 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "
 
 [components]
 # This is the community Pong A730/QCA6490/Darwin24 implementation, not the A740/WCN7850 source.
+# The kit lives in this repository at kits/PongPlatform24 and declares no archive recipe: the
+# kernel step of this board builds the aggregate itself, see [kernel] below.
 include = ["PongPlatform24"]
 
 [device_tree]
@@ -31,14 +36,33 @@ include_dirs = ["soc:dts"]
 defconfig = "pong_ipados18_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
 patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
-archives = ["component:PongPlatform24"]
-
+# Explicitly empty: an array here replaces the arch profile's list, and its
+# archive builders produce the BCM2837 providers, not this board's aggregate.
+archives = []
+# The Darwin 24 aggregate is compiled with MACHINE_CONFIGS=PONG (config/MASTER.arm64.pong, added
+# by patches/xnu-ipados18), not with the BCM2837 machine config the shared kernel step selects.
+# Folding that into the shared step is open; see the packaging area of porting.toml.
 
 # Local prelink and userdata entries are documented under migration/ipados18.
+[kernel.prelink]
+# The native aggregate the recipe leaves at this path, and the prelinker this
+# board carried before the format 2 rewrite.
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_PONG/mach.development.pong"
+# The slide is the one the 21H461 profile qualifies; this board's fixed base
+# comes from the 22H374 storage bindings and is not yet expressed as a slide
+# here. Until it is, scripts/package.sh is run with --skip-prelink and the
+# boot image carries the native kernel (see the packaging area of porting.toml).
+slide = "-0x1000000"
+roots = ["com.apple.kec.corecrypto", "com.apple.kec.pthread", "com.apple.filesystems.apfs",
+         "com.apple.kec.Compression", "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]
 [firmware]
 config = "pong"
 dsc = "Platforms/Nothing/pongPkg/pong.dsc"
 fd = "Build/pongPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+# Runs in the build tree before the firmware build and writes the device tree the boot image
+# carries; [bootimg] dtb names the same path.
+preflight = ["scripts/build-pong-hardware-dtb.py"]
 patches = [
   "Resources/MuPatches/AsmMacroLib.patch",
   "Resources/MuPatches/Auth-Service.patch",
@@ -70,13 +94,92 @@ BUILDID_STRING = "UniXNU-Pong"
 PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
 
 [payload]
+# The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
 title = "Pong iPadOS 18.7.10"
+volume = "UNIXNU"
+# 96 MiB, the --fat-mib a local run packs: PongBootMemoryDxe refuses an initrd
+# above PONG_FAT_MAX_INITRD (128 MiB), and the 4096-byte PONGFAT1 header is
+# inside the payload image the package step repacks, so the volume stays well
+# below that bound.
+size_mib = 96
+# The arguments this board brings up with: the ones scripts/build-ipados18-prelinked-boot.py
+# used to write, minus its boot-epoch (the ADT carries a software clock instead) and with the
+# applog list trimmed to the services the trace reads. DarwinBoot copies the line into a
+# 1024-byte buffer and refuses more than 1000 bytes; this line is 583.
+kernel_args = [
+  "keepsyms=1",
+  "cpus=1",
+  "pong_allow_unauthenticated_root=1",
+  "cs_enforcement_disable=1",
+  "cs_library_val_enable=0",
+  "amfi_get_out_of_my_way=1",
+  "-apfs_shared_datavolume",
+  "debug=0x14e",
+  "serial=0",
+  "pong_disable_swap=1",
+  "pong_skip_setup=1",
+  "pong_adsp=2",
+  "pong_audio=2",
+  "pong_ufs_readwrite=1",
+  "ignition_level=1",
+  "dyld_flags=0x8",
+  "launchd_rd=md0",
+  "pong_init_trace=1",
+  "applog=1",
+  "applog_name=launchd,backboardd,SpringBoard,containermanagerd,lsd,runningboardd,logd_helper,powerd",
+  "pong_software_keybag=1",
+  "pong_display=1",
+  "pong_software_ui=1",
+  "pong_ui_software=1",
+  "pong_touch=1",
+  "pong_buttons=1",
+  "pong_init_path=/pong/init",
+  "pong_build=ipados18-22H374",
+]
+
 [payload.adt]
+# schema_version 2 builds the ADT from the hardware DTS through devicetree.generate(); these keys
+# are the ones that function reads from [payload.adt]. The DarwinBoot allocation window is 4 GiB,
+# the window the first bring-up boot used.
+owned_memory_size = "0x100000000"
+# The restore's own disk images are used unmodified, so /chosen/RAMDisk holds only the seed; the
+# three volumes come from the userdata image and XNU mounts them through the UFS root driver.
 packed_data_ramdisk = false
-[pong_build]
-entry = "scripts/build-pong-format2.py"
-kernel_entry = "scripts/build-ipados18-pong-macos.py"
-boot_entry = "scripts/build-ipados18-prelinked-boot.py"
-cpus = 8
-# The matching Darwin24 prelinker derives relocation from the 22H374 ABI record.
-# The generic Darwin23 prelink/boot entry is intentionally not selected here.
+# The seed is not stored in any repository: scripts/package.sh takes it from UNIXNU_UNIQUE_CHIP_ID.
+unique_chip_id = "required"
+# The J171 BuildIdentity's chip ID, the same value [ipsw] carries.
+chip_id = "0x8010"
+
+[userdata]
+# The userdata partition this board installs into, in 4 KiB sectors: the geometry
+# scripts/install-pong-ufs-data.py and scripts/prepare-ipados18-ufs-layout.py check
+# against, and the same pair those scripts read from the device's own GPT.
+first_lba = 0x413248
+last_lba = 0x75A40EA
+lba_bytes = 4096
+# The windows of the userdata image are the OS and SystemOS disk images of the IPSW, in
+# that order; the OS profile lists them ([userdata] windows of
+# os-profiles/ipados-18.7.10-22H374/profile.toml), because they are the profile's
+# components. This table adds only what belongs to the device.
+
+[package]
+# The UniXNU checkout, relative to this repository: scripts/package.sh reads it.
+unixnu = "../UniXNU"
+
+[package.defconfig]
+"ipados-18.7.10-22H374" = "pong_ipados18_defconfig"
+
+[bootimg]
+# Compiled by scripts/build-pong-hardware-dtb.py at the firmware preflight step, relative to the
+# build tree (docs/porting/packaging.md).
+dtb = "build/pong/pong.dtb"
+
+[bootimg.image]
+# Resources/Configs/pong.toml in the firmware records the Android build system's v4, but unixnu
+# packs and verifies v0-v2 headers only: verify() reads header_version and pagesize at the v0/v1/v2
+# offsets and a v4 header carries them elsewhere. This header therefore describes boot/boot.img,
+# the spec product whose ramdisk is the bare payload.img. The flashable v4 image the firmware
+# accepts is boot/pong-xnu-initial.img, written by scripts/finalize-pong-adt.py with the same
+# container the local flow produces; see the payload section above.
+header_version = 0
+pagesize = 4096
