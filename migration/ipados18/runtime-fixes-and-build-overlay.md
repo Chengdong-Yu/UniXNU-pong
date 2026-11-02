@@ -49,4 +49,6 @@ python3 kits/PongPlatform24/build-with-runtime.py \
 
 services167 的完整 Darwin24 内核、Turnip、O3 Metal 前端和插件编译完成，仅安装 96MiB 修改系统区域，保留 Data/SystemOS。真实 GPU scanout 完成，前 5120 次提交未捕获 CP/SMMU 错误。30,216 个交接范围变为 1,793 次批量请求；60秒快照中多数完整交接约0.3–0.4ms。它不能代替全场景帧率结果；壁纸进程仍有明显排队，锁屏后可听恢复仍需继续修复。
 
-在保留远程改动的 PR 源码上，Metal 前端、ArmCpu、GPU 内存/VM/用户客户端及完整 helper 用户态编译成功。构建 overlay 和固定版本 Mesa 源码已生成；准备后的全部 25 个变更 Mesa 源文件与实机配套源相同。完整 PR 的 hosted CI 和 kernel 打包流水线尚未运行。没有运行基准、测试套件或镜像哈希校验。
+在保留远程改动的 PR 源码上，Metal 前端、ArmCpu、GPU 内存/VM/用户客户端及完整 helper 用户态编译成功。构建 overlay 和固定版本 Mesa 源码已生成；准备后的全部 25 个变更 Mesa 源文件与实机配套源相同。完整 PR 的 hosted kernel/package 打包流水线尚未运行。没有运行基准、测试套件或镜像哈希校验。
+
+移植记录使用现有 workflow 固定的 schema：状态 `implemented` 表示源码已实现，未提升为 `device-verified`。历史轮次没有完整不可变验证命令/提交元组的观察，以 `source` 引用对应迁移文档，原分类保存在 `reported_kind`，原始结果和未解决项不删改。补齐必填配置与发现后，同版本记录检查器已通过全部 32 个结构化区域；此项仅检查公开记录，不读取镜像或设备。
