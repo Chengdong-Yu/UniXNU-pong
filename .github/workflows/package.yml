@@ -118,9 +118,8 @@ jobs:
         run: |
           set -euo pipefail
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install blacktop/tap/ipsw
           ok=1
-          for t in hdiutil diskutil aea ipsw python3; do
+          for t in hdiutil diskutil aea python3; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
           done
           # apply and build-systemos18 attach images with ownership on, so they
@@ -313,9 +312,9 @@ jobs:
           # cmake, ninja and llvm have no bottle on this Tier 3 runner, so nothing
           # installs them: the image's own copies are used, and the llvm keg is put
           # on PATH rather than linked.
-          brew install dtc lzfse mtools nasm acpica blacktop/tap/ipsw
+          brew install dtc lzfse mtools nasm acpica
           ok=1
-          for t in dtc lzfse mformat mcopy nasm iasl cmake ninja make unifdef ipsw python3; do
+          for t in dtc lzfse mformat mcopy nasm iasl cmake ninja make unifdef python3; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
           done
           # CLANG_BIN needs a clang with llvm-lib and lld-link beside it; Apple's

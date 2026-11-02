@@ -23,9 +23,30 @@ Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。
 
 主机编译、服务发布和设备功能分开记录。本次汇总包含此前的 Wi-Fi、亮度、输入、音频、电池、USB、系统组件和 GPU 修复，见 [完整运行时修复及构建接入](migration/ipados18/runtime-fixes-and-build-overlay.md)。
 
+## 驱动仓库
+
+`drivers/` 下每个板级驱动都是独立仓库的 submodule（写法与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng) 相同）。路径名保持不变，构建脚本与驱动之间的相对 `#include` 不必改。
+
+| 路径 | 仓库 | 适配硬件 |
+| --- | --- | --- |
+| `drivers/ArmCpu` | [pong-arm-cpu](https://github.com/Chengdong-Yu/pong-arm-cpu) | SM8475 GICv3 + ARM generic timer，PSCI 从核启动；上游 [ArmCpu](https://github.com/UniXNU/ArmCpu) 的 Pong 变体 |
+| `drivers/ArmDTPlatform` | [pong-arm-dt-platform](https://github.com/Chengdong-Yu/pong-arm-dt-platform) | Apple 格式设备树平台专家（`/chosen`/`/cpus`/`/arm-io`）；上游 [ArmDTPlatform](https://github.com/UniXNU/ArmDTPlatform) 的 Pong 变体 |
+| `drivers/NativeRamBlock` | [pong-ram-block](https://github.com/Chengdong-Yu/pong-ram-block) | RAM 后端 Data 卷（sparse seed + 持久 overlay）；上游 [RamBlock](https://github.com/UniXNU/RamBlock) 的 Pong 变体 |
+| `drivers/DarwinBoot24` | [pong-darwin-boot24](https://github.com/Chengdong-Yu/pong-darwin-boot24) | Darwin 24 UEFI XNU 加载器 + PONGFAT1；上游 [DarwinBoot](https://github.com/UniXNU/DarwinBoot) 的 Darwin 24 变体 |
+| `drivers/AdrenoMetal` | [pong-adreno-metal](https://github.com/Chengdong-Yu/pong-adreno-metal) | Adreno Metal 前端（pin `c6d29ca`）；上游 [AdrenoMetal](https://github.com/UniXNU/AdrenoMetal) |
+| `drivers/NativeUfs` | [pong-ufs](https://github.com/Chengdong-Yu/pong-ufs) | SM8475 UFS host（`0x01d84000`）、SID `0xe0`、SPI 265；SHNGROOT v1 三窗口 |
+| `drivers/PongAdreno` | [pong-adreno](https://github.com/Chengdong-Yu/pong-adreno) | Adreno 730 GMU/CP/HFI/ZAP/SMMU/scanout（Cape GPUCC） |
+| `drivers/PongMetal` | [pong-metal](https://github.com/Chengdong-Yu/pong-metal) | 22H374 的 A730 Metal 前端与 GOP 扫描输出 |
+| `drivers/PongPower` | [pong-power](https://github.com/Chengdong-Yu/pong-power) | ADSP PAS1、TFA9873 双功放、WCD938x、NT37705 DCS 背光、电池 |
+| `drivers/PongUsb` | [pong-usb](https://github.com/Chengdong-Yu/pong-usb) | SM8475 DWC3/eUSB2 + NXP repeater，32 KiB DMA / SID0 |
+| `drivers/PongWifi` | [pong-wifi](https://github.com/Chengdong-Yu/pong-wifi) | QCA6490：PCIe0 + MHI + ath11k，SID `0x1c01` |
+| `drivers/PongBootCapture` | [pong-boot-capture](https://github.com/Chengdong-Yu/pong-boot-capture) | PMK8350 SID0 SDAM7100 有界诊断重启 |
+
+跨驱动头文件 `drivers/PongProbe.h` 仍留在本仓库。克隆时请加 `--recurse-submodules`，或之后执行 `git submodule update --init --recursive`。
+
 ## 构建
 
-需要完整 Xcode（含 iPhoneOS SDK）、Python 3.12、dtc、对应 Apple 开源依赖、匹配的 22H374 restore/ABI 输入和从 Pong 获取的私有固件。源版本由 `feeds.toml`、`unixnu.lock` 与迁移记录固定。
+需要完整 Xcode（含 iPhoneOS SDK）、Python 3.12、dtc、对应 Apple 开源依赖、匹配的 22H374 restore/ABI 输入和从 Pong 获取的私有固件。源版本由 `feeds.toml`、`unixnu.lock` 与迁移记录固定。本仓库用 `git clone --recurse-submodules` 拉齐 `drivers/` 下的 submodule。
 
 ```sh
 git clone https://github.com/UniXNU/UniXNU ../UniXNU-upstream

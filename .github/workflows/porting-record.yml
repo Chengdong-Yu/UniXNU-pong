@@ -10,6 +10,7 @@ jobs:
         with:
           path: device
           fetch-depth: 0
+          submodules: recursive
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU

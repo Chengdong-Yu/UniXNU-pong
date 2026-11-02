@@ -24,6 +24,27 @@ Host builds and service publication are recorded separately from device function
 
 Current source includes the accumulated Wi-Fi, brightness, HID, audio, battery, native USB/Finder, keyboard, rootful userland and GPU/Metal fixes. Wi-Fi association, brightness and native audio volume have device confirmation; audio recovery after lock and remaining GPU frame latency are still under investigation. The installed Data volume has been expanded to 128 GB; the hosted userdata recipe retains its original 8 GiB seed. arm64e/PAC preparation does not switch the running 22H374 arm64 system. See [runtime integration and preserved packaging scripts](migration/ipados18/runtime-fixes-and-build-overlay.md).
 
+## Driver repositories
+
+Every board driver under `drivers/` is a submodule of its own Chengdong-Yu repository, the same layout [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng) uses. Path names are unchanged so the build scripts and the drivers' relative `#include`s keep working.
+
+| Path | Repository | Hardware |
+| --- | --- | --- |
+| `drivers/ArmCpu` | [pong-arm-cpu](https://github.com/Chengdong-Yu/pong-arm-cpu) | SM8475 GICv3 + ARM generic timer, PSCI secondaries; Pong variant of upstream [ArmCpu](https://github.com/UniXNU/ArmCpu) |
+| `drivers/ArmDTPlatform` | [pong-arm-dt-platform](https://github.com/Chengdong-Yu/pong-arm-dt-platform) | Apple-format DT platform expert (`/chosen`/`/cpus`/`/arm-io`); Pong variant of upstream [ArmDTPlatform](https://github.com/UniXNU/ArmDTPlatform) |
+| `drivers/NativeRamBlock` | [pong-ram-block](https://github.com/Chengdong-Yu/pong-ram-block) | RAM-backed Data volume (sparse seed + persistent overlay); Pong variant of upstream [RamBlock](https://github.com/UniXNU/RamBlock) |
+| `drivers/DarwinBoot24` | [pong-darwin-boot24](https://github.com/Chengdong-Yu/pong-darwin-boot24) | Darwin 24 UEFI XNU loader + PONGFAT1; Darwin 24 variant of upstream [DarwinBoot](https://github.com/UniXNU/DarwinBoot) |
+| `drivers/AdrenoMetal` | [pong-adreno-metal](https://github.com/Chengdong-Yu/pong-adreno-metal) | Adreno Metal frontend pinned at `c6d29ca`; upstream [AdrenoMetal](https://github.com/UniXNU/AdrenoMetal) |
+| `drivers/NativeUfs` | [pong-ufs](https://github.com/Chengdong-Yu/pong-ufs) | SM8475 UFS host (`0x01d84000`), SID `0xe0`, SPI 265; SHNGROOT v1 three-window layout |
+| `drivers/PongAdreno` | [pong-adreno](https://github.com/Chengdong-Yu/pong-adreno) | Adreno 730 GMU/CP/HFI/ZAP/SMMU/scanout (Cape GPUCC) |
+| `drivers/PongMetal` | [pong-metal](https://github.com/Chengdong-Yu/pong-metal) | A730 Metal frontend for 22H374 with GOP scanout |
+| `drivers/PongPower` | [pong-power](https://github.com/Chengdong-Yu/pong-power) | ADSP PAS1, dual TFA9873, WCD938x, NT37705 DCS backlight, battery |
+| `drivers/PongUsb` | [pong-usb](https://github.com/Chengdong-Yu/pong-usb) | SM8475 DWC3/eUSB2 + NXP repeater, 32 KiB DMA / SID0 |
+| `drivers/PongWifi` | [pong-wifi](https://github.com/Chengdong-Yu/pong-wifi) | QCA6490 over PCIe0 + MHI + ath11k, SID `0x1c01` |
+| `drivers/PongBootCapture` | [pong-boot-capture](https://github.com/Chengdong-Yu/pong-boot-capture) | Bounded diagnostic restart via PMK8350 SID0 SDAM7100 |
+
+The shared header `drivers/PongProbe.h` stays in this repository. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` afterwards.
+
 ## Build
 
 Requires full Xcode with the iPhoneOS SDK, Python 3.12, dtc, selected Apple open source dependencies, matching 22H374 restore/ABI inputs and firmware obtained from Pong. Source revisions are pinned in feeds, lock and migration records.
