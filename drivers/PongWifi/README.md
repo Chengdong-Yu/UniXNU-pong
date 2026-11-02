@@ -28,9 +28,17 @@ BDF 按 QMI chip/board ID 使用 Nothing CNSS2 的文件命名规则，AMSS 按
 ## 当前证据
 
 真实 ath11k、PCI、MHI、QRTR、QMI、station 和网络代码已编译接入。
-固件启动、MSI 实际到达、BSS 扫描、认证、地址配置及联网仍需分别记录真机结果。
+services80 已观察到 PCIe/SMMU/MHI/QMI 完成和 102 个通道注册，之后发生
+MHI RDDM 固件崩溃；BSS 扫描、认证、地址配置及联网尚无成功证据。
 只有 station 就绪且具有有效硬件 MAC 后才发布网络接口；失败记录原因并让 iOS 继续启动。
 不会用空的成功实现替代固件、扫描或链接结果。
+
+固件必须由 `prepare-pong-wifi.py` 从 Pong 当前活动槽的 modem 分区只读提取。
+保留与 `qca6490` 同级的本地 `local-inputs.json`；构建器读取来源记录，排除调试数据库
+和元数据，只嵌入无线固件及板级数据。Sheng 仅提供公共 station/shim 源码。
+services81 将 MAC 启动移到 QMI 完成注册之后，固件崩溃会停止 dispatcher、结束挂起的
+网络请求并保留 DMA，避免崩溃通知刷屏和对已停止固件的无限等待。实机结果见
+`migration/ipados18/services81-wifi-firmware.md`。
 
 services44 按本机 DT 的 `gdsc-vdd-supply` 补接独立 collapse vote：
 `0x162128` bit0，PCIe0 GDSCR 为 `0x17b004`。启用时只清除此 consumer 的位；
@@ -56,3 +64,7 @@ Nothing 的 gcc-waipio.h/c，补齐第二路 aggregate NoC（ID9/vote bit11）�
 链路、MSI、固件和扫描结果继续以实际日志为准。
 
 services60 对照 services59 日志的 DLL 未激活，显式启用 PORT_LINK_CONTROL DLL_LINK_EN，清除 FAST_LINK，并以确定的 Gen1 target 训练；不降低实际端点或 DLL 成功条件。尚待本轮真机链路与扫描结果。
+
+## iPadOS 18 原生设置接口
+
+22H374 的 IO80211 在接口节点打开 type 0 用户客户端。`Pong80211UserClient` 的 selector 0 将有界请求转给同一 Apple80211/station 实现，支持内联和 OOL 数据；不解引用调用方嵌入的地址。selector 1 表示已实现的标准 ioctl 转交，selector 7 不宣告未实现的快速路径。原自制设置页面及私有控制 API 已移除。热点扫描已在前版实机出现，原生设置开关、关联和 DHCP 仍待本轮设备确认。

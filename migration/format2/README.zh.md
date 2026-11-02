@@ -19,12 +19,15 @@
 
 ```sh
 python3.12 scripts/migrate-pong-format2.py --unixnu ../UniXNU-upstream
+python3.12 scripts/fetch-pong-native-sources.py
 python3.12 scripts/build-pong-format2.py --unixnu ../UniXNU-upstream --out /path/to/build-output --jobs 4
 ```
 
 入口依次调用官方 defconfig、status、模块解析、树组装及 DTS 编译，再调用本项目已适配的 Darwin24 内核构建器。输出归入 `out/pong/ipados-18.7.10-22H374/pong_ipados18/`，其中包含 `resolved-profile.json`、`device-tree/hardware.dtb`、`kernel/` 和 `PONG_FORMAT2_RESULT.json`。
 
 Apple 源码本地覆盖与本机路径写入忽略的 `local.toml`。`[pong_build]` 可填写 `tree`、`developer_dir`、`volume_layout`；编译缓存可在外部磁盘，最终产物仍使用上述目标目录。现有四项 Apple 源码版本保持不变。
+
+当前完整运行时通过 [新增构建入口](../ipados18/runtime-fixes-and-build-overlay.md) 选择配套配方；下文早期轮次记录保留供追溯。原有脚本和 workflow 没有被覆盖。`configs/pong-native-sources.toml` 固定公共 RPMh、无线 shim、Linux ath11k 和 IOStorageFamily 输入，获取入口保留已有不匹配检出及本地修改。私有 `wifi_firmware`、`audio_container` 与公开输入路径由 `[pong_build]` 配置；`XNU_PONG_POWER` 独立选择电源/音频，`libPongSmmu4K.a` 链接共享 native4K 实现。
 
 已编译的硬件 DTB 被内核构建记录引用。打包时交给 Pong ADT 生成器，用其 CPU affinity、timer、GIC 和 UFS 资源生成原有 Darwin24 交接结构。Pong 的 PMIC/Goodix 自定义 ADT 属性仍由板级生成器编码。
 

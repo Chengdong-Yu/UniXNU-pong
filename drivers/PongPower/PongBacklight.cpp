@@ -59,7 +59,11 @@ class PongBacklight : public IOService {
     const OSMetaClass *appleClass = nullptr;
     bool published = false, stopped = false, inFlight = false;
     bool needVerification = false;
-    enum Operation { ReadInitial, WriteLevel, ReadVerify } operation = ReadInitial;
+    bool lowPowerWrite = true, retriedWrite = false;
+    uint64_t verifyAfter = 0;
+    enum Operation { SetReadSize, ReadInitial, WriteLevel, ReadVerify } operation = ReadInitial;
+    Operation pendingRead = ReadInitial;
+    uint32_t readQuantum = 1;
     uint32_t savedDma = 0, savedLength = 0, savedTrigger = 0, savedPattern = 0, savedControl = 0;
     uint32_t level = 0, sending = 0, from = 0, goal = 0;
     uint64_t deadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0;
@@ -125,30 +129,59 @@ class PongBacklight : public IOService {
     }
     bool startRead(Operation next) {
         if (!canBegin()) return false;
-        // SET_MAXIMUM_RETURN_PACKET_SIZE(2), then GET_DISPLAY_BRIGHTNESS.
-        // Header byte 3 marks BTA (bit 5) and last packet (bit 7).
-        const uint32_t words[] = {0x00370002u, 0xa0060052u};
-        wr(ReadControl, 1); wr(ReadControl, 0);
-        if (!beginTransaction(words, 2, true)) return false;
-        operation = next;
+        // DSI resets to a one-byte return limit. Negotiate two bytes as a
+        // separate short packet (bit 6 means LONG, not a short-packet flag).
+        // Complete it before resetting readback and issuing the BTA query.
+        const uint32_t words[] = {0x80370002u};
+        if (!beginTransaction(words, 1, true)) return false;
+        pendingRead = next; operation = SetReadSize;
         return true;
     }
-    bool readLevel(uint32_t &answer) const {
-        if ((rd(ReadControl) >> 16) < 4) return false;
+    bool startQuery() {
+        const uint32_t words[] = {0xa0060052u};
+        wr(ReadControl, 1); wr(ReadControl, 0);
+        if (!beginTransaction(words, 1, true)) return false;
+        operation = pendingRead;
+        return true;
+    }
+    bool readLevel(uint32_t &answer) {
+        const unsigned count=rd(ReadControl)>>16;
+        if(count<4 || count>16)return false;
         uint32_t data = rd(ReadData0);
         uint32_t first = 0, second = 0;
         // The readback register is network byte order; short DCS response
         // 0x22 carries the two bytes immediately after the data type.
-        if (((data >> 24) & 0x3f) == 0x22) {
+        readQuantum = 1;
+        if (((data >> 24) & 0x3f) == 0x21) {
+            // A panel may implement the standard 8-bit DCS read even with
+            // a 12-bit write range. Preserve its measured resolution.
+            answer = (((data >> 16) & 0xff) * board.maximum + 127) / 255;
+            readQuantum = (board.maximum + 254) / 255;
+            return true;
+        } else if (((data >> 24) & 0x3f) == 0x22) {
             first = (data >> 16) & 0xff; second = (data >> 8) & 0xff;
         } else {
+            // Qualcomm right-aligns a long response across descending
+            // DATA registers. Header is DATA1, followed by payload DATA0.
             const uint32_t header = rd(ReadData1);
-            if ((rd(ReadControl) >> 16) < 8 || ((header >> 24) & 0x3f) != 0x1c ||
-                ((header >> 16) & 0xff) != 2 || ((header >> 8) & 0xff)) return false;
-            first = data >> 24; second = (data >> 16) & 0xff;
+            if(count<8 || ((header>>24)&0x3f)!=0x1c ||
+               ((header>>16)&0xff)!=2 || ((header>>8)&0xff))return false;
+            first=data>>24;second=(data>>16)&0xff;
         }
-        answer = board.swappedDbv ? first * 256 + second : second * 256 + first;
-        return answer <= board.maximum;
+        // NT37705 returns DBV most-significant byte first. services87's
+        // successful SET 00 b4 was followed by GET 22 00 b4; interpreting
+        // that as little endian disabled the service after its first write.
+        // Firmware's inherited DBV can exceed our declared control range.
+        // Keep the raw measurement separate; never reinterpret its bytes
+        // just to make it fit the range exposed to CoreBrightness.
+        const uint32_t native = (first << 8) | second;
+        // Pong's NT37705 GET(52) returns the 12-bit SET(51) level in
+        // quarter-DBV units. services92: 1604->6416, 787->3148,
+        // 3894->15576, 4045->16180. Normalize the read protocol only;
+        // shifting the write would change the user's requested brightness.
+        if (native > board.maximum * 4u + 3u) return false;
+        answer = (native + 2u) >> 2;
+        return true;
     }
     void publishLevel() {
         OSDictionary *item = OSDictionary::withCapacity(3);
@@ -168,8 +201,8 @@ class PongBacklight : public IOService {
         timer->cancelTimeout();
         if (inFlight) restoreTransaction();
         setProperty("PongBacklightError", reason);
-        IOLog("PongBacklight: %s; requests=%u writes=%u reads=%u status=%x irq=%x ack=%x\n",
-              reason, __atomic_load_n(&requests, __ATOMIC_RELAXED), writes, reads, rd(Status), rd(InterruptControl), rd(AckError));
+        IOLog("PongBacklight: %s; requests=%u writes=%u reads=%u status=%x irq=%x ack=%x rx=%x data=%08x/%08x\n",
+              reason, __atomic_load_n(&requests, __ATOMIC_RELAXED), writes, reads, rd(Status), rd(InterruptControl), rd(AckError),rd(ReadControl),rd(ReadData0),rd(ReadData1));
     }
     void publishFirst() {
         // Use the actual AppleARMPlatform metaclass for CoreBrightness's
@@ -203,34 +236,73 @@ class PongBacklight : public IOService {
         if (latest >> 63) {
             from = level; goal = clamped((latest >> 16) & 0xffff);
             fadeStart = nowNs(); fadeDuration = (latest & 0xffff) * 1000000ULL;
+            retriedWrite = false;
         }
         if (inFlight) {
             const uint32_t irq = rd(InterruptControl);
             if (irq & ErrorPending) { fail("DSI command error"); return; }
             bool done = (irq & DmaDone) && !(rd(Status) & DmaBusy);
-            if (done && operation != WriteLevel) done = (rd(ReadControl) >> 16) >= 4;
+            if (done && (operation == ReadInitial || operation == ReadVerify))
+                done = (irq&BtaDone) && (rd(ReadControl)>>16)>=4;
             if (!done) {
                 if (nowNs() >= deadline) { fail("DSI command/readback timeout"); return; }
                 timer->setTimeoutMS(1); return;
             }
             uint32_t returned = 0;
-            const bool readOk = operation == WriteLevel || readLevel(returned);
+            const bool readOk = operation == WriteLevel || operation == SetReadSize || readLevel(returned);
             restoreTransaction();
-            if (!readOk) { fail("invalid DCS brightness response"); return; }
-            if (operation == WriteLevel) {
+            if (!readOk) {
+                // The command has retired, so a malformed response does
+                // not leave DMA ownership uncertain. Preserve the last
+                // measured level and allow a later OS request to retry.
+                // An initial read is still required before publication.
+                if (!published) { fail("invalid initial DCS brightness response"); return; }
+                needVerification = false; goal = from = level; fadeDuration = 0;
+                setProperty("PongBacklightError", "invalid DCS brightness response");
+                IOLog("PongBacklight: invalid retired GET response; later requests remain available\n");
+                return;
+            }
+            if (operation == SetReadSize) {
+                if (!startQuery()) { fail("DSI BTA engine unavailable"); return; }
+                timer->setTimeoutMS(1); return;
+            } else if (operation == WriteLevel) {
                 writes++; needVerification = true;
+                // DMA completion retires the packet, not the panel's DBV
+                // latch. Let at least two 120 Hz scans pass before GET.
+                verifyAfter = nowNs() + 20000000ULL;
             } else {
                 reads++;
-                if (operation == ReadVerify && returned != sending) { fail("DCS brightness readback differs"); return; }
-                level = returned;
+                const uint32_t difference = returned > sending ? returned-sending : sending-returned;
+                if (operation == ReadVerify && difference > readQuantum) {
+                    level = clamped(returned); publishLevel(); needVerification = false;
+                    // The LP packet path is also used by Pong's original
+                    // panel driver. Retry once with the other supported
+                    // command signalling mode after the first retired write.
+                    // Never disable every later slider request for a value
+                    // the panel rejected; only uncertain DMA is fatal.
+                    if (!retriedWrite) {
+                        retriedWrite = true; lowPowerWrite = !lowPowerWrite;
+                    } else {
+                        setProperty("PongBacklightError", "DBV not accepted");
+                        IOLog("PongBacklight: DBV rejected wanted=%u measured=%u LP=%u; later requests remain available\n",
+                              sending, returned, lowPowerWrite);
+                        from = goal = level; fadeDuration = 0;
+                    }
+                } else {
+                    level = clamped(returned);
+                    removeProperty("PongBacklightError");
+                    retriedWrite = false;
+                }
                 if (!published) { from = goal = level; publishFirst(); }
                 else publishLevel();
                 needVerification = false;
-                setProperty("PongBrightnessReadback", level, 32);
+                setProperty("PongBrightnessReadback", returned, 32);
+                setProperty("PongBrightnessReadQuantum", readQuantum, 32);
                 setProperty("PongBrightnessWrites", writes, 32);
             }
         }
         if (needVerification) {
+            if (nowNs() < verifyAfter) { timer->setTimeoutMS(2); return; }
             if (!startRead(ReadVerify)) { fail("DSI readback engine unavailable"); return; }
             timer->setTimeoutMS(1); return;
         }
@@ -247,7 +319,7 @@ class PongBacklight : public IOService {
             sending = next;
             const uint32_t wire = encodedLevel(next);
             const uint32_t words[] = {0xc0390003u, 0xff000051u | (wire << 8)};
-            if (!beginTransaction(words, 2, false)) { fail("DSI write engine unavailable"); return; }
+            if (!beginTransaction(words, 2, lowPowerWrite)) { fail("DSI write engine unavailable"); return; }
             operation = WriteLevel;
             timer->setTimeoutMS(1);
         } else if (next != goal) timer->setTimeoutMS(16);
@@ -285,13 +357,18 @@ public:
         OSDictionary *properties = OSDynamicCast(OSDictionary, object);
         if (!properties) return kIOReturnBadArgument;
         if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return kIOReturnNotReady;
-        if (properties->getCount() > 2 ||
+        // Darwin24 also sends the optional calibrated current-table level.
+        // It is metadata, not another NT37705 DBV command.
+        if (properties->getCount() > 3 ||
             properties->getCount() != (properties->getObject("brightness") ? 1u : 0u) +
-                                      (properties->getObject("FadePeriod") ? 1u : 0u)) return kIOReturnUnsupported;
+                                      (properties->getObject("FadePeriod") ? 1u : 0u) +
+                                      (properties->getObject("backlight-level") ? 1u : 0u)) return kIOReturnUnsupported;
         OSNumber *brightness = OSDynamicCast(OSNumber, properties->getObject("brightness"));
         OSNumber *fade = OSDynamicCast(OSNumber, properties->getObject("FadePeriod"));
+        OSNumber *calibrated = OSDynamicCast(OSNumber, properties->getObject("backlight-level"));
         if ((properties->getObject("brightness") && !brightness) ||
-            (properties->getObject("FadePeriod") && !fade)) return kIOReturnBadArgument;
+            (properties->getObject("FadePeriod") && !fade) ||
+            (properties->getObject("backlight-level") && !calibrated)) return kIOReturnBadArgument;
         const uint64_t fixed = fade ? fade->unsigned64BitValue() : 0;
         const uint64_t ms = fade ? (fixed > 5u * 65536u ? 5000u : (fixed * 1000) >> 16) :
                                   __atomic_load_n(&requestedFade, __ATOMIC_RELAXED);

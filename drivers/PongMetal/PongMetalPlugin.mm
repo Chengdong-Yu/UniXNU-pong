@@ -17,6 +17,7 @@
 #include "PongMetalAbi.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "NativeAdrenoABI.h"
+#include "SharedShaderCache.h"
 
 @interface _MTLDevice : NSObject
 @end
@@ -42,6 +43,8 @@ static void report(const char *phase,int status)
         (void)sysctl(mib,(u_int)count,NULL,NULL,line,strlen(line));
 }
 #include "PongMetalScanout.h"
+#include "PongQuartzCore18.h"
+#include "PrimeShaders.h"
 namespace {
 static void missing(const char *type,const char *selector)
 {
@@ -131,7 +134,10 @@ static id openDevice(unsigned port)
     if(access(loader.fileSystemRepresentation,R_OK)){report("Turnip library absent",-1);return nil;}
     NSString *process=[NSProcessInfo processInfo].processName;
     NSMutableArray<NSString *> *candidates=[NSMutableArray new];
-    // Keep separate process caches as in Sheng's native Metal clients.
+    // Share immutable versioned entries for the same Unix user; container
+    // caches remain available when the native sandbox denies the shared path.
+    const std::string shared=sharedShaderCacheDirectory();
+    if(!shared.empty())[candidates addObject:@(shared.c_str())];
     if(const struct passwd *user=getpwuid(getuid());user && user->pw_dir && user->pw_dir[0])
         [candidates addObject:[@(user->pw_dir) stringByAppendingPathComponent:
             [NSString stringWithFormat:@"Library/Caches/com.apple.%@/PongMetal",process]]];
@@ -142,13 +148,29 @@ static id openDevice(unsigned port)
     }
     NSString *base=[NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES) firstObject];
     if(base)[candidates addObject:[[base stringByAppendingPathComponent:@"PongMetal"] stringByAppendingPathComponent:process]];
-    // A7xx sysmem/no concurrent binning until Pong's BV/BR scheduling is ready.
-    // Plain IOSurface rows match Pong's current framebuffer/scanout contract.
-    setenv("TU_DEBUG","sysmem,nocb",0);
+    // main 461a842: let Turnip choose GMEM/sysmem for each attachment/pass.
+    // Pong's BR/BV scheduling still requires concurrent binning disabled.
+    // Official 8-bit BGRA policy: GPU system-memory rendering. This still
+    // runs on Adreno/Metal; it avoids the GMEM load/store channel permutation.
+    {char args[1024]={};size_t size=sizeof args;
+     if(!sysctlbyname("kern.bootargs",args,&size,nullptr,0)) {
+      if(strstr(args,"pong_gpu_trace=1")){setenv("SHENG_GPU_TRACE","1",1);setenv("SHENG_DIAG","1",1);}
+      if(strstr(args,"pong_gpu_pixels=1"))setenv("SHENG_GPU_PIXELS","1",1);
+     }}
+    setenv("TU_DEBUG","sysmem,nocb",1);
     // Pong implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
+    // The ABI1 clients have bounded GPU VA and all BOs are wired on Pong.
+    // Keep a small reuse cache, not ten seconds of unbounded image spares.
+    // This budget applies only after the runtime retires the last live owner.
+    setenv("METAL2VULKAN_SPARE_IMAGE_MIB",!strcmp(getprogname(),"backboardd")?"128":"32",0);
+    setenv("TU_DARWIN_BO_CACHE_MIB",!strcmp(getprogname(),"backboardd")?"96":
+        !strcmp(getprogname(),"SpringBoard")?"64":"8",0);
+    // Live Metal queues publish their current aggregate priority. Keep an
+    // explicit user override, but never force a process-wide permanent boost.
     setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION","1",1);
+    pongQuartzCore18DisplayPolicy();
     CFPreferencesSetAppValue(CFSTR("CAEnableDeepFramebuffer"),kCFBooleanFalse,kCFPreferencesCurrentApplication);
     CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"),kCFBooleanFalse,kCFPreferencesCurrentApplication);
     CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"),kCFBooleanFalse,kCFPreferencesCurrentApplication);
@@ -162,7 +184,24 @@ static id openDevice(unsigned port)
         } @catch(NSException *exception) {
             NSLog(@"Pong Metal: device initialization failed: %@",exception);return nil;
         }
-        if(result)break;
+        if(result) {
+            if(!strcmp(getprogname(),"backboardd")) {
+                // Only a published native device, on a detached background
+                // thread after UI startup; defer while real rendering is active.
+                struct PrimeContext {id<MTLDevice> device;std::string cache;};
+                auto *context=new PrimeContext{(id<MTLDevice>)result,cache.fileSystemRepresentation};
+                pthread_attr_t attr;pthread_attr_init(&attr);
+                pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+                pthread_attr_setstacksize(&attr,8u<<20);pthread_t thread;
+                int started=pthread_create(&thread,&attr,[](void *arg)->void * {
+                    auto *context=static_cast<PrimeContext *>(arg);
+                    prime::run(context->device,context->cache,90,std::string());
+                    delete context;return nullptr;
+                },context);
+                pthread_attr_destroy(&attr);if(started)delete context;
+            }
+            break;
+        }
     }
     report(result?"real Vulkan-backed device created":"runtime refused device",result?0:-1);
     return result;
@@ -218,6 +257,14 @@ static void startPresentation(id candidate,unsigned port)
             dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
                 char status[240]={};native_bridge_metal_status(status,sizeof(status));
                 report(status,0);
+                if(seconds>=20) {
+                    char rows[4096]={};native_bridge_metal_telemetry(rows,sizeof rows);
+                    char *line=rows;
+                    while(*line) {
+                        char *end=strchr(line,'\n');if(end)*end=0;
+                        report(line,0);if(!end)break;line=end+1;
+                    }
+                }
             });
 }
 }

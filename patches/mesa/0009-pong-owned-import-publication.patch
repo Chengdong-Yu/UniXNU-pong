@@ -1,0 +1,24 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -193,6 +193,21 @@
+    const kern_return_t result=active?dw_call(NativeAdrenoMethodSetPriority,&request,sizeof(request),NULL,0):kIOReturnUnsupported;
+    pthread_mutex_unlock(&dw.lock);
+    return result==KERN_SUCCESS;
++}
++
++// Exact live host-import ownership phases, negotiated independently from
++// priority. Kernel touches only this connection's retained imported pages.
++extern "C" __attribute__((visibility("default"))) int32_t
++ tu_darwin_sync_host_range(uint64_t address,uint64_t bytes,uint32_t after);
++extern "C" __attribute__((visibility("default"))) int32_t
++ tu_darwin_sync_host_range(uint64_t address,uint64_t bytes,uint32_t after) {
++   if(!address || !bytes || ((address|bytes)&4095) || after>1)return int32_t(kIOReturnBadArgument);
++   pthread_mutex_lock(&dw.lock);
++   const NativeAdrenoAbiSyncHostRange request={address,bytes,after,0};
++   const bool active=dw.open && (dw.params.flags&NativeAdrenoParamsExplicitHostSync);
++   const kern_return_t result=active?dw_call(NativeAdrenoMethodSyncHostRange,&request,sizeof(request),NULL,0):kIOReturnUnsupported;
++   pthread_mutex_unlock(&dw.lock);
++   return int32_t(result);
+ }
+ 
+ static VkResult

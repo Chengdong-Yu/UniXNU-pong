@@ -24,6 +24,10 @@
 #include <sys/param.h>
 #include <sys/types.h>
 #include "../PongProbe.h"
+// Power/USB/WLAN share the Apps SMMU. UFS also builds without that optional
+// aggregate, so weak imports retain the single-owner storage-only profile.
+extern "C" bool pong_smmu_lease_lock(void) __attribute__((weak_import));
+extern "C" void pong_smmu_lease_unlock(void) __attribute__((weak_import));
 
 namespace {
 #include "RootTransportLayout.h"
@@ -155,6 +159,17 @@ static bool hostBringUp() {
   gRootDiagnostic.stage = "quiesce firmware queue";
   const char *why = nullptr;
   if (!hostStopQueue(&why)) return transportFailure(why);
+  {
+  // Select and publish a bank atomically against every optional Apps-SMMU
+  // consumer. A private UFS queue lock does not protect this global table.
+  struct Lease {
+    bool held = false;
+    ~Lease() { if (held) pong_smmu_lease_unlock(); }
+  } lease;
+  if (pong_smmu_lease_lock && pong_smmu_lease_unlock) {
+    lease.held = pong_smmu_lease_lock();
+    if (!lease.held) return transportFailure("Apps SMMU lease unavailable");
+  }
   gRootDiagnostic.stage = "SMMU plan";
   gHost.smmu = mapPhys(0x15000000, 0x100000, gHost.smmuMap);
   if (!gHost.smmu) return transportFailure("SMMU map");
@@ -177,6 +192,7 @@ static bool hostBringUp() {
   gRootDiagnostic.cbar = read(0x1000 + 4 * plan.bank); gRootDiagnostic.cba2r = read(0x1800 + 4 * plan.bank);
   gRootDiagnostic.sctlr = read32(gHost.cb, 0);
   if (why) return transportFailure(why);
+  } // Release before queue commands or storage readiness notifications.
   gRootDiagnostic.stage = "request list start";
   if (!hostStartQueue(&why)) return transportFailure(why);
   gRootDiagnostic.stage = "NOP OUT";
@@ -338,6 +354,7 @@ extern "C" int native_pong_ufs_volume_device(const char *uuid, int kind,
   unsigned matches = 0;
   bool accepted = false;
   dev_t selected = NODEV;
+  IOService *rootIdentity = nullptr;
   char selectedPath[64] = {};
   while (OSObject *object = iterator->getNextObject()) {
     IOService *media = OSDynamicCast(IOService, object);
@@ -383,13 +400,23 @@ extern "C" int native_pong_ufs_volume_device(const char *uuid, int kind,
     selected = static_cast<dev_t>(makedev(major->unsigned32BitValue(), minor->unsigned32BitValue()));
     snprintf(selectedPath, sizeof(selectedPath), "/dev/%s", name->getCStringNoCopy());
     accepted = true;
+    if (!kind) {media->retain();rootIdentity=media;}
   }
   iterator->release();
   if (!accepted || matches != 1) {
     IOLog("PONG APFS: UUID lookup miss wanted=%.36s matches=%u accepted=%d window=%s\n",
           uuid, matches, accepted, windowName);
     if (kind) native_pong_log_ufs_window_media(windowKey);
+    OSSafeReleaseNULL(rootIdentity);
     return 0;
+  }
+  if (rootIdentity) {
+    // A partition client needs the actual root IOMedia, not a placeholder
+    // platform service. UUID, BSD identity, unique match and UFS OS ancestry
+    // have all been checked before publishing the standard root marker.
+    rootIdentity->setProperty("EmbeddedDeviceTypeRoot", true);
+    IOLog("PONG APFS: root media identity published on %s\n", selectedPath);
+    rootIdentity->release();
   }
   *device = selected;
   strlcpy(path, selectedPath, pathSize);

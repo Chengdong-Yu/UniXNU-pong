@@ -75,14 +75,15 @@ typedef struct {
     PongAdrenoHfiStatus transport;
 } PongGpuPowerResult;
 /* Exact gen7-4-0 cold-start handshake after actual GMU/HFI readiness:
- * PERF -> BW -> CORE_FW_START -> default blocking GX/BW vote. This differs
- * from Sheng's extra START message. ACD/BCL/IFPC are left disabled until
+ * PERF -> BW -> CORE_FW_START -> selected blocking GX/BW vote. power_level
+ * is a real Pong DT index; firmware keeps control over the actual clocks.
+ * This differs from Sheng's extra START message. ACD/BCL/IFPC are left disabled until
  * their AOP/power prerequisites exist; no A740 feature table is reused.
  * Only actual matching ACKs advance state. Elapsed time and poll counts
  * are bounded, and an uncertain attempt poisons/retains the session.
  * Success is GMU power protocol startup, not CP execution or acceleration.
  */
-PongGpuStatus PongAdrenoGmuStartPower(PongGpuGmuDevice *,const PongPowerInputs *,PongGpuPowerResult *);
+PongGpuStatus PongAdrenoGmuStartPower(PongGpuGmuDevice *,const PongPowerInputs *,unsigned power_level,PongGpuPowerResult *);
 /* Vendor gen7_gpu_boot: fresh OOB_GPU acknowledgement followed by START10.
  * Keep OOB held while this port has no idle/slumber/resume owner. */
 PongGpuStatus PongAdrenoGmuHoldGpu(PongGpuGmuDevice *,PongGpuPowerResult *);

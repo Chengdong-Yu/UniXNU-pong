@@ -1,0 +1,28 @@
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -5801,6 +5801,24 @@
+ 
+ 	assert(thread->sched_pri <= MAXPRI);
+ 
++#if defined(ARM64_BOARD_CONFIG_PONG)
++	/* The board supplies only a ranking of currently idle eligible cores.
++	 * Keep native RT deadlines, explicit binding, recommendation and pset
++	 * ownership intact. CPU0's warm-cache hint must not hide an idle X2.
++	 * The caller holds the thread and pset locks, as for the native search. */
++	extern uint64_t pong_cpu_preferred_idle_mask(uint64_t available);
++	if (thread->bound_processor == PROCESSOR_NULL && thread->sched_pri < BASEPRI_RTQUEUES) {
++		uint64_t available = pset->cpu_state_map[PROCESSOR_IDLE] & pset->recommended_bitmask;
++		uint64_t preferred = pong_cpu_preferred_idle_mask(available) & available;
++		int cpu = lsb_next(preferred, pset->cpu_preferred_last_chosen);
++		if (cpu < 0) cpu = lsb_first(preferred);
++		if (cpu >= 0) {
++			pset->cpu_preferred_last_chosen = cpu;
++			return processor_array[cpu];
++		}
++	}
++#endif
++
+ 	/*
+ 	 * At this point, we may have a processor hint, and we may have
+ 	 * an initial starting pset. If the hint is not in the pset, or

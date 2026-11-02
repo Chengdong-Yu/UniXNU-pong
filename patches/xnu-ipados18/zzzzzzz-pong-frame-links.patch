@@ -1,0 +1,50 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -46,6 +46,11 @@
+ #if XNU_PONG_ADRENO_PLATFORM
+ extern "C" void pong_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" int pong_scanout_frame(IOMemoryDescriptor *,size_t,uint32_t,uint32_t,uint32_t);
++extern "C" void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t);
++static void pongDisplayTrace(uint32_t event,uint64_t id,uint64_t phase,uint64_t surface,uint64_t a=0,uint64_t b=0,uint64_t c=0) {
++ const uint64_t values[]={id,phase,surface,a,b,c};native_gpu_trace_record(event,0,values,6);
++}
++
+ extern "C" bool pong_scanout_quarantined(void);
+ extern "C" void pong_scanout_idle(void);
+ #endif
+@@ -978,6 +983,9 @@
+ 	uint32_t layers = 0;
+ 	bool report;
+ 	bool surfacesReady = true;
++#if XNU_PONG_ADRENO_PLATFORM
++    pongDisplayTrace(20,swapWord(swap,SWAP_ID),1,swapWord(swap,SWAP_SURFACE(0)));
++#endif
+     struct Readers {
+         MiniIOSurface *held[SWAP_LAYERS]={};
+         ~Readers(){for(auto *surface:held)if(surface)MiniIOSurfaceDisplayDone(surface);}
+@@ -986,9 +994,16 @@
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
+ 			surfacesReady = false;
++#if XNU_PONG_ADRENO_PLATFORM
++            pongDisplayTrace(22,swapWord(swap,SWAP_ID),3,swapWord(swap,SWAP_SURFACE(layer)),SWAP_GPU_MS);
++#endif
+ 			IOLog("MiniIOMobileFramebuffer: swap %u: GPU surface %u incomplete after %u ms; retaining the last completed frame\n",
+ 			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+-		} else if(surfaces[layer])readers.held[layer]=surfaces[layer];
++		} else if(surfaces[layer]){readers.held[layer]=surfaces[layer];
++#if XNU_PONG_ADRENO_PLATFORM
++            pongDisplayTrace(22,swapWord(swap,SWAP_ID),1,swapWord(swap,SWAP_SURFACE(layer)));
++#endif
++        }
+ 	}
+ 	fStatWaiting += mach_absolute_time() - began;
+ 	began = ready = mach_absolute_time();
+@@ -1058,6 +1073,7 @@
+ 		size_t offset=(size_t)(base->pixels()-(base->client?base->kpixels:base->kbase));
+ 		beginGraphics();
+ 		gpuFrame=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight)==1;
++        pongDisplayTrace(20,swapWord(swap,SWAP_ID),gpuFrame?4:8,swapWord(swap,SWAP_SURFACE(0)),fPanelWidth,fPanelHeight,base->info.bytesPerRow);
+ 	}
+ 	/* A delivered GPU copy whose completion is uncertain must never race a
+ 	 * CPU write. Result 2 poisons the handoff; result 0 permits CPU fallback. */

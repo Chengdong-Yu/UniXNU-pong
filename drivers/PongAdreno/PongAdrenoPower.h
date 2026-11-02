@@ -14,17 +14,19 @@ typedef struct {
     PongPowerResource gfx,mx,cx,sh0,mc0,acv,cn0;
 } PongPowerInputs;
 typedef struct {uint32_t hz,level,cx_level,bus,bus_min,bus_max,acd;} PongPowerLevel;
+enum {PongAdrenoPowerLevelCount=13,PongAdrenoBandwidthCount=12,
+      PongAdrenoBootPowerLevel=11};
 /* Captured live Pong DT profile, descending Android order. Runtime speed-bin
  * policy must select only actual enabled levels; never substitute A740 OPPs.
  */
-extern const PongPowerLevel PongAdrenoPowerLevels[13];
-extern const uint32_t PongAdrenoDdrBandwidth[12];
+extern const PongPowerLevel PongAdrenoPowerLevels[PongAdrenoPowerLevelCount];
+extern const uint32_t PongAdrenoDdrBandwidth[PongAdrenoBandwidthCount];
 typedef struct {
     /* Exact modern vendor wire payloads, excluding the HFI message header.
      * PERF has 16 GX entries of (ARC vote,CX index,kHz) and four CX entries.
      */
     uint32_t performance[58],bandwidth[159];
-    uint32_t default_gpu_index,default_bus_index;
+    uint32_t gpu_index,bus_index;
 } PongPowerTables;
 
 /* Parse the actual retained command-db reservation at0x80860000/0x20000.
@@ -37,9 +39,11 @@ PongPowerStatus PongAdrenoReadPowerInputs(const uint8_t *,size_t,uint32_t chip_i
  * addresses/aux are required. Rounded primary voltage determines the secondary
  * dependency, and every Pong GPU level gets its actual CX vote. Average DDR
  * bandwidth stays zero; only peak is voted, as in Nothing's gen7_rpmh writer.
+ * power_level uses descending Android DT order (0 = 900 MHz, 11 = 285 MHz).
+ * Its ascending HFI index and matching DDR vote are selected together.
  * Success is not a regulator vote, clock change, HFI ACK or ready GPU.
  */
-PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *,PongPowerTables *);
+PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *,unsigned power_level,PongPowerTables *);
 #ifdef __cplusplus
 }
 #endif

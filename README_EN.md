@@ -13,14 +13,16 @@ Format 2 device support for Nothing Phone (2), codename **Pong**, Qualcomm **SM8
 | Area | Configuration and observations |
 | --- | --- |
 | CPU / memory | X2 + 3×A710 + 4×A510, PSCI/GICv3, 19.2 MHz timer, native 4 KiB pages; 12 GiB physical RAM, managed memory constrained by reservations |
-| Display / input | 1080×2412, stride 4320, requested 120 Hz; desktop, touch and wallpaper observed; actual refresh and brightness remain under development |
-| GPU / Metal | Adreno 730 with Pong firmware, Turnip and Metal integration used for desktop rendering; remaining paths need work |
-| Storage | Native UFS/APFS boot, separate OS/SystemOS and writable 8 GiB UFS Data at `/private/var` |
-| Wi-Fi | QCA6490/ath11k; PCIe0 link, BAR and DMA allocation observed; SMMU ordering repaired, scanning and connectivity unconfirmed |
-| Audio | ADSP, AudioReach, two TFA9873 amplifiers and output HAL connected; CoreMedia provider selection repaired, actual PCM output unconfirmed |
-| Buttons / power | Real PMIC events reach HID/SpringBoard; reported power/volume actions remain unresolved; full suspend/resume incomplete |
+| Display / input | 1080×2412, stride 4320, requested 120 Hz; desktop, touch, wallpaper and brightness control have device confirmation; actual refresh remains under investigation |
+| GPU / Metal | Adreno 730 with Pong firmware, Turnip and Metal desktop rendering; upstream scheduling, cache and Metal updates integrated, with remaining slow-frame and resume issues |
+| Storage | Native UFS/APFS boot, separate OS/SystemOS and writable Data at `/private/var`; the device Data volume is 128 GB, while the hosted seed remains 8 GiB |
+| Wi-Fi | QCA6490/ath11k with Pong firmware; PCIe/SMMU/DMA repairs and native system integration, with scanning and association confirmed |
+| Audio | ADSP, AudioReach, two TFA9873 amplifiers and native IOAudio2; ordinary playback and volume confirmed, but audio recovery after lock remains unresolved |
+| Buttons / power | Real PMIC events reach HID/SpringBoard and native power/volume actions; full suspend/resume remains incomplete |
 
-Host builds and service publication are recorded separately from device functionality. The latest [SMMU/audio repair](migration/ipados18/services73-smmu-audio.md) is built without a temporary device boot, as requested.
+Host builds and service publication are recorded separately from device functionality. Historical source and device observations remain in the migration records.
+
+Current source includes the accumulated Wi-Fi, brightness, HID, audio, battery, native USB/Finder, keyboard, rootful userland and GPU/Metal fixes. Wi-Fi association, brightness and native audio volume have device confirmation; audio recovery after lock and remaining GPU frame latency are still under investigation. The installed Data volume has been expanded to 128 GB; the hosted userdata recipe retains its original 8 GiB seed. arm64e/PAC preparation does not switch the running 22H374 arm64 system. See [runtime integration and preserved packaging scripts](migration/ipados18/runtime-fixes-and-build-overlay.md).
 
 ## Build
 

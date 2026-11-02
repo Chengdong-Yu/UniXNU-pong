@@ -61,7 +61,7 @@ enum {
   kSsid = 1, kAuthType = 2, kCipherKey = 3, kChannel = 4, kPowerSave = 5, kTxPower = 7, kRate = 8, kBssid = 9, kScanReq = 10, kScanResult = 11,
   kCardCaps = 12, kState = 13, kPhyMode = 14, kOpMode = 15, kRssi = 16, kNoise = 17, kPower = 19, kAssociate = 20, kAssociateResult = 21,
   kDisassociate = 22, kSupportedChannels = 27, kLocale = 28, kDeauth = 29, kDriverVersion = 43, kHardwareVersion = 44, kCountryCode = 51,
-  kRadioInfo = 54, kScanReqMultiple = 86, kScanCacheClear = 90, kCurrentNetwork = 103, kChannelsInfo = 207, kHwSupportedChannels = 254,
+  kRadioInfo = 54, kWowEnabled = 70, kVirtualRole = 96, kVirtualParent = 97, kScanReqMultiple = 86, kScanCacheClear = 90, kCurrentNetwork = 103, kChannelsInfo = 207, kHwSupportedChannels = 254,
 };
 // events
 enum { kEvPowerChanged = 1, kEvSsidChanged = 2, kEvBssidChanged = 3, kEvLinkChanged = 4, kEvAssocDone = 9, kEvScanDone = 10 };
@@ -79,6 +79,19 @@ struct assoc_request {                                                          
   uint32_t version; uint16_t mode, auth_lower, auth_upper, unused0; uint32_t ssid_length; uint8_t ssid[32]; uint8_t bssid[6], unused1[2];
   uint32_t key_version, key_length, key_cipher; uint16_t key_flags, key_index; uint8_t key[64]; uint8_t rest[0x250 - 0x88];
 };
+// Native 22H374 IO80211 __performAssociation sends 0x384 bytes. Unlike
+// the older 0x250 layout its lower/upper authentication fields are 32-bit.
+// Decoding it as the legacy layout reads auth_upper as the SSID length.
+struct assoc_request24 {
+  uint32_t version; uint16_t mode, unused0; uint32_t auth_lower, auth_upper;
+  uint32_t ssid_length; uint8_t ssid[32], bssid[6], unused1[2];
+  uint32_t key_version, key_length, key_cipher; uint16_t key_flags, key_index;
+  uint8_t key[64], rest[0x384-0x8c];
+};
+static_assert(sizeof(assoc_request24)==0x384 &&
+  __builtin_offsetof(assoc_request24,ssid_length)==0x10 &&
+  __builtin_offsetof(assoc_request24,bssid)==0x34 &&
+  __builtin_offsetof(assoc_request24,key)==0x4c,"22H374 association ABI");
 struct link_event { uint8_t down, unused0[3]; int32_t rssi; uint16_t snr, noise; uint8_t unused1[4]; uint8_t involuntary, unused2[3]; uint32_t reason, subreason; uint8_t unused3[4]; };
 static_assert(sizeof(scan_result) == 1164 && __builtin_offsetof(scan_result, ssid_length) == 0x60 && __builtin_offsetof(scan_result, age_ms) == 0x84 &&
               __builtin_offsetof(scan_result, elements) == 0x8c, "scan result layout");
@@ -91,12 +104,16 @@ uint8_t gMac[6];
 lck_grp_t *gGrp;
 lck_mtx_t *gLock;
 bool gPower = true;
+bool gFailed;
 bool gKeyed;   // the last join used a passphrase
 uint32_t gRxFrames, gRxErrors; int gRxLastError;
 uint32_t gRxNoBuffer, gRxChains, gRxLongest;   // frames dropped for want of a buffer, frames that took a chain, the longest frame
 struct { unsigned count, kicks, cleared, longest; bool kicked; } gStall;   // input thread stalls (check_input)   // frames handed to the stack, refused ones and the last refusal
 int gAssocResult = kAssocOk;
 unsigned gScanCursor, gScanning;
+thread_call_t gNotifications;
+unsigned gPendingNotifications;
+enum { NotifyPower=1, NotifyLinkDown=2 };
 bool gUserJoin;   // the wireless daemon joined, left or switched the radio itself: the unattended test join steps aside
 uint32_t gLogged[256 / 32];
 
@@ -127,13 +144,36 @@ void post_link(bool up) {
   pong_kev_post(&msg);
 }
 
+// Apple80211 commands own gLock. Network/socket event delivery may reenter
+// interface queries and must run after that lock has been released. Keep
+// only coalescible state notifications here; scan/join completions retain
+// their existing explicit callbacks outside gLock.
+void deliver_notifications(thread_call_param_t,thread_call_param_t) {
+  for(;;) {
+    lck_mtx_lock(gLock);
+    const unsigned pending=gPendingNotifications;gPendingNotifications=0;
+    lck_mtx_unlock(gLock);
+    if(!pending)return;
+    if(pending&NotifyLinkDown)post_link(false);
+    if(pending&NotifyPower)post_event(kEvPowerChanged,nullptr,0);
+  }
+}
+void notify_locked(unsigned events) {
+  gPendingNotifications|=events;thread_call_enter(gNotifications);
+}
+
 // ---- what the module tells us ----
-void on_scan_done() { __atomic_store_n(&gScanning, 0u, __ATOMIC_RELEASE); gScanCursor = 0; post_event(kEvScanDone, nullptr, 0); }
+void on_scan_done() {
+  lck_mtx_lock(gLock); gScanning = 0; gScanCursor = 0; lck_mtx_unlock(gLock);
+  post_event(kEvScanDone, nullptr, 0);
+}
 // A scan answered from the cache finishes after the time a short scan takes: answered at once, the daemon asks again straight away.
 thread_call_t gCachedScan;
 void cached_scan_done(thread_call_param_t, thread_call_param_t) { on_scan_done(); }
 void on_connect_done(int result) {
+  lck_mtx_lock(gLock);
   gAssocResult = result == NW_RES_OK ? kAssocOk : result == NW_RES_BAD_KEY ? kAssocBadKey : result == NW_RES_TIMEOUT ? kAssocTimeout : kAssocFailed;
+  lck_mtx_unlock(gLock);
   log(6, "wifi-net: join finished: module result %d", result);
   if (result == NW_RES_OK) { post_link(true); }
   post_event(kEvAssocDone, nullptr, 0);
@@ -173,7 +213,7 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
   // An offer or acknowledgement: the network settings the server hands out (mask, router, name servers, lease), to tell a server that
   // gives no IPv4 name server from a client that drops one.
   if (out || (msg != 2 && msg != 5)) return;
-  char opts[124]; int at = 0;   // fits the 160-byte log line
+  char opts[124] = {}; int at = 0;   // fits the 160-byte log line
   for (size_t o = 240; o + 2 <= bl && b[o] != 255 && at >= 0 && at < static_cast<int>(sizeof opts) - 24; o += b[o] ? 2 + b[o + 1] : 1) {
     if (!b[o]) continue;
     const unsigned code = b[o], len = b[o + 1]; const uint8_t *v = b + o + 2;
@@ -238,24 +278,30 @@ void fill_result(scan_result &r, const nw_bss_info &b) {
   r.age_ms = b.age_ms; r.elements_length = b.ie_len > sizeof r.elements ? sizeof r.elements : b.ie_len; memcpy(r.elements, b.ie, r.elements_length);
   r.rate_count = 0;
 }
-int copy_out(const apple80211req &rq, const void *src, size_t size) {
+int copy_out(const apple80211req &rq, const void *src, size_t size, bool kernel = false) {
   if (rq.req_len == 0 || !rq.req_data) return EINVAL;
-  return copyout(src, rq.req_data, rq.req_len < size ? rq.req_len : size);
+  const size_t n = rq.req_len < size ? rq.req_len : size;
+  if (kernel) { memcpy(reinterpret_cast<void *>(rq.req_data), src, n); return 0; }
+  return copyout(src, rq.req_data, n);
 }
 // A get that gives no buffer takes a single value in req_val; one with a buffer gets {version, value}.
-int answer_value(apple80211req &rq, uint32_t value) {
+int answer_value(apple80211req &rq, uint32_t value, bool kernel = false) {
   if (rq.req_len == 0 || !rq.req_data) { rq.req_val = static_cast<int32_t>(value); return 0; }
-  const uint32_t w[2] = { 1, value }; return copyout(w, rq.req_data, rq.req_len < sizeof w ? rq.req_len : sizeof w);
+  const uint32_t w[2] = { 1, value }; return copy_out(rq, w, sizeof w, kernel);
 }
 // The raw bytes, their length in req_len.
-int answer_bytes(apple80211req &rq, const void *src, uint32_t size) {
+int answer_bytes(apple80211req &rq, const void *src, uint32_t size, bool kernel = false) {
   if (!rq.req_data) return EINVAL;
-  const uint32_t n = rq.req_len < size ? rq.req_len : size; rq.req_len = size; return copyout(src, rq.req_data, n);
+  const uint32_t n = rq.req_len < size ? rq.req_len : size; rq.req_len = size;
+  if (kernel) { memcpy(reinterpret_cast<void *>(rq.req_data), src, n); return 0; }
+  return copyout(src, rq.req_data, n);
 }
-int copy_in(const apple80211req &rq, void *dst, size_t size) {
+int copy_in(const apple80211req &rq, void *dst, size_t size, bool kernel = false) {
   if (!rq.req_data) return EINVAL;
   memset(dst, 0, size);
-  return copyin(rq.req_data, dst, rq.req_len < size ? rq.req_len : size);
+  const size_t n = rq.req_len < size ? rq.req_len : size;
+  if (kernel) { memcpy(dst, reinterpret_cast<const void *>(rq.req_data), n); return 0; }
+  return copyin(rq.req_data, dst, n);
 }
 unsigned gResultsShown;
 // The regulatory country as the access points announce it (802.11d: the Country element, id 7, of the strongest network that has one), else "XX".
@@ -270,7 +316,8 @@ void country(char cc[3]) {
 }
 int map_state(unsigned s) { switch (s) { case NW_STA_SCANNING: return 1; case NW_STA_AUTH: return 2; case NW_STA_ASSOC: case NW_STA_KEYS: return 3; case NW_STA_UP: return 4; default: return 0; } }
 
-int apple80211(bool set, apple80211req &rq) {
+int apple80211(bool set, apple80211req &rq, bool kernel = false) {
+  if (gFailed && (set || rq.req_type != kPower)) return ENETDOWN;
   nw_wifi_status st; nw_wifi_status_get(&st);
   const int type = rq.req_type;
   // (not on the stack: the largest answer is 4824 bytes)
@@ -283,20 +330,48 @@ int apple80211(bool set, apple80211req &rq) {
   uint32_t *w = reinterpret_cast<uint32_t *>(out.raw);
   if (set) {
     switch (type) {
-    case kPower: { uint32_t in[6]; if (copy_in(rq, in, sizeof in)) return EFAULT; gUserJoin = true; gPower = in[2] != 0; log(6, "wifi-net: power set %u", in[2]); if (!gPower) nw_wifi_disconnect(); post_event(kEvPowerChanged, nullptr, 0); return 0; }
+    case kPower: { uint32_t in[6]; if(rq.req_len<12)return EINVAL; if (copy_in(rq, in, sizeof in, kernel)) return EFAULT; gUserJoin = true; gPower = in[2] != 0; log(6, "wifi-net: power set %u", in[2]); if (!gPower) {nw_wifi_disconnect();pong_wifi_wake();} notify_locked(NotifyPower); return 0; }
     case kScanReq: case kScanReqMultiple: {
-      uint8_t buf[0x80]; if (copy_in(rq, buf, sizeof buf)) return EFAULT;
+      if(!gPower)return ENETDOWN;
+      if(rq.req_len<20)return EINVAL;
+      uint8_t buf[0x80]; if (copy_in(rq, buf, sizeof buf, kernel)) return EFAULT;
       uint32_t ssidLength; memcpy(&ssidLength, buf + 16, 4); const uint8_t *ssid = buf + 20;
+      if(ssidLength>32 || rq.req_len<20+ssidLength)return EINVAL;
       // joining or joined: a scan takes the radio off channel for seconds and the access point's beacons and handshake frames are missed, so
       // the daemon gets the last results instead
       if (st.state >= NW_STA_AUTH && nw_wifi_bss_count() > 0) {
         if (!gCachedScan) gCachedScan = thread_call_allocate(cached_scan_done, nullptr);
+        if (!gCachedScan) return ENOMEM;
         static unsigned answered; if (++answered <= 8 || answered % 64 == 0) log(6, "wifi-net: scan %u while joined: answered from the cache", answered);
         gScanning = 1; gScanCursor = 0; gResultsShown = 24; uint64_t at; clock_interval_to_deadline(2000, kMillisecondScale, &at); thread_call_enter_delayed(gCachedScan, at); return 0; }
-      gScanning = 1; gScanCursor = 0; gResultsShown = 0; nw_wifi_scan(ssidLength && ssidLength <= 32 ? ssid : nullptr, ssidLength <= 32 ? ssidLength : 0); return 0; }
+      gScanning = 1; gScanCursor = 0; gResultsShown = 0;
+      if(nw_wifi_scan(ssidLength?ssid:nullptr,ssidLength)){gScanning=0;return EBUSY;}
+      pong_wifi_wake();return 0; }
     case kAssociate: {
-      assoc_request a; if (copy_in(rq, &a, sizeof a)) return EFAULT;
-      if (a.ssid_length > 32) return EINVAL;
+      if(!gPower)return ENETDOWN;
+      assoc_request24 a={};
+      const bool darwin24=rq.req_len==sizeof(assoc_request24);
+      size_t keyOffset;
+      if(darwin24) {
+        if(copy_in(rq,&a,sizeof(a),kernel))return EFAULT;
+        keyOffset=__builtin_offsetof(assoc_request24,key);
+      } else if(rq.req_len==sizeof(assoc_request)) {
+        assoc_request legacy={};
+        if(copy_in(rq,&legacy,sizeof(legacy),kernel))return EFAULT;
+        a.version=legacy.version;a.mode=legacy.mode;
+        a.auth_lower=legacy.auth_lower;a.auth_upper=legacy.auth_upper;
+        a.ssid_length=legacy.ssid_length;memcpy(a.ssid,legacy.ssid,sizeof(a.ssid));
+        memcpy(a.bssid,legacy.bssid,sizeof(a.bssid));
+        a.key_version=legacy.key_version;a.key_length=legacy.key_length;a.key_cipher=legacy.key_cipher;
+        a.key_flags=legacy.key_flags;a.key_index=legacy.key_index;
+        memcpy(a.key,legacy.key,sizeof(a.key));memset(&legacy,0,sizeof(legacy));
+        keyOffset=__builtin_offsetof(assoc_request,key);
+      } else return EINVAL;
+      if(a.version!=1 || !a.ssid_length || a.ssid_length>32 || a.key_length>64 ||
+          rq.req_len<keyOffset+a.key_length) {memset(&a,0,sizeof(a));return EINVAL;}
+      // The station implements open/WPA2-personal, not enterprise or SAE.
+      // Preserve native failure for unsupported authentication, not an open join.
+      if(a.auth_upper && a.auth_upper!=8) {memset(&a,0,sizeof(a));return EOPNOTSUPP;}
       const bool hasBssid = (a.bssid[0] | a.bssid[1] | a.bssid[2] | a.bssid[3] | a.bssid[4] | a.bssid[5]) != 0;
       const bool hasKey = a.key_length != 0 && a.key_length <= 64; char pass[65]; memset(pass, 0, sizeof pass); if (hasKey) memcpy(pass, a.key, a.key_length);
       // cipher 6: the daemon already derived the pairwise master key (32 bytes); the module takes it as 64 hex digits
@@ -306,65 +381,96 @@ int apple80211(bool set, apple80211req &rq) {
       log(6, "wifi-net: join: ssid length %u, bssid given %d, key length %u cipher %u", a.ssid_length, hasBssid, a.key_length, a.key_cipher);
       gKeyed = hasKey; int r = nw_wifi_connect(a.ssid, a.ssid_length, hasBssid ? a.bssid : nullptr, hasKey ? pass : nullptr, hasKey ? keyLength : 0);
       memset(pass, 0, sizeof pass); memset(&a, 0, sizeof a);
+      if(!r)pong_wifi_wake();
       return r ? EINVAL : 0; }
-    case kDisassociate: case kDeauth: gUserJoin = true; log(6, "wifi-net: leave"); nw_wifi_disconnect(); post_link(false); return 0;
+    case kDisassociate: case kDeauth: gUserJoin = true; log(6, "wifi-net: leave"); nw_wifi_disconnect();pong_wifi_wake(); notify_locked(NotifyLinkDown); return 0;
     case kScanCacheClear: case kLocale: case kCountryCode: case kPowerSave: case kAuthType: case kCipherKey: return 0;
     default: return EOPNOTSUPP;
     }
   }
   switch (type) {
-  case kPower: w[0] = 1; w[1] = 1; w[2] = gPower ? 1 : 0; return copy_out(rq, w, 24);
-  case kState: return answer_value(rq, static_cast<uint32_t>(gPower ? map_state(st.state) : 0));
-  case kOpMode: return answer_value(rq, 1);   // station
-  case kAuthType: w[0] = 1; w[1] = 1; w[2] = gKeyed ? 0x8 : 0; return copy_out(rq, w, 12);   // {version, lower: open system, upper: WPA2 personal or none}
-  case kPowerSave: return answer_value(rq, 0);
+  case kPower: w[0] = 1; w[1] = 1; w[2] = gPower ? 1 : 0; return copy_out(rq, w, 24, kernel);
+  case kState: return answer_value(rq, static_cast<uint32_t>(gPower ? map_state(st.state) : 0), kernel);
+  case kOpMode: return answer_value(rq, 1, kernel);   // station
+  case kAuthType: w[0] = 1; w[1] = 1; w[2] = gKeyed ? 0x8 : 0; return copy_out(rq, w, 16, kernel);   // {version, lower: open system, upper: WPA2 personal or none}
+  case kPowerSave: return answer_value(rq, 0, kernel);
+  // en0 is the physical infrastructure station, not P2P/AWDL. A physical
+  // interface has role zero and no virtual parent. These discovery queries
+  // must not be confused with unsupported virtual-interface creation.
+  case kVirtualRole: return answer_value(rq, 0, kernel);
+  case kVirtualParent: return answer_bytes(rq, out.raw, 0, kernel);
+  case kWowEnabled: return answer_value(rq, 0, kernel); // no WoW suspend path exposed
   case kCardCaps: {   // a bitmap, bit n in byte n / 8: AES, AES-CCM, power management, short slot and preamble, WPA2, WME, short guard interval at 20 MHz
     static const uint8_t has[] = { 2, 3, 6, 9, 10, 14, 17, 19 };
     for (uint8_t b : has) out.raw[b / 8] |= static_cast<uint8_t>(1u << (b % 8));
-    return answer_bytes(rq, out.raw, 12); }
-  case kPhyMode: w[0] = 1; w[1] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40; w[2] = st.state == NW_STA_UP ? 0x8 : 0; return copy_out(rq, w, 12);
-  case kSsid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.ssid, st.ssid_len);
-  case kBssid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.bssid, 6);
-  case kChannel: if (st.state < NW_STA_AUTH) return ENOENT; w[0] = 1; fill_channel(*reinterpret_cast<channel *>(out.raw + 4), st.freq_mhz); return copy_out(rq, w, 16);
+    // 22H374 asks for 19 capability bytes (older clients ask for 12).
+    // Preserve that negotiated extent and zero unsupported extension bits;
+    // truncating the newer bitmap to 12 makes interface discovery incomplete.
+    const uint32_t bytes=rq.req_len>19?19:rq.req_len;
+    return answer_bytes(rq, out.raw, bytes, kernel); }
+  case kPhyMode: w[0] = 1; w[1] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40; w[2] = st.state == NW_STA_UP ? 0x8 : 0; return copy_out(rq, w, 12, kernel);
+  case kSsid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.ssid, st.ssid_len, kernel);
+  case kBssid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.bssid, 6, kernel);
+  case kChannel: if (st.state < NW_STA_AUTH) return ENOENT; w[0] = 1; fill_channel(*reinterpret_cast<channel *>(out.raw + 4), st.freq_mhz); return copy_out(rq, w, 16, kernel);
   case kRssi: case kNoise: {   // {version, radios, unit (0: dBm), per chain[4], aggregate, extension per chain[4], its aggregate}
     if (type == kRssi && st.state != NW_STA_UP) return ENOENT;
     const uint32_t v = static_cast<uint32_t>(type == kRssi ? static_cast<int32_t>(st.signal_dbm) : -95);
-    w[0] = 1; w[1] = 1; w[2] = 0; for (int i = 3; i < 13; i++) w[i] = v; return copy_out(rq, w, 13 * 4); }
-  case kRate: return answer_value(rq, st.state == NW_STA_UP ? 54 : 0);
-  case kTxPower: return answer_value(rq, 15);
-  case kDriverVersion: case kHardwareVersion: { const char *v = type == kDriverVersion ? "nativewifi 1" : "QCA6490 (ath11k/WCN6855)"; strlcpy(reinterpret_cast<char *>(out.raw), v, 256); return copy_out(rq, out.raw, 256); }
-  case kCountryCode: { char cc[3]; country(cc); return answer_bytes(rq, cc, 3); }   // the two letters and a NUL (the daemon asks with a 3-byte buffer)
-  case kAssociateResult: return answer_value(rq, static_cast<uint32_t>(gAssocResult));
+    w[0] = 1; w[1] = 1; w[2] = 0; for (int i = 3; i < 13; i++) w[i] = v; return copy_out(rq, w, 13 * 4, kernel); }
+  case kRate: return answer_value(rq, st.state == NW_STA_UP ? 54 : 0, kernel);
+  case kTxPower: return answer_value(rq, 15, kernel);
+  case kDriverVersion: case kHardwareVersion: { const char *v = type == kDriverVersion ? "nativewifi 1" : "QCA6490 (ath11k/WCN6855)"; strlcpy(reinterpret_cast<char *>(out.raw), v, 256); return copy_out(rq, out.raw, 256, kernel); }
+  case kCountryCode: { char cc[3]; country(cc); return answer_bytes(rq, cc, 3, kernel); }   // the two letters and a NUL (the daemon asks with a 3-byte buffer)
+  case kAssociateResult: return answer_value(rq, static_cast<uint32_t>(gAssocResult), kernel);
   case kSupportedChannels: case kHwSupportedChannels: {
     out.chans.version = 1; unsigned n = 0;
     uint32_t frequencies[401];unsigned actual=nw_wifi_channel_list(frequencies,401);
-    for(unsigned i=0;i<actual;i++){fill_channel(out.chans.list[n],frequencies[i]);out.chans.list[n].flags|=0x80;n++;}
-    out.chans.count = n; return copy_out(rq, &out.chans, sizeof out.chans); }
+    for(unsigned i=0;i<actual && n<401;i++){fill_channel(out.chans.list[n],frequencies[i]);out.chans.list[n].flags|=0x80;n++;}
+    out.chans.count = n; return copy_out(rq, &out.chans, sizeof out.chans, kernel); }
   case kScanResult: {
     nw_bss_info b; const int count = nw_wifi_bss_count();
     if (gScanCursor >= static_cast<unsigned>(count) || nw_wifi_bss_get(static_cast<int>(gScanCursor), &b)) { gScanCursor = 0; return EIO; }   // after the last record
     gScanCursor++; fill_result(out.res, b);
-    if (gResultsShown < 24) { ++gResultsShown; log(6, "wifi-net: scan result %u: %u MHz, %d dBm, %.*s", gScanCursor, b.freq_mhz, b.signal_dbm, b.ssid_len, reinterpret_cast<const char *>(b.ssid)); }
-    return copy_out(rq, &out.res, sizeof out.res); }
+    if (gResultsShown < 3) { ++gResultsShown; log(6, "wifi-net: scan result %u: %u MHz, %d dBm, %.*s", gScanCursor, b.freq_mhz, b.signal_dbm, b.ssid_len, reinterpret_cast<const char *>(b.ssid)); }
+    return copy_out(rq, &out.res, sizeof out.res, kernel); }
   case kCurrentNetwork: {
     if (st.state < NW_STA_ASSOC) return ENOENT;
     nw_bss_info b; const int count = nw_wifi_bss_count();
-    for (int i = 0; i < count; i++) if (!nw_wifi_bss_get(i, &b) && !memcmp(b.bssid, st.bssid, 6)) { fill_result(out.res, b); return copy_out(rq, &out.res, sizeof out.res); }
+    for (int i = 0; i < count; i++) if (!nw_wifi_bss_get(i, &b) && !memcmp(b.bssid, st.bssid, 6)) { fill_result(out.res, b); return copy_out(rq, &out.res, sizeof out.res, kernel); }
     return ENOENT; }
   default: return EOPNOTSUPP;
   }
 }
 
 errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
+  if(!gLock)return ENXIO;
   switch (cmd) {
   case SIOCGA80211: case SIOCSA80211: {
     apple80211req *rq = static_cast<apple80211req *>(data);
+    if(!rq)return EINVAL;
     const uint32_t len = rq->req_len; const int32_t val = rq->req_val;
-    int e = apple80211(cmd == SIOCSA80211, *rq);
+    const bool set=cmd==SIOCSA80211;
+    // A user-page fault must not retain the driver state lock: scan/join
+    // completions on the station worker need that lock too. The native
+    // user-client tunnel already uses this copy-before/after-lock pattern.
+    if(len>5120 || (len && !rq->req_data))return EINVAL;
+    void *bytes=len?IOMallocZeroData(len):nullptr;
+    if(len && !bytes)return ENOMEM;
+    struct Buffer {void *p;size_t n;~Buffer(){if(p){bzero(p,n);IOFreeData(p,n);}}} buffer{bytes,len};
+    if(set && len && copyin(rq->req_data,bytes,len))return EFAULT;
+    apple80211req local=*rq;
+    local.req_data=reinterpret_cast<user_addr_t>(bytes);
+    lck_mtx_lock(gLock);
+    int e=apple80211(set,local,true);
     // every request with its answer, for the first few hundred; then a type's first one only
     static unsigned shown; const int type = rq->req_type; const bool first = type >= 0 && type < 256 && !(gLogged[type / 32] & (1u << (type % 32)));
     if (type >= 0 && type < 256) gLogged[type / 32] |= 1u << (type % 32);
-    if (shown < 300 || first) { ++shown; log(6, "wifi-net: request %u: type %d %s len %u val %d -> %d (len %u val %d)", shown, type, cmd == SIOCSA80211 ? "set" : "get", len, val, e, rq->req_len, rq->req_val); }
+    if (shown < 300 || first) { ++shown; log(6, "wifi-net: request %u: type %d %s len %u val %d -> %d (len %u val %d)", shown, type, set ? "set" : "get", len, val, e, local.req_len, local.req_val); }
+    lck_mtx_unlock(gLock);
+    if(!e && !set && len) {
+      const size_t n=local.req_len<len?local.req_len:len;
+      if(n && copyout(bytes,rq->req_data,n))e=EFAULT;
+    }
+    rq->req_val=local.req_val;rq->req_len=local.req_len;
     return e;
   }
   case SIOCGIFMEDIA: {
@@ -372,7 +478,15 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
     nw_wifi_status st; nw_wifi_status_get(&st);
     // the framework lists wireless interfaces by this media type
     m->ifm_current = IFM_IEEE80211 | IFM_AUTO; m->ifm_mask = 0; m->ifm_status = IFM_AVALID | (st.state == NW_STA_UP ? IFM_ACTIVE : 0);
-    m->ifm_active = IFM_IEEE80211 | IFM_AUTO; m->ifm_count = 1;
+    m->ifm_active = IFM_IEEE80211 | IFM_AUTO;
+    const int requested=m->ifm_count;
+    m->ifm_count = 1;
+    // Darwin first asks for the count, then supplies ifm_ulist. Returning
+    // count=1 without copying the entry leaves userspace's list uninitialized.
+    if (requested > 0 && m->ifm_ulist) {
+      const int medium=IFM_IEEE80211 | IFM_AUTO;
+      return copyout(&medium, (user_addr_t)m->ifm_ulist, sizeof(medium));
+    }
     return 0;
   }
   case SIOCSIFFLAGS: case SIOCSIFMTU: case SIOCADDMULTI: case SIOCDELMULTI: case SIOCSIFADDR: case SIOCSIFMEDIA: return 0;
@@ -383,20 +497,138 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
 // ---- registry entries (see the top of the file in the build: the classes are registered late) ----
 }  // namespace
 
-class IO80211Controller : public IOService { OSDeclareDefaultStructors(IO80211Controller); };
-OSDefineMetaClassAndStructors(IO80211Controller, IOService);
-class IONetworkInterface : public IOService { OSDeclareDefaultStructors(IONetworkInterface); };
-OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
-// The system's network configuration and wireless daemon tell a wireless interface by its class name.
-class IO80211Interface : public IONetworkInterface {
-  OSDeclareDefaultStructors(IO80211Interface);
- public:
-  IOReturn newUserClient(task_t, void *, UInt32 type, OSDictionary *, IOUserClient **) APPLE_KEXT_OVERRIDE {
-    static unsigned said; if (said++ < 4) log(6, "wifi-net: a user client of type %u was asked for: none offered (ioctl path)", static_cast<unsigned>(type));
-    return kIOReturnUnsupported;
+// 22H374's IO80211 library first binds through the interface user client.
+// Its selector 0 tunnels the SAME Apple80211 requests as the socket path;
+// refusing IOServiceOpen leaves modern CoreWiFi without a usable binding.
+// Layout derived from the selected runtime, not an older IO80211 vtable.
+struct Apple80211MethodRequest {
+  uint32_t command, length;
+  uint8_t bytes[0x3c00];
+  apple80211req request;
+};
+static_assert(sizeof(Apple80211MethodRequest)==0x3c30 &&
+              __builtin_offsetof(Apple80211MethodRequest,request)==0x3c08,
+              "22H374 Apple80211 selector 0 layout");
+
+class Pong80211UserClient : public IOUserClient {
+  OSDeclareDefaultStructors(Pong80211UserClient);
+  static uint32_t capacity(IOExternalMethodArguments *a) {
+    return a->structureOutputDescriptor ? a->structureOutputDescriptorSize : a->structureOutputSize;
+  }
+  static bool output(IOExternalMethodArguments *a,const void *data,uint32_t bytes) {
+    if(bytes>capacity(a))return false;
+    if(a->structureOutputDescriptor) {
+      // MIG supplies an unwired virtual descriptor for OOL requests.
+      // writeBytes walks physical segments; it does not fault/wire pages.
+      // Pair ownership locally and finish before returning to the caller.
+      auto memory=a->structureOutputDescriptor;
+      if(bytes) {
+        IOReturn result=memory->prepare(kIODirectionIn);
+        if(result!=kIOReturnSuccess)return false;
+        const bool copied=memory->writeBytes(0,data,bytes)==bytes;
+        memory->complete(kIODirectionIn);
+        if(!copied)return false;
+      }
+      a->structureOutputDescriptorSize=bytes;
+    } else {
+      if(bytes && !a->structureOutput)return false;
+      if(bytes)memcpy(a->structureOutput,data,bytes);
+      a->structureOutputSize=bytes;
+    }
+    return true;
+  }
+public:
+  bool initWithTask(task_t task,void *security,UInt32 type,OSDictionary *properties) override {
+    return type==0 && IOUserClient::initWithTask(task,security,type,properties);
+  }
+  IOReturn clientClose() override { terminate();return kIOReturnSuccess; }
+  IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *a,
+      IOExternalMethodDispatch *,OSObject *,void *) override {
+    if(!a || a->scalarInputCount || a->scalarOutputCount)return kIOReturnBadArgument;
+    const uint64_t inputBytes=a->structureInputDescriptor ?
+        a->structureInputDescriptor->getLength() : a->structureInputSize;
+    if(selector==1 || selector==7) {
+      if(inputBytes || capacity(a)!=1)return kIOReturnBadArgument;
+      // Standard ioctl tunnel implemented; Apple's separate fast-path is
+      // not implemented. These describe this client, not radio abilities.
+      const uint8_t supported=selector==1;
+      return output(a,&supported,1)?kIOReturnSuccess:kIOReturnBadArgument;
+    }
+    if(selector!=0)return kIOReturnUnsupported;
+    if(inputBytes!=sizeof(Apple80211MethodRequest) || capacity(a)>0x3c00 || !gLock)
+      return kIOReturnBadArgument;
+    auto packet=static_cast<Apple80211MethodRequest *>(IOMallocData(sizeof(Apple80211MethodRequest)));
+    if(!packet)return kIOReturnNoMemory;
+    struct Free {Apple80211MethodRequest *p;~Free(){
+      auto bytes=reinterpret_cast<volatile uint8_t *>(p);
+      for(size_t i=0;i<sizeof(*p);i++)bytes[i]=0;
+      IOFreeData(p,sizeof(*p));}} release{packet};
+    if(a->structureInputDescriptor) {
+      // The native envelope is 15KiB, larger than MIG's in-band limit.
+      // services88 read this descriptor without prepare(), which can reach
+      // IOGMD's fatal "not wired for the IODMACommand" path. The pages
+      // belong to this one request, never to the radio's DMA arena.
+      auto memory=a->structureInputDescriptor;
+      IOReturn result=memory->prepare(kIODirectionOut);
+      if(result!=kIOReturnSuccess)return result;
+      const bool copied=memory->readBytes(0,packet,sizeof(*packet))==sizeof(*packet);
+      memory->complete(kIODirectionOut);
+      if(!copied)return kIOReturnNotReadable;
+    } else {
+      if(!a->structureInput)return kIOReturnBadArgument;
+      memcpy(packet,a->structureInput,sizeof(*packet));
+    }
+    if((packet->command!=SIOCGA80211 && packet->command!=SIOCSA80211) ||
+       packet->length>sizeof(packet->bytes) ||
+       strncmp(packet->request.req_if_name,"en0",sizeof(packet->request.req_if_name)))
+      return kIOReturnBadArgument;
+    const bool set=packet->command==SIOCSA80211;
+    const uint32_t outCapacity=capacity(a);
+    // The library puts payload length at +4 and payload at +8. The copied
+    // user pointer at +3c28 is never followed. Scalar GETs return req_val;
+    // bind's version sanity query instead supplies a 256-byte output only.
+    const bool scalar=!set && !packet->length && outCapacity==sizeof(uint32_t);
+    apple80211req rq=packet->request;
+    rq.req_len=scalar?0:(packet->length ? packet->length : (!set?outCapacity:0));
+    if(!set && rq.req_len>outCapacity)return kIOReturnBadArgument;
+    rq.req_data=rq.req_len?reinterpret_cast<user_addr_t>(packet->bytes):0;
+    int result;
+    {
+      struct Guard {Guard(){lck_mtx_lock(gLock);}~Guard(){lck_mtx_unlock(gLock);}} guard;
+      result=apple80211(set,rq,true);
+    }
+    static unsigned logged;
+    if(logged++<96 || (set && (rq.req_type==kAssociate || rq.req_type==kCipherKey || rq.req_type==kAuthType)))log(6,"wifi-net: native client type %d %s bytes=%u -> %d",
+        rq.req_type,set?"set":"get",packet->length,result);
+    // IO80211's wrapper preserves these errno values; do not turn an
+    // unsupported request or failed association into a successful result.
+    if(result)return static_cast<IOReturn>(result);
+    if(set)return output(a,nullptr,0)?kIOReturnSuccess:kIOReturnBadArgument;
+    const uint32_t bytes=scalar?sizeof(rq.req_val):(rq.req_len<outCapacity?rq.req_len:outCapacity);
+    return output(a,scalar?static_cast<const void *>(&rq.req_val):packet->bytes,bytes)?
+        kIOReturnSuccess:kIOReturnBadArgument;
   }
 };
-OSDefineMetaClassAndStructors(IO80211Interface, IONetworkInterface);
+OSDefineMetaClassAndStructors(Pong80211UserClient,IOUserClient);
+class IO80211Controller : public IOService {OSDeclareDefaultStructors(IO80211Controller);};
+OSDefineMetaClassAndStructors(IO80211Controller,IOService);
+class IONetworkInterface : public IOService {OSDeclareDefaultStructors(IONetworkInterface);};
+OSDefineMetaClassAndStructors(IONetworkInterface,IOService);
+class IO80211Interface : public IONetworkInterface {
+  OSDeclareDefaultStructors(IO80211Interface);
+public:
+  IOReturn newUserClient(task_t task,void *security,UInt32 type,OSDictionary *properties,IOUserClient **out) override {
+    if(type!=0)return kIOReturnUnsupported;
+    auto client=OSTypeAlloc(Pong80211UserClient);
+    if(!client || !client->initWithTask(task,security,type,properties)) {
+      OSSafeReleaseNULL(client);return kIOReturnNotPermitted;
+    }
+    if(!client->attach(this)){client->release();return kIOReturnError;}
+    if(!client->start(this)){client->detach(this);client->release();return kIOReturnError;}
+    *out=client;return kIOReturnSuccess;
+  }
+};
+OSDefineMetaClassAndStructors(IO80211Interface,IONetworkInterface);
 
 // The network configuration's interface namer waits for a service of this class, opens it and only then publishes that IOKit is quiet;
 // everything that lists interfaces (the wireless daemon among them) waits for that. Interfaces here are named when they are made, so the
@@ -448,12 +680,18 @@ void publish_registry(const char *ifname) {
   if (!platform || !controller || !wlan || !controller->init() || !wlan->init()) { OSSafeReleaseNULL(controller); OSSafeReleaseNULL(wlan); log(3, "wifi-net: registry objects not made"); return; }
   if (OSData *mac = OSData::withBytes(gMac, 6)) { controller->setProperty("IOMACAddress", mac); mac->release(); }
   controller->setProperty("IOBuiltin", true);
+  // This board already attached and named the real DLIL interface en0.
+  // InterfaceNamer must not try to rename it through IONetworkStack.
+  controller->setProperty("SelfNamed", true);
   controller = static_cast<IO80211Controller *>(publish(controller, platform, "PongWLANController"));
   if (!controller) { wlan->release(); log(3, "wifi-net: the controller did not start"); return; }
   wlan->setProperty("IOInterfaceName", ifname); wlan->setProperty("BSD Name", ifname); wlan->setProperty("IOInterfaceNamePrefix", "en");
   if (OSNumber *n = OSNumber::withNumber(static_cast<unsigned long long>(IFT_ETHER), 32)) { wlan->setProperty("IOInterfaceType", n); n->release(); }
   if (OSNumber *n = OSNumber::withNumber(0ULL, 32)) { wlan->setProperty("IOInterfaceUnit", n); n->release(); }
+  if (OSData *mac = OSData::withBytes(gMac, 6)) {wlan->setProperty("IOMACAddress", mac);mac->release();}
   wlan->setProperty("IOBuiltin", true); wlan->setProperty("IOPrimaryInterface", true); wlan->setProperty("IO80211InterfaceRole", "Infrastructure");
+  wlan->setProperty("NativeSandboxGrantProcess","wifid,configd");
+  wlan->setProperty("IOUserClientClass","Pong80211UserClient");
   if (!publish(wlan, controller, "PongWLAN")) log(3, "wifi-net: the interface service did not start"); else wlan->release();
   controller->release();
 }
@@ -487,8 +725,27 @@ extern "C" bool pong_wifi_net_prepare(void) {
   if (!gGrp) return false;
   if (!gLock) gLock = lck_mtx_alloc_init(gGrp, LCK_ATTR_NULL);
   if (!gLock) return false;
+  if (!gNotifications) gNotifications=thread_call_allocate(deliver_notifications,nullptr);
+  if (!gNotifications) return false;
   nw_wifi_set_events(&gEvents);
   return true;
+}
+
+// Failure completes outstanding asynchronous requests; wifid must not wait
+// indefinitely for scan/join events from a stopped firmware dispatcher.
+extern "C" void pong_wifi_net_failed(void) {
+  if (!gLock) return;
+  lck_mtx_lock(gLock);
+  __atomic_store_n(&gFailed,true,__ATOMIC_RELEASE); gPower = false;
+  bool scanning = gScanning != 0;
+  gScanning = 0; gScanCursor = 0; gAssocResult = kAssocFailed;
+  if (gCachedScan) thread_call_cancel(gCachedScan);
+  lck_mtx_unlock(gLock);
+  if (!gIf) return;
+  post_link(false);
+  if (scanning) post_event(kEvScanDone, nullptr, 0);
+  post_event(kEvAssocDone, nullptr, 0);
+  post_event(kEvPowerChanged, nullptr, 0);
 }
 
 // Called once the module has a station interface and a hardware address.

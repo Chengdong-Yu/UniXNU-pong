@@ -12,6 +12,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <math.h>
+#include <limits.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
@@ -25,6 +26,8 @@
 
 static bool icons_installed,radios_installed;
 static IMP transcript_original;
+static IMP about_value_original;
+static CFStringRef device_serial;
 static IMP localized_original;
 static bool phone_identity;
 static IMP asset_named_original;
@@ -79,6 +82,26 @@ static id localized_phone_label(id self,SEL selector,id key,id value,id table)
 {return ios_label(((id(*)(id,SEL,id,id,id))localized_original)(self,selector,key,value,table));}
 static id phone_model(id self,SEL selector)
 {(void)self;(void)selector;return (id)CFSTR("iPhone 16 Pro");}
+static id phone_part(id self,SEL selector)
+{(void)self;(void)selector;return (id)CFSTR("MYMC3LL/A");}
+static id phone_regulatory(id self,SEL selector)
+{(void)self;(void)selector;return (id)CFSTR("A3083");}
+static void about_value(id self,SEL selector,id value,id key)
+{
+    if(key && CFGetTypeID((CFTypeRef)key)==CFStringGetTypeID() &&
+       CFEqual((CFTypeRef)key,CFSTR("SerialNumber")) && device_serial)value=(id)device_serial;
+    ((void(*)(id,SEL,id,id))about_value_original)(self,selector,value,key);
+}
+static void load_device_serial(void)
+{
+    int fd=open("/pong/device-serial",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return;
+    struct stat st;char value[32];ssize_t n=0;
+    if(!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_uid==0 && !(st.st_mode&022) && st.st_size==11)
+        n=read(fd,value,sizeof(value));
+    close(fd);if(n!=11 || value[10]!='\n')return;
+    for(unsigned i=0;i<10;i++)if(!((value[i]>='A'&&value[i]<='Z')||(value[i]>='0'&&value[i]<='9')))return;
+    value[10]=0;device_serial=CFStringCreateWithCString(NULL,value,kCFStringEncodingASCII);
+}
 static id phone_system(id self,SEL selector)
 {(void)self;(void)selector;return (id)CFSTR("iOS");}
 
@@ -156,6 +179,13 @@ static void methods(void)
         // About's marketing row and UIKit branding use the selected identity;
         // version/build, user-assigned name and regulatory values stay native.
         hook("PSGAboutDataSource","_modelNameString","@",0,"",(IMP)phone_model);
+        hook("PSGAboutDataSource","_modelRegionString","@",0,"",(IMP)phone_part);
+        hook("PSGAboutDataSource","_regulatoryModelNumberString","@",0,"",(IMP)phone_regulatory);
+        if(!about_value_original && device_serial) {
+            Class c=objc_lookUpClass("PSGAboutDataSource");
+            Method m=c?class_getInstanceMethod(c,sel_registerName("_setValue:forSpecifierWithKey:")):NULL;
+            if(abi(m,"v",2,"@@"))about_value_original=method_setImplementation(m,(IMP)about_value);
+        }
         hook("UIDevice","systemName","@",0,"",(IMP)phone_system);
         if(!localized_original) {
             Class cls=objc_lookUpClass("NSBundle");
@@ -332,6 +362,210 @@ void pong_settings18_start(void)
     void (*set)(void(*)(id))=dlsym(RTLD_DEFAULT,"NSSetUncaughtExceptionHandler");
     void (*(*get)(void))(id)=dlsym(RTLD_DEFAULT,"NSGetUncaughtExceptionHandler");
     if(set && get){previous_exception=get();set(exception);}
+    load_device_serial();
     _dyld_register_func_for_add_image(added);
     dispatch_async_f(dispatch_get_main_queue(),NULL,load_icons);
+}
+
+/* SpringBoard owns the native category-volume context. Do not create a
+ * second HAL in a stand-alone helper or replace its HID/volume UI. The port
+ * had a very low physical level; the user requested higher defaults.
+ * Raise those category defaults once, through 22H374's own volume service.
+ * The retainFullMute setter preserves the user's native mute policy, and
+ * successful categories are never overridden again at subsequent boots.
+ */
+static const CFStringRef volume_domain=CFSTR("org.unixnu.pong.audio");
+static unsigned volume_attempts;
+static dispatch_queue_t volume_queue;
+static const char *volume_type(const char *type)
+{
+    if(type)while(*type && strchr("rnNoORV",*type))type++;
+    return type;
+}
+static bool volume_method(Method m,const char *result,unsigned count,const char *arguments)
+{
+    if(!m || method_getNumberOfArguments(m)!=count+2)return false;
+    char *type=method_copyReturnType(m);const char *plain=volume_type(type);
+    bool ok=plain && *plain && strchr(result,*plain);free(type);
+    for(unsigned i=0;ok && i<count;i++) {
+        type=method_copyArgumentType(m,i+2);plain=volume_type(type);
+        ok=plain && plain[0] && (arguments[i]=='B'?strchr("Bc",plain[0])!=NULL:plain[0]==arguments[i]);
+        if(ok && arguments[i]=='^')ok=plain[1]=='f';
+        free(type);
+    }
+    return ok;
+}
+static void volume_record(const char *category,float before,float after,bool changed,bool accepted)
+{
+    char line[256];int n=snprintf(line,sizeof(line),
+        "Pong native volume: %s before=%.4f after=%.4f requested=%u accepted=%u attempt=%u\n",
+        category,(double)before,(double)after,changed,accepted,volume_attempts);
+    if(n<=0 || n>=(int)sizeof(line))return;
+    (void)write(STDERR_FILENO,line,(size_t)n);
+    int fd=open("/private/var/mobile/Library/Logs/Pong-audio-volume18.log",
+        O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(fd>=0) {
+        struct stat st;if(!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_size<1024*1024)
+            (void)write(fd,line,(size_t)n);
+        close(fd);
+    }
+}
+static void volume_restore(void *unused)
+{
+    (void)unused;volume_attempts++;
+    bool finished=true;
+    void *(*pool_push)(void)=dlsym(RTLD_DEFAULT,"objc_autoreleasePoolPush");
+    void (*pool_pop)(void *)=dlsym(RTLD_DEFAULT,"objc_autoreleasePoolPop");
+    void *pool=pool_push && pool_pop?pool_push():NULL;
+    if(!objc_lookUpClass("AVSystemController"))
+        (void)dlopen("/System/Library/PrivateFrameworks/MediaExperience.framework/MediaExperience",RTLD_LAZY|RTLD_LOCAL);
+    Class cls=objc_lookUpClass("AVSystemController");
+    SEL shared=sel_registerName("sharedAVSystemController");
+    SEL getter=sel_registerName("getVolume:forCategory:");
+    SEL setter=sel_registerName("setVolumeTo:forCategory:retainFullMute:");
+    if(!volume_method(class_getClassMethod(cls,shared),"@",0,"") ||
+       !volume_method(class_getInstanceMethod(cls,getter),"Bc",2,"^@") ||
+       !volume_method(class_getInstanceMethod(cls,setter),"Bc",3,"f@B")) {
+        if(volume_attempts==1 || volume_attempts==10)
+            fprintf(stderr,"Pong native volume: waiting for native AVSystemController ABI (attempt=%u)\n",volume_attempts);
+        finished=false;goto done;
+    }
+    id controller=((id(*)(id,SEL))objc_msgSend)((id)cls,shared);
+    if(!controller){finished=false;goto done;}
+    CFStringRef categories[]={CFSTR("Audio/Video"),CFSTR("Ringtone")};
+    CFStringRef markers[]={CFSTR("NativeMediaVolume146"),CFSTR("NativeRingerVolume146")};
+    const char *names[]={"Audio/Video","Ringtone"};
+    const float defaults[]={0.75f,0.5f};
+    for(unsigned i=0;i<2;i++) {
+        CFTypeRef saved=CFPreferencesCopyValue(markers[i],volume_domain,
+            kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+        bool migrated=saved && CFEqual(saved,kCFBooleanTrue);if(saved)CFRelease(saved);
+        if(migrated)continue;
+        float before=-1,after=-1;
+        bool got=((BOOL(*)(id,SEL,float *,id))objc_msgSend)(controller,getter,&before,(id)categories[i]);
+        if(!got || !isfinite(before) || before<0 || before>1) {finished=false;continue;}
+        bool change=before<defaults[i];
+        bool accepted=!change || ((BOOL(*)(id,SEL,float,id,BOOL))objc_msgSend)(
+            controller,setter,defaults[i],(id)categories[i],YES);
+        got=((BOOL(*)(id,SEL,float *,id))objc_msgSend)(controller,getter,&after,(id)categories[i]);
+        accepted=accepted && got && isfinite(after) && (change?fabsf(after-defaults[i])<=0.04f:after==before);
+        volume_record(names[i],before,after,change,accepted);
+        if(accepted) {
+            CFPreferencesSetValue(markers[i],kCFBooleanTrue,volume_domain,
+                kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+            (void)CFPreferencesSynchronize(volume_domain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+        } else finished=false;
+    }
+done:
+    if(pool)pool_pop(pool);
+    if(!finished && volume_attempts<10)
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),volume_queue,NULL,volume_restore);
+}
+static unsigned ringer_attempts,tone_attempts;
+static bool audio_marker(CFStringRef key)
+{
+    CFTypeRef value=CFPreferencesCopyValue(key,volume_domain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    bool done=value && CFEqual(value,kCFBooleanTrue);if(value)CFRelease(value);return done;
+}
+static void audio_mark(CFStringRef key)
+{
+    CFPreferencesSetValue(key,kCFBooleanTrue,volume_domain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    (void)CFPreferencesSynchronize(volume_domain,kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+}
+static void ringer_restore(void *unused)
+{
+    (void)unused;
+    const bool migrated=audio_marker(CFSTR("NativeRingerEnabled147"));
+    ringer_attempts++;
+    Class application=objc_lookUpClass("UIApplication");
+    SEL shared=sel_registerName("sharedApplication"),get=sel_registerName("ringerControl");
+    SEL set=sel_registerName("setRingerMuted:withFeedback:reason:clientType:");
+    if(!volume_method(class_getClassMethod(application,shared),"@",0,""))goto retry;
+    id app=((id(*)(id,SEL))objc_msgSend)((id)application,shared);
+    if(!app || !volume_method(class_getInstanceMethod(object_getClass(app),get),"@",0,""))goto retry;
+    id ringer=((id(*)(id,SEL))objc_msgSend)(app,get);Class cls=object_getClass(ringer);
+    // In 22H374 the short setter/getter are objc_direct: no methods to
+    // message at runtime. Use the real exported four-argument selector
+    // (v36@0:8B16B20@24I32) and inspect its native cached boolean by the
+    // runtime's own ivar name/type/offset, never a transplanted OS offset.
+    Ivar state=cls?class_getInstanceVariable(cls,"_ringerMuted"):NULL;
+    const char *type=state?ivar_getTypeEncoding(state):NULL;
+    ptrdiff_t offset=state?ivar_getOffset(state):-1;
+    if(!ringer || !volume_method(class_getInstanceMethod(cls,set),"v",4,"BB@I") ||
+       !type || !strchr("Bc",type[0]) || offset<0 || (size_t)offset>=class_getInstanceSize(cls))goto retry;
+    bool before=*(const unsigned char *)((const char *)ringer+offset)!=0;
+    // The preference migration is persistent; the native audio service's
+    // switch state is not. Reconcile once per SpringBoard process, including
+    // after a render-server restart, while preserving a user's later mute.
+    const BOOL desired=migrated?before:NO;
+    // Reconcile with the audio service even when the local startup cache is
+    // already false; that cache did not initialize the missing board switch.
+    ((void(*)(id,SEL,BOOL,BOOL,id,unsigned))objc_msgSend)(ringer,set,desired,NO,
+        (id)CFSTR("Pong native ringtone setup"),1u);
+    bool after=*(const unsigned char *)((const char *)ringer+offset)!=0;
+    volume_record("native ringer cached muted",before,after,true,after==(bool)desired);
+    if(after==(bool)desired) {
+        CFPreferencesSetValue(CFSTR("buttons-can-change-ringer-volume"),kCFBooleanTrue,
+            CFSTR("com.apple.preferences.sounds"),kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+        (void)CFPreferencesSynchronize(CFSTR("com.apple.preferences.sounds"),kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+        audio_mark(CFSTR("NativeRingerEnabled147"));return;
+    }
+retry:
+    if(ringer_attempts==10)fprintf(stderr,"Pong native ringtone: ringer controller restore did not complete\n");
+    if(ringer_attempts<10)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),
+        dispatch_get_main_queue(),NULL,ringer_restore);
+}
+static bool tone_file(id manager,SEL path,id identifier)
+{
+    if(!identifier)return false;
+    id file=((id(*)(id,SEL,id))objc_msgSend)(manager,path,identifier);
+    if(!file || CFGetTypeID((CFTypeRef)file)!=CFStringGetTypeID())return false;
+    char name[PATH_MAX];struct stat st;
+    return CFStringGetFileSystemRepresentation((CFStringRef)file,name,sizeof(name)) &&
+        !stat(name,&st) && S_ISREG(st.st_mode) && st.st_size>0 && !access(name,R_OK);
+}
+static void tone_restore(void *unused)
+{
+    (void)unused;if(audio_marker(CFSTR("NativeCallTone147")))return;
+    tone_attempts++;
+    if(!objc_lookUpClass("TLToneManager"))
+        (void)dlopen("/System/Library/PrivateFrameworks/ToneLibrary.framework/ToneLibrary",RTLD_LAZY|RTLD_LOCAL);
+    Class cls=objc_lookUpClass("TLToneManager");
+    SEL shared=sel_registerName("sharedToneManager"),key=sel_registerName("_systemWideTonePreferenceKeyForAlertType:");
+    SEL get=sel_registerName("currentToneIdentifierForAlertType:"),set=sel_registerName("setCurrentToneIdentifier:forAlertType:");
+    SEL defaults=sel_registerName("defaultRingtoneIdentifier"),path=sel_registerName("filePathForToneIdentifier:");
+    if(!volume_method(class_getClassMethod(cls,shared),"@",0,"") ||
+       !volume_method(class_getClassMethod(cls,key),"@",1,"q") ||
+       !volume_method(class_getInstanceMethod(cls,get),"@",1,"q") ||
+       !volume_method(class_getInstanceMethod(cls,set),"v",2,"@q") ||
+       !volume_method(class_getInstanceMethod(cls,defaults),"@",0,"") ||
+       !volume_method(class_getInstanceMethod(cls,path),"@",1,"@"))goto retry;
+    // Validate the incoming-call enum against this OS's preference key,
+    // instead of importing an old OS's key or ringtone identifier.
+    id preference=((id(*)(id,SEL,long long))objc_msgSend)((id)cls,key,1);
+    if(!preference || CFGetTypeID((CFTypeRef)preference)!=CFStringGetTypeID() ||
+       CFStringFind((CFStringRef)preference,CFSTR("ring"),kCFCompareCaseInsensitive).location==kCFNotFound)goto retry;
+    id manager=((id(*)(id,SEL))objc_msgSend)((id)cls,shared);if(!manager)goto retry;
+    id current=((id(*)(id,SEL,long long))objc_msgSend)(manager,get,1);
+    if(!tone_file(manager,path,current)) {
+        id native=((id(*)(id,SEL))objc_msgSend)(manager,defaults);
+        if(!tone_file(manager,path,native))goto retry;
+        ((void(*)(id,SEL,id,long long))objc_msgSend)(manager,set,native,1);
+        current=((id(*)(id,SEL,long long))objc_msgSend)(manager,get,1);
+    }
+    if(tone_file(manager,path,current)) {
+        fprintf(stderr,"Pong native ringtone: incoming-call selection resolves to an installed sound\n");
+        audio_mark(CFSTR("NativeCallTone147"));return;
+    }
+retry:
+    if(tone_attempts==10)fprintf(stderr,"Pong native ringtone: native catalog/preference restore did not complete\n");
+    if(tone_attempts<10)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),volume_queue,NULL,tone_restore);
+}
+void pong_audio_volume18_start(void)
+{
+    if(strcmp(getprogname(),"SpringBoard") || volume_queue)return;
+    volume_queue=dispatch_queue_create("org.unixnu.pong.native-volume",DISPATCH_QUEUE_SERIAL);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),volume_queue,NULL,volume_restore);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,20*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,ringer_restore);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,20*NSEC_PER_SEC),volume_queue,NULL,tone_restore);
 }

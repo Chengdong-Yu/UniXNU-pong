@@ -44,26 +44,32 @@ class NativeAdrenoVm final {
         NativeAdrenoMemory *memory=nullptr;
         uint64_t handle=0,iova=0;
         size_t spans=0,mapped_spans=0;
-        unsigned permissions=0,writeback=0,shareability=0,jobs=0;
+        unsigned permissions=0,writeback=0,shareability=0,jobs=0,upper=0;
     };
     Mapping *mappings_=nullptr;
     NativeAdrenoHandleIndex<NativeAdrenoVmMaxObjects> index_;   /* live handle -> its mappings_ slot */
     size_t free_hint_=0;   /* no free mappings_ slot below it */
     size_t high_=0;   /* no live mappings_ slot at or above it: the walks over every mapping stop there */
-    size_t class_spans_[16]{};   /* ranges_ per alias class, so a map counts the other classes without a walk */
+    size_t class_spans_[16]{};   /* mapped spans per cache/privilege alias class */
     size_t import_spans_[16]{};   /* the imported mappings' ranges per alias class */
     NativeAdrenoVmRegion regions_[2]{};
     ArmSmmu4KLiveVisibility visibility_[2]{};
     ArmSmmu4KIo io_{};
     ArmSmmu4KContextConfig *context_=nullptr;
     ArmSmmu4KStreamState *streams_=nullptr;
+    /* Upstream36c4e44: index mappings by IOVA, not every physical page.
+     * Keep stable ABI1 BO records and Pong's fixed object/table budgets.
+     * ranges_ is scratch for just the current page-table transaction. */
+    uint32_t *order_=nullptr;
+    size_t order_count_[2]{};
     ArmSmmu4KRange *ranges_=nullptr;
     size_t capacity_=0,lower_count_=0,upper_count_=0,objects_=0;
     unsigned budget_=0;
     uint64_t next_handle_=1;
     bool attached_=false,poisoned_=false,distrust_write_combined_=false;
     NativeAdrenoVmResult result_{};
-    ArmSmmu4KLiveRegion region(unsigned) const;
+    ArmSmmu4KLiveRegion region(unsigned,const ArmSmmu4KRange *ranges=nullptr,size_t count=0) const;
+    void freeMetadata();
     ArmSmmu4KStatus observe() const;
     /* The route check alone: the table walk is the update's own (it verifies every region before the first store and after the last), so
      * map/unmap pay a full extra audit only every 64th operation (int-139: 4 full walks of the 2 GiB aperture made every map 70 ms). */
@@ -73,9 +79,11 @@ class NativeAdrenoVm final {
     IOReturn fail(ArmSmmu4KStatus);
     Mapping *find(uint64_t);
     const Mapping *find(uint64_t) const;
-    size_t rangeAt(uint64_t iova) const;
-    void insert(size_t,unsigned);
-    void erase(size_t,size_t,unsigned);
+    size_t orderBegin(unsigned upper) const {return upper?order_count_[0]:0;}
+    size_t orderEnd(unsigned upper) const {return upper?order_count_[0]+order_count_[1]:order_count_[0];}
+    size_t orderAt(unsigned upper,uint64_t iova) const;
+    void insert(Mapping *);
+    bool erase(Mapping *);
     IOReturn preflight(const NativeAdrenoMemory *,unsigned,uint64_t,unsigned,unsigned,unsigned,bool exclusive) const;
     bool exclusivePages(const NativeAdrenoMemory *,unsigned cls) const;
 public:

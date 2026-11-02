@@ -5,6 +5,7 @@
 #include "NativeAdrenoSubmit.h"
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoStatus.h"
+#include "NativeAdrenoHandleIndex.h"
 
 /* Kernel-side body of the Adreno user client, deliberately free of IOKit so it
  * can be exercised on a host. The future IOService/IOUserClient wrapper only
@@ -13,7 +14,7 @@
  * pointer values. A mapping is retirable only through freeBo, which unmaps
  * first and then releases the backing object; both steps must succeed.
  * Up to NativeAdrenoClientMaxObjects live objects and the execbuf's own eight-job limit apply. */
-enum : size_t {NativeAdrenoClientMaxObjects=4096};
+enum : size_t {NativeAdrenoClientMaxObjects=NativeAdrenoVmMaxObjects};
 /* Pong: one isolated VA/queue window for each selected Metal process. */
 enum : unsigned {NativeAdrenoMaxClients=16};
 class NativeAdrenoUserClient final {
@@ -23,18 +24,29 @@ class NativeAdrenoUserClient final {
         uint64_t handle=0;
         uint64_t mapped=0;
         uint64_t iova=0;
+        uint64_t host_address=0;
         bool used=false;
         bool mapped_state=false;
         bool unreleasable=false;
         bool imported=false;
+        uint32_t imported_pid=0;
         uint32_t metadata_bytes=0;
         uint32_t token=0;
         uint32_t mapping_leases=0;
+        uint32_t slot=0;
         char metadata[NativeAdrenoAbiMetadataBytes]{};
     };
-    /* Allocated at open(), all-zero is the free state. */
-    Entry *entries_=nullptr;
+    // Stable BO addresses/tokens without a multi-MiB contiguous allocation
+    // for every Metal process. Allocate a chunk only when it is first used.
+    enum : size_t {EntryChunk=128,EntryChunks=NativeAdrenoClientMaxObjects/EntryChunk};
+    Entry **entries_=nullptr;
+    Entry *entryAt(size_t index) const {
+        return entries_ && index<entry_count_ && entries_[index/EntryChunk] ?
+            &entries_[index/EntryChunk][index%EntryChunk] : nullptr;
+    }
     size_t entry_count_=0;
+    NativeAdrenoHandleIndex<NativeAdrenoClientMaxObjects> index_;
+    size_t free_hint_=0,live_=0;
     Queue queues_[NativeAdrenoAbiMaxQueues]{};
     NativeAdrenoVm *vm_=nullptr;
     NativeAdrenoSubmit *submit_=nullptr;
@@ -53,11 +65,16 @@ class NativeAdrenoUserClient final {
     uint64_t window_start_=0,window_bytes_=0,window_peak_=0;
     uint64_t next_handle_=1;
     bool open_=false;
+    uint32_t priority_fg_=1,priority_bg_=3;
+    uint32_t priority_updates_=0;
     NativeAdrenoSubmitBuffer submit_buffers_[NativeAdrenoAbiMaxBatchBuffers]{};
+    NativeAdrenoSystemPages *offered_pages_=nullptr;
+    NativeAdrenoSystemPages *freed_pages_=nullptr;
     IOReturn submitRecords(const void *,uint32_t,NativeAdrenoAbiSubmitReply *,const NativeAdrenoRingClock *);
     Entry *find(uint64_t);
     Entry *free();
-    static void clear(Entry &);
+    void clear(Entry &);
+    void publish(Entry &);
 public:
     NativeAdrenoUserClient()=default;
     ~NativeAdrenoUserClient()=default;
@@ -84,7 +101,13 @@ public:
     /* CPU mappings of the BO of this token that BoCpuMap handed out and BoCpuUnmap has not given back; 0 for no such BO. */
     uint32_t mappingLeases(uint32_t token) const;
     IOReturn query(NativeAdrenoAbiParams *);
+    IOReturn setPriority(const NativeAdrenoAbiPriority *);
+    IOReturn syncHostRange(const NativeAdrenoAbiSyncHostRange *);
+    IOReturn syncHostBatch(const NativeAdrenoAbiSyncHostBatch *,NativeAdrenoAbiSyncHostBatchReply *);
+    int32_t submitPriority() const;
     IOReturn allocBo(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
+    void offerSystemPages(NativeAdrenoSystemPages *pages) {offered_pages_=pages;}
+    void collectFreedPages(NativeAdrenoSystemPages *pages) {freed_pages_=pages;}
     IOReturn allocBoInner(const NativeAdrenoAbiBoAlloc *,NativeAdrenoAbiBoAllocReply *);
     IOReturn mapBo(const NativeAdrenoAbiBoMap *,NativeAdrenoAbiBoMapReply *);
     /* BoImport: pins the caller's pages. Only the IOKit wrapper can call it, with the calling task; dispatch() refuses the method

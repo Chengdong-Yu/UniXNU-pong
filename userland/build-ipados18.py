@@ -866,6 +866,7 @@ def compile_ui(out, developer):
            str(PROJECT / 'userland/settings_compat18.c'),
            str(PROJECT / 'userland/boot_snapshot18.c'),
            str(PROJECT / 'userland/touch.c'),
+           str(PROJECT / 'userland/sileo_spawn.c'),
            '-o', str(destination)]
     run(cmd, env=env)
     run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', destination])
@@ -928,12 +929,120 @@ def compile_sleep(out, developer):
     return destination
 
 
+def compile_sileo_registration(out, developer):
+    env = dict(os.environ, DEVELOPER_DIR=str(developer))
+    target = out / 'sileo-register'
+    run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios18.0',
+         '-Os', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-Wl,-no_fixup_chains',
+         '-framework', 'Foundation', PROJECT / 'userland/sileo-register.m', '-o', target], env=env)
+    ent = out / 'sileo-register-entitlements.plist'
+    ent.write_bytes(plistlib.dumps({
+        'platform-application': True,
+        'com.apple.private.security.no-container': True,
+        'com.apple.private.MobileContainerManager.allowed': True,
+        'com.apple.private.coreservices.lsaw': True,
+        'com.apple.private.coreservices.canmaplsdatabase': True,
+        'com.apple.private.coreservices.can-register-install-results': True,
+        'com.apple.private.mobileinstall.allowedSPI': ['InstallForLaunchServices'],
+    }, fmt=plistlib.FMT_XML))
+    run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', '--entitlements', ent, target])
+    root=out/'sileo-root'
+    run(['xcrun','--sdk','iphoneos','clang','-target','arm64-apple-ios18.0','-Os',
+         '-Wall','-Wextra','-Werror','-Wl,-no_fixup_chains',PROJECT/'userland/sileo-root.c','-o',root],env=env)
+    root_ent=out/'sileo-root-entitlements.plist'
+    root_ent.write_bytes(plistlib.dumps({'platform-application':True,'com.apple.private.security.no-container':True},fmt=plistlib.FMT_XML))
+    run(['codesign','--force','--sign','-','--pagesize','4096','--entitlements',root_ent,root])
+    shutil.copyfile(PROJECT / 'userland/sileo-firstboot.sh', out / 'sileo-firstboot.sh')
+    shutil.copyfile(PROJECT / 'userland/sileo-rootful-firstboot.sh', out / 'sileo-rootful-firstboot.sh')
+    phone=out/'phone-register'
+    run(['xcrun','--sdk','iphoneos','clang','-target','arm64-apple-ios18.0',
+         '-Os','-fobjc-arc','-Wall','-Wextra','-Werror','-Wl,-no_fixup_chains',
+         '-framework','Foundation',PROJECT/'userland/phone-register.m','-o',phone],env=env)
+    run(['codesign','--force','--sign','-','--pagesize','4096','--entitlements',ent,phone])
+    return target
+
+
+def compile_audio_route(out, developer):
+    env=dict(os.environ,DEVELOPER_DIR=str(developer))
+    target=out/'audio-route'
+    run(['xcrun','--sdk','iphoneos','clang','-target','arm64-apple-ios18.0','-Os',
+         '-Wall','-Wextra','-Werror','-Wl,-no_fixup_chains',
+         '-I'+str(out/'audio-sdk-headers'),'-framework','CoreFoundation',
+         PROJECT/'userland/audio-route.c','-o',target],env=env)
+    ent=out/'audio-route-entitlements.plist'
+    ent.write_bytes(plistlib.dumps({'platform-application':True,'com.apple.private.security.no-container':True},fmt=plistlib.FMT_XML))
+    run(['codesign','--force','--sign','-','--pagesize','4096','--entitlements',ent,target])
+    return target
+
+
+def stage_audio_route_job(root):
+    label='dev.unixnu.pong.audio-route'
+    path='/System/Library/LaunchDaemons/'+label+'.plist'
+    job=dict(Label=label,ProgramArguments=['/pong/audio-route'],UserName='root',
+        RunAtLoad=True,LaunchOnlyOnce=True,ProcessType='Background',
+        StandardOutPath='/private/var/logs/pong-audio-route.log',
+        StandardErrorPath='/private/var/logs/pong-audio-route.log')
+    put_plist(root/path.lstrip('/'),job)
+    cache_path=root/'System/Library/xpc/launchd.plist'
+    cache=plistlib.loads(cache_path.read_bytes());cache['LaunchDaemons'][path]=job
+    put_plist(cache_path,cache)
+    for target in (root/path.lstrip('/'),cache_path):os.chown(target,0,0);os.chmod(target,0o644)
+
+
+def stage_sileo_job(root):
+    # Run only after real launchd has established the service namespace.
+    # A pre-launchd fork keeps its old bootstrap port even after sleep(30).
+    label = 'dev.unixnu.pong.sileo-firstboot'
+    path = '/System/Library/LaunchDaemons/' + label + '.plist'
+    rootful=(root/'.pong-rootful-staged').is_file()
+    arguments=['/usr/bin/dash','/pong/sileo-rootful-firstboot.sh'] if rootful else ['/var/jb/bin/sh','/pong/sileo-firstboot.sh']
+    log='/private/var/logs/pong-sileo-rootful.log' if rootful else '/private/var/logs/pong-sileo.log'
+    job = dict(Label=label, ProgramArguments=arguments,
+        UserName='root', RunAtLoad=True, LaunchOnlyOnce=True,
+        ProcessType='Background', StandardOutPath=log,
+        StandardErrorPath=log,
+        EnvironmentVariables=dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin' if rootful else '/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin'))
+    target=root/path.lstrip('/')
+    put_plist(target,job);os.chown(target,0,0);os.chmod(target,0o644)
+    cache_path=root/'System/Library/xpc/launchd.plist'
+    cache=plistlib.loads(cache_path.read_bytes())
+    cache['LaunchDaemons'][path]=job
+    put_plist(cache_path,cache);os.chown(cache_path,0,0);os.chmod(cache_path,0o644)
+
+
+def stage_sileo_application(root, stage, runtime):
+    """Install the real, signed app in the normal system application catalog.
+
+    Procursus, APT and dpkg stay on writable Data; Sileo selects /var/jb
+    from its existing bootstrap marker, independently of its bundle path.
+    """
+    if (root/'.pong-rootful-staged').is_file():
+        raise RuntimeError('Rootful OS: use rootful18.install, not a rootless Sileo stage')
+    source=stage/'data-overlay/jb/Applications/Sileo.app'
+    if not (source/'Sileo').is_file():raise RuntimeError('complete local Sileo stage required')
+    target=root/'Applications/Sileo.app'
+    if target.is_symlink():raise RuntimeError('unexpected system Sileo symlink')
+    if target.exists():shutil.rmtree(target)
+    shutil.copytree(source,target,symlinks=True)
+    shutil.copyfile(runtime/'sileo-root',target/'giveMeRoot')
+    for item in (target,*target.rglob('*')):
+        if item.is_symlink():raise RuntimeError('unexpected symlink in Sileo app')
+        os.chown(item,0,0)
+    os.chmod(target/'giveMeRoot',0o4755)
+    # Keep the genuine app's entitlements, icons, executable and resources.
+    ent=stage/'app-entitlements.plist'
+    if not ent.is_file():raise RuntimeError('Sileo stage entitlements required')
+    run(['codesign','--force','--sign','-','--pagesize','4096','--entitlements',ent,target])
+
+
 def helper(a):
     out = a.out.resolve(); out.mkdir(parents=True, exist_ok=True)
     signature = compile_init(out, a.developer, out / 'init')
     ui_library = compile_ui(out, a.developer)
     sleep_service = compile_sleep(out, a.developer)
     audio_plugin = compile_audio(out, a.developer)
+    compile_sileo_registration(out, a.developer)
+    compile_audio_route(out, a.developer)
     preference_seed = out / 'var-seed/mobile/Library/Preferences'
     preference_seed.mkdir(parents=True, exist_ok=True)
     for name in ('com.apple.purplebuddy.plist', 'com.apple.purplebuddy.notbackedup.plist',
@@ -1444,6 +1553,16 @@ def refresh_runtime(a):
             if target.is_symlink(): raise RuntimeError('unexpected runtime symlink: ' + str(target))
             shutil.copyfile(source, target)
             os.chown(target, 0, 0); os.chmod(target, 0o755)
+        for name in ('sileo-register', 'sileo-firstboot.sh', 'sileo-rootful-firstboot.sh'):
+            target = root / 'pong' / name
+            if target.is_symlink(): raise RuntimeError('unexpected Sileo runtime symlink')
+            shutil.copyfile(runtime / name, target)
+            os.chown(target, 0, 0); os.chmod(target, 0o755)
+        stage_sileo_job(root)
+        if a.sileo_stage:stage_sileo_application(root,a.sileo_stage.resolve(),runtime)
+        stage_audio_route_job(root)
+        target=root/'pong/audio-route'
+        shutil.copyfile(runtime/'audio-route',target);os.chown(target,0,0);os.chmod(target,0o755)
         stage_audio_policy(root)
         # The modern AudioServerPlugIn must not enter the legacy .plugin
         # loader. Remove that old bundle when updating either runtime mode.
@@ -1620,6 +1739,7 @@ def main():
     s.add_argument('--system-cryptex', type=Path, required=True)
     s.add_argument('--app-cryptex', type=Path)
     s = sub.add_parser('refresh_runtime'); s.add_argument('--out', type=Path, required=True)
+    s.add_argument('--sileo-stage', type=Path, help='Install the real staged Sileo.app in /Applications')
     s.add_argument('--enable-audio-hal', action='store_true',
                    help='Expose experimental PCM HAL; default keeps it outside the boot HAL view')
     s.add_argument('--power-firmware', type=Path, help='Local REC-extracted Pong signed firmware directory')

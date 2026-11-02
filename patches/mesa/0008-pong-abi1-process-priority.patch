@@ -1,0 +1,53 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -168,6 +168,33 @@
+    return false;
+ }
+ 
++// Pong ABI1 priority extension is additive method18; method17 stays the
++//128-IB submit. Follow upstream's strongest process request policy.
++static uint32_t darwin_fg=1,darwin_bg=3;
++static bool darwin_asked_fg=false,darwin_asked_bg=false;
++static unsigned priority_rank(uint32_t p) {static const unsigned ranks[]={1,3,4,5,2,0};return p<6?ranks[p]:99;}
++extern "C" __attribute__((visibility("default"))) bool
++tu_darwin_set_priority(uint32_t foreground,uint32_t background);
++extern "C" __attribute__((visibility("default"))) bool
++tu_darwin_set_priority(uint32_t foreground,uint32_t background) {
++   if ((foreground!=UINT32_MAX && (foreground>5 || foreground==3)) ||
++       (background!=UINT32_MAX && background>5))return false;
++   pthread_mutex_lock(&dw.lock);
++   if(foreground!=UINT32_MAX) {
++      if(!darwin_asked_fg || priority_rank(foreground)<priority_rank(darwin_fg))darwin_fg=foreground;
++      darwin_asked_fg=true;
++   }
++   if(background!=UINT32_MAX) {
++      if(!darwin_asked_bg || priority_rank(background)<priority_rank(darwin_bg))darwin_bg=background;
++      darwin_asked_bg=true;
++   }
++   const NativeAdrenoAbiPriority request={darwin_fg,darwin_bg};
++   const bool active=dw.open && (dw.params.flags&NativeAdrenoParamsPriority);
++   const kern_return_t result=active?dw_call(NativeAdrenoMethodSetPriority,&request,sizeof(request),NULL,0):kIOReturnUnsupported;
++   pthread_mutex_unlock(&dw.lock);
++   return result==KERN_SUCCESS;
++}
++
+ static VkResult
+ dw_open_connection(struct tu_instance *instance)
+ {
+@@ -213,6 +240,7 @@
+    dw.open = true;
+    dw.inflight_count = 0;
+    dw.last_fence = 0;
++   (void)tu_darwin_set_priority(UINT32_MAX,UINT32_MAX);
+    return VK_SUCCESS;
+ }
+ 
+@@ -1324,7 +1352,7 @@
+       uint32_t oldest = dw.inflight_count ? dw.inflight[0] : 0;
+       pthread_mutex_unlock(&dw.lock);
+       if (!oldest)
+-         sched_yield();
++         usleep(250); // a lower-priority caller waits without CPU-spinning
+       else if (dw_wait_fence_locked_free(dev, oldest, UINT64_MAX) != VK_SUCCESS)
+          return vk_device_set_lost(&dev->vk, "submit: waiting for ring space failed");
+    }

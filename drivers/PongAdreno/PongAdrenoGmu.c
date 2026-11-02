@@ -186,7 +186,7 @@ static PongGpuStatus healthy(PongGpuGmuDevice *d)
     return (fw&0x1ff)==0x100 && !(fw&0xe00) && (hfi&1)?PongGpuSuccess:PongGpuPrerequisite;
 }
 PongGpuStatus PongAdrenoGmuStartPower(PongGpuGmuDevice *d,const PongPowerInputs *in,
-    PongGpuPowerResult *r)
+    unsigned power_level,PongGpuPowerResult *r)
 {
     if(!r)return PongGpuArgument;
     *r=(PongGpuPowerResult){0};r->resources_must_retain=1;
@@ -196,15 +196,15 @@ PongGpuStatus PongAdrenoGmuStartPower(PongGpuGmuDevice *d,const PongPowerInputs 
     if(d->poisoned || d->hfi.poisoned)return PongGpuPoisoned;
     if(d->power_attempted || d->power_started || d->hfi.pending_header)return PongGpuBusy;
     PongPowerTables tables;
-    if(PongAdrenoBuildPowerTables(in,&tables)!=PongPowerSuccess)return PongGpuArgument;
+    if(PongAdrenoBuildPowerTables(in,power_level,&tables)!=PongPowerSuccess)return PongGpuArgument;
     PongGpuStatus status=healthy(d);
     if(status)return status;
     uint64_t begin,last,now;
     if(d->io.now_us(d->io.cookie,&begin))return PongGpuIo;
     last=begin;d->power_attempted=1;
     const unsigned ids[]={4,3,14,30};
-    uint32_t core_start=0,default_vote[]={1,tables.default_gpu_index,tables.default_bus_index};
-    const uint32_t *payloads[]={tables.performance,tables.bandwidth,&core_start,default_vote};
+    uint32_t core_start=0,performance_vote[]={1,tables.gpu_index,tables.bus_index};
+    const uint32_t *payloads[]={tables.performance,tables.bandwidth,&core_start,performance_vote};
     const size_t words[]={58,159,1,3};
     for(unsigned step=0;step<4;step++) {
         r->phase=step+1;r->command=ids[step];r->header=0;

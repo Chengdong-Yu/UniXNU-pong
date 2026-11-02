@@ -18,9 +18,9 @@ kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomScm.h"
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
+#include "PongPlatformResources.h"
 #include "ShengAdsp.h"
 int sheng_fw_open(const char *path, void **handle, uint64_t *size);
-bool pong_rpmh_vote(uint32_t address, uint32_t value);
 extern unsigned long gPhysBase, gPhysSize;
 int sheng_fw_read(void *handle, uint64_t offset, void *to, size_t length);
 void sheng_fw_close(void *handle);
@@ -237,6 +237,7 @@ int vote(uint32_t lcx, uint32_t lmx) {
 struct ScmResult {int64_t x0; uint64_t x1;};
 ScmResult scm(uint32_t command, uint32_t arginfo, uint64_t a, uint64_t b, uint64_t c) {
     ScmResult result = {-1, 0};
+    if(!pong_scm_call_lock())return result;
     for (unsigned busy = 0; busy < 20; ++busy) {
         uint64_t function = qcom_scm_fn(QCOM_SCM_SVC_PIL, command), session = 0;
         unsigned resumes = 0;
@@ -253,6 +254,7 @@ ScmResult scm(uint32_t command, uint32_t arginfo, uint64_t a, uint64_t b, uint64
         if (result.x0 != QCOM_SCM_V2_EBUSY) break;
         IOSleep(30);
     }
+    pong_scm_call_unlock();
     native_adsp_stats[13] = (int32_t)result.x0;
     native_adsp_stats[14] = (int32_t)result.x1;
     return result;
@@ -274,13 +276,23 @@ struct Image {  // plain data, zero at start: the two live in static storage (a 
     uint64_t size;
     QcomMdtImage mdt;
     IOBufferMemoryDescriptor *meta;
+    bool metaPrepared;
 };
 Image gDtbImage, gAdspImage;
+// PAS metadata needs physical continuity. Reserve its small host buffer
+// before GPU/WLAN allocate their large pools; firmware itself is read only
+// after the root volume exists. No secure carveout is used as host scratch.
+constexpr size_t kMetadataReserve=64*1024,kFirmwareChunk=256*1024;
+IOBufferMemoryDescriptor *gMetadataReserve,*gFirmwareBounce;
+void releaseFirmwareScratch() {
+    if(gMetadataReserve){gMetadataReserve->complete();gMetadataReserve->release();gMetadataReserve=nullptr;}
+    if(gFirmwareBounce){gFirmwareBounce->complete();gFirmwareBounce->release();gFirmwareBounce=nullptr;}
+}
 int fileRead(void *context, uint64_t offset, void *to, size_t length) {return sheng_fw_read(context, offset, to, length);}
 void release(Image &image) {
     if (image.file) sheng_fw_close(image.file);
-    if (image.meta) image.meta->release();
-    image.file = nullptr; image.meta = nullptr;
+    if (image.meta) {if(image.metaPrepared)image.meta->complete();image.meta->release();}
+    image.file = nullptr; image.meta = nullptr;image.metaPrepared=false;
 }
 int openImage(Image &image, const char *path) {
     int rc = sheng_fw_open(path, &image.file, &image.size);
@@ -291,13 +303,22 @@ int openImage(Image &image, const char *path) {
 // init_image with the metadata in physically contiguous memory, then the memory setup of a relocatable image.
 int authenticateHeader(Image &image, uint32_t pas, uint64_t base) {
     const uint64_t bytes = qcom_mdt_metadata_size(&image.mdt);
-    image.meta = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous, bytes,
-                                                                 0xfffffffffffff000ull);
-    if (!image.meta || image.meta->prepare() != kIOReturnSuccess) return -12;
+    // PAS consumes a physical extent, not an unconstrained mask whose high
+    // bits become allocator address-bit policy on Darwin24.
+    if(gMetadataReserve && bytes<=gMetadataReserve->getLength()) {
+        image.meta=gMetadataReserve;gMetadataReserve=nullptr;image.metaPrepared=true;
+    } else {
+        image.meta = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+            IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryHostPhysicallyContiguous),bytes,4096);
+        image.metaPrepared=image.meta && image.meta->prepare()==kIOReturnSuccess;
+    }
+    if (!image.metaPrepared) {note("PAS metadata allocation", "");return -12;}
+    IOByteCount span=0;
+    const uint64_t phys=image.meta->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
+    if(!phys || (phys&4095) || span<bytes || phys+bytes>(1ULL<<36)){note("PAS metadata physical extent", "");return -12;}
     uint8_t *va = static_cast<uint8_t *>(image.meta->getBytesNoCopy());
     if (qcom_mdt_metadata(&image.mdt, fileRead, image.file, va, bytes)) return -5;
     cleanToPoc(va, bytes);
-    const uint64_t phys = image.meta->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
     if (!scmOk(scm(QCOM_SCM_PAS_INIT_IMAGE, qcom_scm_args(2, QCOM_SCM_VAL, QCOM_SCM_RW, 0), pas, phys, 0))) return -1;
     if (image.mdt.relocatable &&
         !scmOk(scm(QCOM_SCM_PAS_MEM_SETUP, qcom_scm_args(3, 0, 0, 0), pas, base, qcom_mdt_span(&image.mdt))))
@@ -305,28 +326,48 @@ int authenticateHeader(Image &image, uint32_t pas, uint64_t base) {
     return 0;
 }
 int loadSegments(Image &image, uint64_t base, uint64_t size) {
-    Window region = {};
-    if (!mapWindow(region, base, size, kIOMapWriteCombineCache)) return -12;
-    constexpr size_t kChunk = 256 * 1024;
-    uint8_t *bounce = static_cast<uint8_t *>(IOMallocData(kChunk));
+    constexpr size_t kChunk = kFirmwareChunk;
+    auto backing=gFirmwareBounce;gFirmwareBounce=nullptr;
+    bool prepared=backing!=nullptr;
+    if(!backing) {
+        backing=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+            IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPageable),kChunk,4096);
+        prepared=backing && backing->prepare()==kIOReturnSuccess;
+    }
+    uint8_t *bounce=prepared?static_cast<uint8_t *>(backing->getBytesNoCopy()):nullptr;
     int rc = bounce ? 0 : -12;
+    if(!bounce)note("PAS firmware bounce allocation", "");
     for (unsigned i = 0; !rc && i < image.mdt.count; ++i) {
         const QcomMdtSegment &s = image.mdt.segment[i];
         uint64_t at = 0;
         if (!s.load) continue;
         if (qcom_mdt_place(&image.mdt, i, base, size, &at)) {rc = -7; break;}
-        uint8_t *to = const_cast<uint8_t *>(region.va) + at;
-        for (uint64_t done = 0; !rc && done < s.file_size;) {
-            const size_t n = s.file_size - done < kChunk ? (size_t)(s.file_size - done) : kChunk;
-            if (sheng_fw_read(image.file, s.file_offset + done, bounce, n)) {rc = -5; break;}
-            memcpy(to + done, bounce, n);
+        // Map bounded physical slices, including BSS. A whole 40 MiB
+        // carveout mapping can fail after launchd/GPU have consumed the
+        // kernel's contiguous virtual space; PAS needs no permanent alias.
+        for (uint64_t done = 0; !rc && done < s.memory_size;) {
+            const size_t n = s.memory_size - done < kChunk ? (size_t)(s.memory_size - done) : kChunk;
+            const size_t file = done < s.file_size ?
+                (s.file_size - done < n ? (size_t)(s.file_size - done) : n) : 0;
+            if (file && sheng_fw_read(image.file, s.file_offset + done, bounce, file)) {rc = -5; break;}
+            if (file < n) bzero(bounce + file, n - file);
+            const uint64_t physical = base + at + done;
+            const uint64_t page = physical & ~UINT64_C(4095);
+            const size_t offset = size_t(physical - page);
+            const size_t span = (offset + n + 4095) & ~size_t(4095);
+            Window slice = {};
+            if (physical < base || physical - base > size || n > size - (physical - base) ||
+                !mapWindow(slice, page, span, kIOMapWriteCombineCache)) {
+                note("PAS segment CPU mapping", "");rc = -12;break;
+            }
+            memcpy(const_cast<uint8_t *>(slice.va) + offset, bounce, n);
+            __asm__ volatile("dsb sy" ::: "memory");
+            unmap(slice);
             done += n;
         }
-        if (!rc && s.memory_size > s.file_size) bzero(to + s.file_size, (size_t)(s.memory_size - s.file_size));
     }
     __asm__ volatile("dsb sy" ::: "memory");
-    if (bounce) IOFreeData(bounce, kChunk);
-    unmap(region);
+    if(backing){if(prepared)backing->complete();backing->release();}
     return rc;
 }
 
@@ -446,12 +487,14 @@ bool attachIrqs() {
     return true;
 }
 
-// The firmware comes from the device's own firmware partition ("modem:", read in place) or, with sheng-adsp-fw=DIR, from DIR/adsp.mbn
-// and DIR/adsp_dtb.mbn on a mounted volume. Without the argument the partition is tried first, then the two directories files may be
-// installed in. The UFS driver and the Data volume may not be up when this thread starts: a few tries with growing pauses (about two
-// minutes in all), not a poll. source gets the source that opened ("modem:" or a directory).
-int openFirmware(Image &,Image &adsp,char *path,size_t size,const char *) {
-    strlcpy(path,"/pong/firmware/adsp.mbn",size);
+// Pong uses one signed PAS1 image, staged on its actual OS filesystem.
+// Honour the board's explicit directory override; there is no SM8550 DTB
+// fallback or implicit access to an Android firmware partition.
+int openFirmware(Image &,Image &adsp,char *path,size_t size,const char *directory) {
+    const char *base=directory?directory:"/pong/firmware";
+    if(base[0]!='/')return EINVAL;
+    int length=snprintf(path,size,"%s/adsp.mbn",base);
+    if(length<0 || (size_t)length>=size)return ENAMETOOLONG;
     int rc=ENOENT;
     for(unsigned n=0;n<90;n++) {
         rc=openImage(adsp,path);if(!rc || (rc!=ENOENT&&rc!=ENXIO&&rc!=EIO))break;
@@ -468,7 +511,7 @@ void shutdownDsp(bool dtb, bool adsp) {
 bool start() {
     char dir[80] = "";
     const bool chosen = PE_parse_boot_argn("pong_adsp-fw", dir, sizeof dir) && dir[0];
-    char path[112];
+    char path[112] = "";
     Image &dtb = gDtbImage, &adsp = gAdspImage;
     int rc = openFirmware(dtb, adsp, path, sizeof path, chosen ? dir : nullptr);
     if (rc) {note("fw: ", path); fail(StFirmware, rc); return false;}
@@ -566,7 +609,7 @@ void adspThread(void *, wait_result_t) {
     PE_parse_boot_argn("pong_adsp", &mode, sizeof mode);
     if (!mapWindow(gSmemW, kSmem, kSmemSize) || !mapWindow(gMutex, kMutex, 0x1000) || !mapWindow(gIpcc, kIpcc, 0x1000) ||
         !mapWindow(gAoss, kAoss, 0x1000) || !mapWindow(gRsc, kRscDrv, 0x10000)) {
-        fail(StMapped, -12);
+        fail(StMapped, -12);releaseFirmwareScratch();
         return;
     }
     gSmem = {gSmemW.va, (uint32_t)kSmemSize};
@@ -574,7 +617,9 @@ void adspThread(void *, wait_result_t) {
     stage(StMapped);
     survey();
     stage(StSurveyed);
-    if (mode < 2 || !start() || !startGlink()) return;
+    const bool loaded=mode>=2 && start();
+    releaseFirmwareScratch();
+    if (!loaded || !startGlink()) return;
     // From here on the thread only answers doorbells and client sends; with nothing pending it sleeps without a deadline, except while
     // a send waits for an intent or FIFO room (then it looks again every second).
     for (;;) {
@@ -628,8 +673,14 @@ extern "C" void sheng_adsp_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("pong_adsp", &mode, sizeof mode) || !mode || native_adsp_stats[0]) return;
     gClientLock = IOLockAlloc();
+    gMetadataReserve=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+        IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryHostPhysicallyContiguous),kMetadataReserve,4096);
+    if(gMetadataReserve && gMetadataReserve->prepare()!=kIOReturnSuccess){gMetadataReserve->release();gMetadataReserve=nullptr;}
+    gFirmwareBounce=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+        IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPageable),kFirmwareChunk,4096);
+    if(gFirmwareBounce && gFirmwareBounce->prepare()!=kIOReturnSuccess){gFirmwareBounce->release();gFirmwareBounce=nullptr;}
 
     thread_t thread = nullptr;
-    if (!gClientLock || kernel_thread_start(adspThread, nullptr, &thread) != KERN_SUCCESS) {fail(StMapped, -7); return;}
+    if (!gClientLock || kernel_thread_start(adspThread, nullptr, &thread) != KERN_SUCCESS) {fail(StMapped, -7);releaseFirmwareScratch();return;}
     thread_deallocate(thread);
 }

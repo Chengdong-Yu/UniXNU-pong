@@ -1,0 +1,27 @@
+# Public prerequisites for the native board aggregate, separate from Apple's
+# XNU/libplatform/libdispatch feeds. Firmware/calibration is never fetched here.
+[[source]]
+input = "sheng_source"
+git = "https://github.com/UniXNU/UniXNU-sheng.git"
+commit = "08cde20edc3254ed6f7df8d0f5384fb887786e8f"
+required = ["package/QcomRpmh.c", "package/QcomRpmh.h"]
+
+[[source]]
+input = "wifi_shared"
+git = "https://github.com/UniXNU/Ath12kWifi.git"
+commit = "f6bf561f92cc42761bdd417fce1d53fe1db9477c"
+required = ["include/nw_abi.h", "shim/src/lx_rt.c", "src/nw_sta.c"]
+
+[[source]]
+input = "wifi_linux"
+git = "https://github.com/gregkh/linux.git"
+ref = "v7.0.14"
+commit = "458c6079fc1d41d564c37679c8ace02cd83ee817"
+required = ["drivers/net/wireless/ath/ath11k/pci.c", "drivers/bus/mhi/host/pm.c", "include/net/mac80211.h"]
+
+[[source]]
+input = "storage_source"
+git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
+ref = "IOStorageFamily-323"
+commit = "1b96f8f04b9dff4dc0277ac43625bf694e62c5aa"
+required = ["IOBlockStorageDevice.cpp", "IOBlockStorageDevice.h"]

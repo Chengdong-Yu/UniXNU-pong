@@ -198,6 +198,7 @@ ParseKernel (CONST UINT8 *Data, UINTN Size, KERNEL *Kernel)
 }
 
 STATIC UINTN mAudioDmaOffset = MAX_UINTN;
+#include "UsbOwnership.h"
 #define PONG_RAM_MAX 64
 #define PONG_RAM_WIRE_SIZE (32 + PONG_RAM_MAX * 16)
 STATIC UINTN mRamWireOffset = MAX_UINTN, mRamAllowedOffset = MAX_UINTN, mRamAllowedCount;
@@ -624,6 +625,7 @@ Boot (
   KERNEL                          Kernel;
   EFI_PHYSICAL_ADDRESS            Address;
   EFI_PHYSICAL_ADDRESS            AudioAddress = 0;
+  EFI_PHYSICAL_ADDRESS            UsbAddress = 0;
   UINT64                          ArgsAddress;
   UINT64                          TreeAddress;
   UINT64                          Used;
@@ -699,6 +701,7 @@ Boot (
   Stage = L"READ ADT";
   Status = ReadFile (Root, TreePath, SIZE_16MB, &Tree, &TreeSize);
   if (EFI_ERROR (Status)) { goto Fail; }
+  AddUsbSlots (&Tree, &TreeSize);
   Offset = 0;
   RamdiskOffset = MAX_UINTN;
   TrustCacheOffset = MAX_UINTN;
@@ -753,6 +756,12 @@ Boot (
     }
   }
   ArgsAddress = ALIGN_VALUE (Address + Kernel.End - Kernel.Base, SIZE_16KB);
+  if (mUsbDmaOffset != MAX_UINTN) {
+    UsbAddress=0xffffffffULL;
+    Status=gBS->AllocatePages(AllocateMaxAddress,EfiReservedMemoryType,8,&UsbAddress);
+    if(EFI_ERROR(Status))UsbAddress=0;
+    else {ZeroMem((VOID *)(UINTN)UsbAddress,32768);FlushRange(UsbAddress,32768);}
+  }
   TreeAddress = ArgsAddress + EFI_PAGE_SIZE;
   RamdiskAddress = ALIGN_VALUE (TreeAddress + TreeSize, EFI_PAGE_SIZE);
   RamdiskBytes = ALIGN_VALUE (KeepPacked ? Request->RamdiskSize : RamdiskExpandedSize, EFI_PAGE_SIZE);
@@ -792,6 +801,10 @@ Boot (
   if (mAudioDmaOffset != MAX_UINTN) {
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset), AudioAddress);
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset + 8), AudioAddress ? 65536 : 0);
+  }
+  if (mUsbDmaOffset != MAX_UINTN) {
+    WriteUnaligned64((UINT64 *)(UINTN)(TreeAddress+mUsbDmaOffset),UsbAddress);
+    WriteUnaligned64((UINT64 *)(UINTN)(TreeAddress+mUsbDmaOffset+8),UsbAddress?32768:0);
   }
   if (Request->Ramdisk != NULL) {
     if (KeepPacked) { CopyMem ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize); }
@@ -862,6 +875,12 @@ Boot (
   DEBUG ((DEBUG_ERROR, "ID_AA64PFR0_EL1  0x%lx\n", READ_SYSREG (id_aa64pfr0_el1)));
   DEBUG ((DEBUG_ERROR, "owned trampoline pa 0x%lx (%lu bytes)\n", TrampolineAddress, (UINT64)TrampolineBytes));
   DEBUG ((DEBUG_ERROR, "\nExiting boot services. A green bar means the loader\ntrampoline ran; payload entry is not yet confirmed.\n"));
+  if(UsbRequested(CommandLine)) {
+    DiagDrawVideo(L"USB FIRMWARE RELEASE",0,Video);
+    QuiesceUsb(TreeAddress,UsbAddress);
+  }
+  Status=GetMap(&Map,&Capacity,&MapSize,&Key,&Stride);
+  if(EFI_ERROR(Status))goto Fail;
   for (Attempt = 0; Attempt < 3; Attempt++) {
     MapSize = Capacity;
     Status = gBS->GetMemoryMap (&MapSize, Map, &Key, &Stride, &Version);
@@ -886,6 +905,9 @@ Boot (
   CpuDeadLoop ();
   return EFI_ABORTED;
 Fail:
+  if(mUsbStopped && mUsbFunction!=NULL && mUsbFunction->StartController!=NULL) {
+    (VOID)mUsbFunction->StartController(mUsbFunction);mUsbStopped=FALSE;
+  }
   UnicodeSPrint (Failure, sizeof (Failure), L"BOOT FAILED %s %016lx", Stage, Status);
   DiagDraw (Failure, 0);
   if (Root != NULL) { Root->Close (Root); }
@@ -898,6 +920,7 @@ Fail:
     gBS->FreePages (Owned[Index].Start, EFI_SIZE_TO_PAGES (Owned[Index].Size));
   }
   if (AudioAddress != 0) { gBS->FreePages (AudioAddress, 16); }
+  if (UsbAddress != 0) { gBS->FreePages (UsbAddress, 8); }
   if (Address != 0) { gBS->FreePages (Address, EFI_SIZE_TO_PAGES (WindowSize)); }
   Print (L"DARWINBOOT: boot refused: %r; firmware retained\n", Status);
   return Status;

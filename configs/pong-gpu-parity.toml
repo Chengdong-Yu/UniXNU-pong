@@ -1,0 +1,202 @@
+# Archived experimental source pins; the active runtime is listed below.
+[active]
+mode = "main-plus-parity-adapted-ipados18"
+native_abi = 1
+kernel_snapshot = "services167: A730 ABI1, real single-ring admission, pageable/WC BO handoff, bounded client VA leases, owned imports, physical cache batches and negotiated host-range batches; real fences and fatal fault handling retained"
+metal_runtime = "services167: scheduling branch135b0da adapted to22H374, current queue priorities/shared shader cache, real resolve/single-sample paths, explicit import handoff, O3 frontend, release/fatLTO Rust; remaining poster backlog recorded"
+reason = "Retain matched A730/22H374 ABI1. ABI2 address-space switching remains archived after services114-119 startup regressions."
+
+[upstream_main]
+core = "6790e7ce6e77f67a9174fba1255e64eacf1c41ad"
+metal = "831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8"
+adreno = "a9a2cbb43b89d672e2921e19721a6438b738b17f"
+display_reviewed = "19ef3a75ad2c53da85b8d923553d922716fce377"
+abi = 1
+native4k_cache_io = "main bulk-read/IO_NOCACHE, Darwin24 mach_vm_protect"
+
+[upstream]
+repository = "https://github.com/UniXNU/UniXNU.git"
+branch = "feat/ipados27-gpu-parity"
+commit = "88604d01c191727bf4b4113269b3a9518bb730d3"
+metal = "278333f4a5c8c026dec8e8c277c741c0d909cc77"
+adreno = "c0a2f392a49b7363b26811189cb62d7d0f9e4b8a"
+smmu = "1811b6d1a398ce0cab4e6143b610610f6ea59067"
+display = "4975bc84eb87e16d629125dcffb30cc30dfd2d86"
+translator = "624bab3918de5b978e1101517abca2b4fa426565"
+mesa = "85fda3b36405bcaea8bffc64aa4f2651dc90770d"
+
+[pong]
+guest = "22H374"
+chip_id = "0x07030002"
+page_bytes = 4096
+input_bits = 32
+client_va_start = "0x20000000"
+# Keep SM8475's bank/SID routes and pre-ZAP unfenced CP_ME_INIT.
+# Restored ABI1 uses disjoint client windows in the shared GPU address space.
+table_switch = "shared-address-space"
+
+[adaptation_services133]
+metal = ["opaque BGRA GPU copy", "frame encoding/GPU histograms", "pass/pipeline format accounting", "per-function resumable priming", "BGRA and RGBA16F priming variants"]
+memory = "Optional 256 KiB to 2 MiB contiguous fallback after BO pool exhaustion; keep wired native4K/actual output width, then normal allocation on refusal"
+shader_list = "184 paths read from the current local 22H374 OS filesystem; embedded in plugin, no live directory scan"
+retained = ["A730 CP/GMU/firmware", "ABI1 Turnip transport", "services132 paired scanout idle retirement", "128 MiB BO pool", "22H374 UUID-scoped QuartzCore option storage"]
+not_enabled = ["24A446 QuartzCore instruction addresses", "Sheng DPU MMIO and SID", "2 ms direct-scanout surface hashing experiment", "ABI2 ASID/pageable BO ownership", "unqualified global sysmem rendering"]
+reason = "These upstream experiments depend on another SoC or guest ABI; this port keeps actual A730 fences and known 22H374 lifetime rules. No claim that every experimental path is activated."
+
+[adaptation_services135]
+global_discovery = "root-owned * marker with actual A730/22H374 device qualification"
+limits = "maxComputeThreadgroupMemory from runtime memory limit; maxVertexAmplificationCount from runtime support predicate"
+
+[adaptation_services149]
+core = "main6790e7c, local Pong profile/component preserved"
+metal = ["asynchronous room keeper", "spare image block reuse", "real pressure cache release", "iOS QoS for compile/completion threads", "runtime diagnostics opt-in"]
+adreno = ["optional contiguous allocations at most128KiB with5s backoff", "advisory CP fence polls outside device lock; locked retirement retained"]
+retained = ["SM8475/A730 firmware and power", "ABI1 shared-address-space ownership", "22H374 native selectors and4KiB mappings", "Pong wake/opaque scanout fixes"]
+not_applied = ["SM8550 CP two-ring preemption registers/firmware", "ABI2 per-client address spaces without matched32-bit Turnip transport", "Darwin26/24A446 instruction addresses", "always-on render-thread sampler"]
+
+[adaptation_services150]
+adreno = ["upstream36c4e44 object-level IOVA index, stable ABI1 records", "transaction-local spans with actual native4K leaf/TLB validation", "all-class physical alias checks retained", "KGSL-style CP_NOP tail padding instead of split PM4 batches"]
+metal = ["restore upstream default bounded worker pipeline compilation", "keep149 spare-block reuse, room keeper, QoS, shader cache and priming"]
+ringtone = "reconcile native cached mute with native ringer service once per SpringBoard instance; persistent migration no longer skips later process starts"
+limits = ["no ABI2 table switching, A740 preemption/firmware or synthetic DMA completion"]
+
+[adaptation_services151]
+global_metal = "root-owned publication/client seed retains global * discovery; actual A730/22H374 qualification stays mandatory"
+idle_memory = "Pong environment caps retired dedicated image spares at128MiB in backboardd and32MiB elsewhere; one empty block per pool, live/submitted resources unchanged"
+warmup = "small uncompressed UI framework libraries only,32 pipelines, defer above4 commits/second; no app/debug library sweep"
+control_center = "22H374 CBSliderCommitTelemetry reporting entry skipped only on qualified Pong panel; physical DCS brightness preserved"
+ringtone = "native M4R catalog/IDs/player preserved;78 actual tracks transcoded to ALAC to use installed software decoding"
+
+[adaptation_services152]
+sheng = "28b30285768e04008ac525c04182e245bfac441e"
+core = "6790e7ce6e77f67a9174fba1255e64eacf1c41ad (main already current)"
+metal = "831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8 (merge-only tree delta; missing Pong frontend integration adapted)"
+adreno = "a9a2cbb43b89d672e2921e19721a6438b738b17f (main already current)"
+memory = "upstream physical-page ownership index including retained pool; conservative full-check fallback; native4K/TLBI and fences retained"
+ui_va_mib = [1280, 512]
+other_client_va_mib = 128
+retired_bo_cache_mib = [96, 64, 8]
+wired_pool_mib = 128
+queue = "upstream high Vulkan queue request for backboardd/SpringBoard/InputUI; ABI1 hardware preemption not advertised"
+keyboard = "22H374 InputUI-only phone idiom; preserve native 123/keyplane handling and touch coordinates; migrate exact obsolete Pinyin seed"
+
+[adaptation_services153]
+reference = "https://unixnu.com/zh/porting/gpu"
+render_mode = "sysmem,nocb, GPU BGRA default"
+bo_memory = "system pageable WC descriptor, no kernel VA; same-descriptor client view; prepare outside gate"
+fixed_bo_pool_mib = 0
+mapping = "new invalid leaves without global job drain; free waits only this client's actual queue range"
+gmem = "fd6 linear/mutable correction, resolve and 2D/3D transfer swap plus input attachment paths from official main patch"
+retained = ["A730 actual firmware/power", "22H374/native4K", "shared ABI1 IOVA isolation", "real fences, TLBI, alias checks and quarantine", "152 keyboard and native USB/Wi-Fi/Data"]
+
+[adaptation_services155]
+reference = "https://unixnu.com/zh/porting/gpu"
+memory = "154 initial physical-aperture handoff retained; same WC VM views avoid repeated system-page reassert; outside-gate descriptor retirement; actual uncached import classification"
+lookup = "ordered IOVA index scopes publication/acquisition to submitting client's window"
+submit = "restore missing negotiated128IB method17 in actual Mesa source; no A740 priority ABI substitution"
+warmup = "installed22H374 framework list, per-function journal, no32-pipeline cap, busy work resumes at idle; compressed/replayer assets excluded after actual prior SIGBUS"
+device_baseline = "154 actual scanout completions and908/908 command completion; user still reports slow UI"
+
+[adaptation_services156]
+metal_entrypoints = ["real runtime heap size/alignment", "compute descriptor convenience/asynchronous forms", "actual family-backed legacy feature sets", "IOSurface linear alignment", "declared scalar/vector constant warmup variant"]
+threading = "descriptor-snapshot asynchronous compilation; frontend completion/handlers user-interactive; idle reclaim utility"
+shader_assets = "141 actual22H374 framework metallibs expanded on host,240059151bytes; native AIR preserved"
+native_services = "cameracaptured bounded192MiB allowance after actual27MiB jetsam/5s respawn evidence; native IPC/executable retained"
+device_baseline = "155 real GPU scanout and827/827 command completion; user still reports slow UI"
+
+
+[adaptation_services157]
+va = "same1280/512MiB UI reservations; dynamic non-overlapping remaining leases, Poster384MiB/InputUI-Preferences256MiB preferred, other128MiB, real64MiB-granular pressure fallback"
+retirement = "one imported acquire for same client/actually observed completion; invalidate reuse on every new submission or changed lease/fence"
+evidence_baseline = "156 MercuryPoster OutOfMemory(Device), followed by repeated AttachmentFormat(Color0); actual GPU1148/1148 completed"
+timing = "connect existing VM phase clock; bounded1024-submission cache/VM/acquire summary of ordinary device work"
+
+[services158]
+source = "official GPU guide; Safari FSR80000402/FAR10950b400; 141699MiB maintenance in1024 submits"
+metal = "real compute/render useResources/useHeaps residency and indirect-address translation; real scope/resource barriers; retain native owners through genuine completion"
+memory = "GPU-owned MiniIOSurface backing: same WC memory entry, pageable prepared pages, one Darwin24 aperture handoff; external wrapped ownership unchanged"
+preserved = ["A730 board firmware/registers", "native4KiB/ABI1", "BGRA sysmem,nocb", "async compiler and completion QoS", "bounded resource caches", "native USB pairing and128GB Data"]
+limitations = ["cross-process MTLSharedEvent handle not implemented", "Safari failure and performance require device observation"]
+
+[services159]
+startup = "158 stopped during early backboardd initialization; restore157 qualified IOSurface backing/cache policy"
+retained = ["158 actual resource/heap residency and indirect address tables", "158 compute/render scope/resource barriers", "actual owner retention", "prior performance improvements"]
+withdrawn = ["unqualified global GPU-owned IOSurface WC backing"]
+
+[services160]
+clock = "Pong DT900MHz/DDR11 maximum HFI request, OOB held; firmware protection retained; requested frequency is not measured frequency"
+priority = "negotiated ABI1 flag4/method18; actual Metal/Turnip request; Darwin24 task effective policy; single-ring admission1/2/8, not hardware preemption"
+timing = "real CP19.2MHz start/end stamps; bounded slow-job CPU publish/acquire, queue, execution and retirement; bounded frontend scheduling/completion records"
+preserved = ["159 qualified IOSurface policy", "158 actual residency/barriers", "native USB pairing", "128GB Data", "BGRA sysmem,nocb"]
+
+[services161]
+source_evidence = "160 backboardd slow samples: median18.005ms publish,8.259ms acquire,0.635ms CP,7us queue;575129MiB maintained/3072 normal submissions"
+publication = "ABI1 flag8/method19, actual current command retained host imports; kernel full retained extent validation; real cache errors refuse work"
+completion = "conservative real-fence acquire retained for all writable imports; nonparticipants keep normal publication"
+audio = "physical worker start-generation acknowledgement; committed HAL producer epoch consumption across sleep/restart; real nonzero PCM per start"
+
+[services162]
+source_evidence = "161 real scanout, active-window22-51fps, remaining completion acquire10-23ms; no captured CP/SMMU fault"
+completion = "separate ABI1 flag16/phase2 opt-in; active retained imports acquired after real Metal completion and before display ownership release"
+audio = "retained native HAL client StartIO restores actual stream; TFA powerdown observed before APM/MI2S shutdown; volatile digital route restored at real start"
+
+[services163]
+guide = "https://unixnu.com/zh/porting/gpu"
+whole_import_coverage = true
+redundant_va_flush_omitted_only_after_kernel_success = true
+requested_queue_capacity_forwarded = true
+command_stage_trace = "bounded actual runtime stages; missing records stay unknown"
+device_result = "pending temporary boot"
+
+[services164]
+observed_fence_prefix_retired = true
+retained_audio_start_uses_transition_lock = true
+last_stop_drains_committed_hal_tail = true
+audio_drain_bound_ms = 400
+device_result = "pending final candidate"
+
+[services165]
+core_branch = "fix/gpu-scheduling-and-metal"
+core_commit = "d6bd3ddc9aedced553e2d2737e47b331d07f60a3"
+metal_commit = "7a759a44f86389c3c4787882c7710a4d10f1e93c"
+adreno_source_commit = "0afbfdc0f3a659cd30b203d460b101c7815cbb16"
+xnu_prelink_commit = "b1888c12456c46a2226d63c794465dfcee08d465"
+core_merge = "entire branch fast-forward; local22H374 profile and modified component pointers preserved"
+metal = ["same-user shared cache and concurrent import temp files", "live queue aggregate priority releases boosts", "Poster single-sample and resolve preservation", "texture/view swizzle", "actual heap allocation accounting", "function constant metadata and specialized link names", "full viewport/scissor arrays and blit ranges", "runtime0025 indexed shared constants/offsets"]
+mesa = "ABI1 methods17/18 retained, current priority may decrease; shader-cache=enabled; actual VA lease recommendation"
+maintenance = "same cache operations over validated physical spans; up to64pages across fragmentation per completed DSB batch"
+audio = "independent audiomxd host-clock adapter, actual mach_timebase and known22H374 getter; native HAL PCM ownership unchanged"
+board_limit = "A740 two-ring source merged into core; Pong still A730 single-ring admission. CP init disables preemption, no secondary ring/record/GMU keepalive integration; no A740 MMIO enabled as a substitute."
+user_scripts = "existing build scripts preserved; Mesa configure override recorded with candidate build"
+device_result = "initial165 real scanout/4096submits, second boot real nested-IB SMMU fault; not stable; native24MHz->19.2MHz observed"
+
+[services166]
+source_evidence = "165-final FSR80000402 FAR0xe0d4100 IB2e0d4000 and DeviceLost; native Turnip fence publication/BO retirement race"
+turnip = "same mutex covers actual submit acceptance and last_fence publication; Busy waits remain outside; no early BO-cache reuse under an old fence"
+retained = ["all165 generic Metal/compiler branch integration", "A730 ABI1 and max clock vote", "fragmented cache batching", "real queue priorities and shared shader cache", "165-final native audio clock/timebase conversion", "128GB Data/USB pairing/Wi-Fi"]
+result = "166 real scanout,9216submits/9215completed without captured CP/SMMU fault; bounded60/180/300s trace read from Data; remains under observation"
+
+[services166_latest]
+core = "135b0dabedd9eeac1d43b386843a877f4c974972"
+metal = "b82fa2751d62d3b0a8b9330a58d1506d9cdf0963"
+adreno = "4db2aa75415775667a8d1c03058053102183f7de"
+display = "d0b4eeefba1c7b4c0e5526497836bf96aad92cfa"
+fetches = ["4317907 after d6bd3dd", "135b0da after4317907"]
+render_policy = "all clients default single sample; actual resolve source/load semantics retained"
+tracing = "actual native command/runtime/Vulkan/fence/import/display links; bounded16k event store, opt-in boot flag; root read-only snapshots to existing Data logs"
+display_adapter = "22H374 Mini surface readiness and genuine copy completion; no upstream17/27 offsets or premature physical descriptor access"
+protection = "atomic accepted submit/fence publication versus BO retirement; actual DMA quarantine retained"
+user_scripts = "preserved; standalone native-audio builder added for explicit CoreAudio links"
+result = "matched kernel/runtime built and112MiB changed bands installed; temporary boot succeeded; actual native19.2MHz audio clock; per-frame CPU maintenance still significant"
+
+[services167]
+core = "135b0dabedd9eeac1d43b386843a877f4c974972"
+main = "04573c510c5fd4892ca6948739389141cc9e05f5; already ancestor"
+slow_frame_evidence = "actual180s trace: backboardd command4766 total35.890ms, actualCP4.617ms, significant submit/acquire CPU work"
+host_ownership = "ABI1 method20/flag32, max64 ranges per gate/table scan, complete-range coverage bits only, legacy method19 fallback"
+frontend_optimization = "O3, existing Rust release fatLTO retained; actual commands in build report"
+frame_event61 = "command phase sync_us va_flush_us surfaces owners covered_ranges"
+pac = "upstream native key setup ported to Darwin24, guarded by arm64e and explicitXNU_PONG_NATIVE_PAC; current22H374 remainsarm64"
+pac_cpu_evidence = "read-only ISAR1/ISAR2/SCTLR perCPU; key access and EL0/EL1 roundtrip not yet qualified"
+preserved = ["real cache maintenance and fences", "A730 actual firmware and ABI1", "native clock and audio controls", "128GB Data/USB pairing/WiFi"]
+result = "build and device results pending"

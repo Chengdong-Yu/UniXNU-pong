@@ -331,6 +331,15 @@ static int cp_write(void *,uint32_t reg,uint32_t value)
 }
 static void run(void *,wait_result_t)
 {
+#if defined(PONG_GUEST_22H374)
+    unsigned power_level=0; // Pong DT maximum: 900 MHz, paired DDR level11.
+#else
+    unsigned power_level=PongAdrenoBootPowerLevel;
+#endif
+    PE_parse_boot_argn("pong_gpu_pwrlevel",&power_level,sizeof power_level);
+    unsigned lock_max=1;PE_parse_boot_argn("pong_gpu_lock_max",&lock_max,sizeof lock_max);
+    if(lock_max)power_level=0; // actual Pong DT900MHz and matching maximum BW
+    if(power_level>=PongAdrenoPowerLevelCount){record("SKIP invalid GPU power level",power_level);return;}
     record("startup requested; no accelerator published",0);
     if(!map(gcc,0x100000,0x1f4200)||!map(rsc,0x17a20000,0x10000)||!map(db,0x80860000,0x20000))
         {record("SKIP resource mapping",1);return;}
@@ -370,9 +379,14 @@ static void run(void *,wait_result_t)
     PongGpuGmuResult gr={};auto gs=PongAdrenoGmuStart(&gmu,&gc,&gr);
     record("GMU firmware/HFI",gs,(uint64_t(gr.last_register)<<32)|gr.last_value,gr.phase);
     if(gs)return;
-    PongGpuPowerResult pr={};auto ps=PongAdrenoGmuStartPower(&gmu,&inputs,&pr);
+    PongGpuPowerResult pr={};auto ps=PongAdrenoGmuStartPower(&gmu,&inputs,power_level,&pr);
     record("GMU power handshake",ps,(uint64_t(pr.command)<<32)|pr.firmware_error,pr.acknowledged);
     if(ps)return;
+    record("GMU frequency/bandwidth request acknowledged",0,
+        PongAdrenoPowerLevels[power_level].hz,PongAdrenoPowerLevels[power_level].bus);
+    IOLog("[gpu clock] lock_max=%u request_hz=%u level=%u DDR=%u HFI=acknowledged OOB=held\n",lock_max,
+        power_level<PongAdrenoPowerLevelCount?PongAdrenoPowerLevels[power_level].hz:0,power_level,
+        power_level<PongAdrenoPowerLevelCount?PongAdrenoPowerLevels[power_level].bus:0);
     auto cp_status=PongAdrenoCpStart(&gmu);
     record("CP/user-client startup",cp_status,gr.core_version,gr.hfi_version);
     if(cp_status)record("GX clock state after CP failure",rd(windows[PongGpuClock],0x90a8),

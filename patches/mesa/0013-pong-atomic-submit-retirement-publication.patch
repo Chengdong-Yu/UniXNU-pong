@@ -1,0 +1,36 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1371,12 +1371,20 @@
+ 
+    for (;;) {
+       NativeAdrenoAbiSubmitReply reply = {};
++      /* BO retirement snapshots dw.last_fence under this same mutex. Keep
++       * hardware acceptance and fence publication indivisible: otherwise a
++       * concurrent bo_finish can attach a still-used nested command BO to
++       * the previous completed fence and immediately recycle its contents. */
++      pthread_mutex_lock(&dw.lock);
+       kern_return_t kr = dw_call(batch ? NativeAdrenoMethodSubmitBatch : NativeAdrenoMethodSubmit, &req,
+                                batch ? sizeof(req) : sizeof(NativeAdrenoAbiSubmit), &reply, sizeof(reply));
+       if (kr == KERN_SUCCESS) {
+          *fence = (uint32_t)reply.fence;
++         darwin_note_fence(*fence);
++      }
++      pthread_mutex_unlock(&dw.lock);
++      if (kr == KERN_SUCCESS)
+          return VK_SUCCESS;
+-      }
+       if (kr != kIOReturnBusy)
+          return vk_device_set_lost(&dev->vk, "submit failed: 0x%x", kr);
+ 
+@@ -1424,10 +1432,7 @@
+          VkResult result = darwin_submit_chunk(queue, all + at, count, &chunk_fence);
+          if (result != VK_SUCCESS)
+             return result;
+-         pthread_mutex_lock(&dw.lock);
+-         darwin_note_fence(chunk_fence);
+-         pthread_mutex_unlock(&dw.lock);
+-         fence = chunk_fence;
++         fence = chunk_fence; // published atomically with the accepted chunk
+       }
+       p_atomic_set(&queue->fence, fence);
+    } else {

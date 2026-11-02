@@ -50,9 +50,10 @@ class NativeAdrenoRing final {
     size_t ring_bytes_=0,fence_bytes_=0;
     uint64_t ring_iova_=0,fence_iova_=0;
     uint32_t next_=0,rptr_shadow_=0,seqno_=0,completed_=0,submissions_=0;
-    bool attached_=false,poisoned_=false,reset_pending_=false;
+    bool attached_=false,poisoned_=false,reset_pending_=false,stamps_=false;
     IOReturn poison();
     IOReturn readRptr(uint32_t *);
+    IOReturn publishWritten(uint32_t begin,uint32_t count);
     IOReturn emitPrologue(uint32_t at,bool reset,uint32_t *end);
     IOReturn emitFence(uint32_t at,uint32_t seqno,uint32_t *end);
     IOReturn emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *end);
@@ -98,10 +99,15 @@ public:
     NativeAdrenoRingFence observeFence(uint32_t fence,const NativeAdrenoRingClock *,
         uint32_t timeout_us,uint32_t *observed);
     bool poisoned() const {return poisoned_;}
+    /* Advisory lock-free CP progress only; ownership/retirement stays in
+     * the normal locked wait. False always returns to that authoritative path. */
+    bool fencePending(uint32_t fence) const;
     uint32_t outstanding() const {return seqno_-completed_;}
     uint32_t lastSubmitted() const {return seqno_;}      /* the newest fence number handed out */
     uint32_t completedFence() const {return completed_;}
     uint32_t submissions() const {return submissions_;}
+    void setTimeline(bool enabled) {stamps_=enabled && fence_bytes_>=1536;}
+    bool timeline(uint32_t fence,uint64_t *start,uint64_t *end);
     uint32_t readPointer() const {return rptr_shadow_;}
 };
 #endif

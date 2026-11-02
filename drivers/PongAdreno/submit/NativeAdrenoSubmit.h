@@ -37,6 +37,8 @@ class NativeAdrenoSubmit final {
         uint32_t queue=0;
         uint64_t window_start=0,window_bytes=0;
         bool active=false;
+        int32_t priority=1,pid=0,role=0,preceding_pid=0;
+        uint64_t submit_us=0,submit_tick=0,sync_us=0;
     } jobs_[8];
     NativeAdrenoVm *vm_=nullptr;
     NativeAdrenoRing *ring_=nullptr;
@@ -44,6 +46,11 @@ class NativeAdrenoSubmit final {
     bool attached_=false,poisoned_=false;
     uint32_t audit_tick_=0;   /* submissions since attach; every eighth one audits its IB lines */
     uint32_t current_context_=UINT32_MAX;
+    int32_t next_priority_=1,next_pid_=0,next_role_=0;
+    uint64_t slow_window_=0;unsigned slow_logged_=0;
+    uint64_t admission_yields_=0;
+    struct AcquiredWindow {uint64_t start=0,bytes=0;uint32_t completed=0;bool valid=false;};
+    AcquiredWindow acquired_[16]{};
     /* Serialized by the owner; a 128-IB batch must not consume kernel stack
      * with its 1 KiB handle list and 2 KiB packet list. */
     uint64_t scratch_handles_[128]{};
@@ -85,5 +92,6 @@ public:
     bool poisoned() const {return poisoned_;}
     size_t outstanding() const;
     NativeAdrenoSubmitStats stats() const {return stats_;}
+    void nextPriority(int32_t priority,int32_t pid,int32_t role) {next_priority_=priority;next_pid_=pid;next_role_=role;}
 };
 #endif

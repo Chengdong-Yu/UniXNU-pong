@@ -75,6 +75,7 @@ public:
     bool initWithTask(task_t task, void *security, UInt32 type, OSDictionary *properties) override {
         if (!IOUserClient::initWithTask(task, security, type, properties)) return false;
         owner = task;
+        if(type!=0)return false;
         return true;
     }
     bool start(IOService *provider) override {
@@ -84,7 +85,11 @@ public:
     }
     IOReturn clientClose() override {
         // The plug-in's process went away or closed: nothing plays from its rings any more.
-        sheng_audio_request(ShengAudioStopOutput);
+        auto m=sheng_audio_memory(ShengAudioMemoryControl);
+        auto c=m?static_cast<ShengAudioControl *>(m->getBytesNoCopy()):nullptr;
+        // The compatibility/clock client never owns the native engine.
+        if(c && !(c->state&ShengAudioNativeOutput))sheng_audio_request(ShengAudioStopOutput);
+        OSSafeReleaseNULL(m);
         native_audio_service[2] = native_audio_service[2] + 1;
         terminate();
         return kIOReturnSuccess;
@@ -107,12 +112,20 @@ public:
         if (!args || args->scalarInputCount || args->structureInputSize ||
             args->scalarOutputCount || args->structureOutputSize) return kIOReturnBadArgument;
         if (selector > ShengAudioStopOutput) return kIOReturnUnsupported;
+        auto m=sheng_audio_memory(ShengAudioMemoryControl);
+        auto c=m?static_cast<ShengAudioControl *>(m->getBytesNoCopy()):nullptr;
+        const bool native=c && (c->state&ShengAudioNativeOutput);
+        OSSafeReleaseNULL(m);
+        if(native)return kIOReturnExclusiveAccess;
         native_audio_service[3] = native_audio_service[3] + 1;
         if (sheng_audio_request(selector)) {native_audio_service[4] = native_audio_service[4] + 1; return kIOReturnNotReady;}
         return kIOReturnSuccess;
     }
 };
 OSDefineMetaClassAndStructors(PongAudioUserClient, IOUserClient)
+
+#include "PongIOAudio2.h"
+#include "../PongUsb/PongUsbMux.h"
 
 // Called by AudioProbe.cpp once the speaker path is ready and this file's classes are registered.
 extern "C" void sheng_audio_service_start(void) {
@@ -129,5 +142,11 @@ extern "C" void sheng_audio_service_start(void) {
         return;
     }
     native_audio_service[0] = 1;
+    if(pong_audio2_publish(IOService::getPlatform())) {
+        auto m=sheng_audio_memory(ShengAudioMemoryControl);
+        auto c=m?static_cast<ShengAudioControl *>(m->getBytesNoCopy()):nullptr;
+        if(c)__atomic_fetch_or(&c->state,ShengAudioNativeOutput,__ATOMIC_RELEASE);
+        OSSafeReleaseNULL(m);
+    } else IOLog("PongAudio2: native output allocation failed; existing HAL endpoint retained\n");
     audio->release();   // the platform's attachment keeps it
 }
