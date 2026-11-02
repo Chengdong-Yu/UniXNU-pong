@@ -55,7 +55,6 @@
       }
     ],
     "codec": "WCD938x",
-    "local_route_inputs": "/Volumes/Untitled/Pong-iPadOS18/pong-audio-inputs",
     "pcm_route_implemented": true,
     "runtime_playback_observed": false,
     "capture_implemented": false,
@@ -78,8 +77,14 @@
       ],
       "lpaif_type": 0,
       "interface_index": 2,
-      "sd_line_index": 1,
-      "source": "Pong resourcemanager_waipio_qrd.xml MI2S-LPAIF-RX-TERTIARY; LPAIF=0, RX direction, tertiary index2, SD0=1"
+      "sd_line_index": 2,
+      "source": "Pong live DT qcom,msm-dai-q6-mi2s-tert: rx-lines=0x2 (SD1 playback), tx-lines=0x1 (SD0 feedback); AudioReach I2S_SD1=2; 48kHz stereo S32_LE from Pong resourcemanager",
+      "prm_bit_clock": {
+        "id": "0x104",
+        "hz": 3072000,
+        "attribute": 1,
+        "source": "Qualcomm audio_prm.h CLOCK_ID_TER_MI2S_IBIT; 48000 Hz * 2 channels * 32 bits"
+      }
     },
     "hal": "org.unixnu.pong.audio",
     "i2c_pins": [
@@ -93,13 +98,35 @@
     "amp_reset_release_ms": 10,
     "amp_reset_source": "Pong live DT has no reset-polarity; Nothing tfa98xx_parse_dt defaults HIGH, ext_reset drives HIGH then LOW",
     "hal_exposed_by_default": false,
-    "capture_memory_implemented": false
+    "capture_memory_implemented": false,
+    "container_input": "pong_build.audio_container in ignored local.toml",
+    "dma_partition": {
+      "adt_property": "pong-audio-dma",
+      "lease_bytes": 65536,
+      "offset": 0,
+      "bytes": 65536,
+      "ownership": "original exclusive audio UEFI reservation restored",
+      "period_buffers": 8,
+      "period_bytes": 3840
+    }
   },
   "power": {
     "active_tcs": 4,
-    "serialized_with": "PongWifi",
+    "serialized_with": "PongPlatformResources / APSS active TCS4",
     "gpu_tcs": 3,
-    "cpu_governor_implemented": false,
+    "cpu_governor_implemented": true,
+    "cpu_policy_boot_argument": "pong_cpu_policy",
+    "cpu_policy_default": "fixed-highest-non-boost",
+    "cpu_domain_caps_khz": [
+      1804800,
+      2496000,
+      2995200
+    ],
+    "gpu_policy_boot_argument": "pong_gpu_pwrlevel",
+    "gpu_policy_default_dt_level": 0,
+    "gpu_requested_hz": 900000000,
+    "gpu_requested_ddr_index": 11,
+    "frequency_runtime_qualified": false,
     "suspend_resume_implemented": false
   },
   "private_firmware_in_repository": false

@@ -2,6 +2,20 @@
 #ifndef PONG_ATH11K_COMPAT_H
 #define PONG_ATH11K_COMPAT_H
 #include "lx_pci.h"
+/* Linux permits side effects in wait conditions. ath11k's WMI condition
+ * transfers skb ownership on success; the shared shim used to evaluate it
+ * again when returning, sending the same skb twice. Check once per round
+ * and honor deadlines even while other IRQ/work items remain busy. */
+#undef wait_event_timeout
+#define wait_event_timeout(w, cond, timeout) ({ \
+    unsigned long pong_end = jiffies + (timeout); long pong_result; (void)(w); \
+    for (;;) { \
+        if (cond) { long pong_left = (long)(pong_end - jiffies); \
+            pong_result = pong_left > 0 ? pong_left : 1; break; } \
+        if (time_after(jiffies, pong_end) || jiffies == pong_end) { pong_result = 0; break; } \
+        if (!lx_pump()) lx_idle(1); \
+    } \
+    pong_result; })
 typedef unsigned long kernel_ulong_t;
 #undef IS_ENABLED
 #define PONG_DEFINED_1 0,

@@ -13,17 +13,17 @@
 
 #define SHENG_AUDIO_CLASS "PongAudio"
 #define SHENG_AUDIO_MAGIC 0x53484155u        /* 'SHAU' */
-#define SHENG_AUDIO_VERSION 1u
+#define SHENG_AUDIO_VERSION 2u
 #define SHENG_AUDIO_RATE 48000u
 #define SHENG_AUDIO_OUT_CHANNELS 2u
-#define SHENG_AUDIO_IN_CHANNELS 1u
+#define SHENG_AUDIO_IN_CHANNELS 0u             /* Pong exposes no capture endpoint */
 #define SHENG_AUDIO_PERIOD_FRAMES 480u        /* 10 ms */
 #define SHENG_AUDIO_RING_FRAMES 65536u        /* room for 300ms lead and late HAL cycles */
 
 enum {ShengAudioMemoryControl = 0, ShengAudioMemoryOutput = 1, ShengAudioMemoryInput = 2};
 enum {ShengAudioStartOutput = 0, ShengAudioStopOutput = 1, ShengAudioStartInput = 2, ShengAudioStopInput = 3};
 enum {ShengAudioSetHostClock = 4};
-enum {ShengAudioOutputRunning = 1u << 0, ShengAudioInputRunning = 1u << 1, ShengAudioOutputReady = 1u << 2, ShengAudioInputReady = 1u << 3};
+enum {ShengAudioOutputRunning = 1u << 0, ShengAudioInputRunning = 1u << 1, ShengAudioOutputReady = 1u << 2, ShengAudioInputReady = 1u << 3, ShengAudioNativeOutput = 1u << 4, ShengAudioOutputStartFailed = 1u << 5};
 
 typedef struct {
     uint32_t magic, version;
@@ -35,6 +35,7 @@ typedef struct {
     volatile uint64_t out_frames, in_frames; /* frames the service consumed / produced so far */
     volatile uint32_t out_late, in_late;     /* periods the service had to send or deliver without fresh data */
     volatile uint32_t out_seq, in_seq;       /* incremented around anchor updates (odd while writing) */
+    volatile uint32_t out_gain_q16, out_muted; /* native HAL gain, 0..65536; keys use HID */
 } ShengAudioControl;
 
 #endif

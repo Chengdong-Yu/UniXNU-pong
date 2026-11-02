@@ -40,6 +40,7 @@ enum {
 typedef struct {
     int32_t value[BmFields];
     uint32_t valid;               /* bit per field */
+    uint32_t fresh, completed;    /* current cycle and last completed cycle */
     uint8_t cursor, in_flight, enabled, slow_due;
     uint32_t cycles_done, responses, notifications, errors, timeouts, ignored;
     uint32_t refresh_wanted;      /* a notification asked for a new cycle while one ran */
@@ -58,6 +59,7 @@ typedef struct {
  * reports the current with discharge positive, the power source with charge positive. */
 typedef struct {
     int present, external, charging, fully_charged, critical;
+    int source_known, status_known; /* current completed cycle, not retained values */
     int percent;                  /* 0..100 */
     int charge_known;             /* percent comes from a reading, not a default */
     int voltage_mv, current_ma;   /* current: positive while the battery takes charge */

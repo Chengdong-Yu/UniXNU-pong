@@ -5,3 +5,11 @@
 tree = "../build/Pong-iPadOS18-native/tree"
 developer_dir = "/Applications/Xcode.app/Contents/Developer"
 volume_layout = "../private-inputs/volume-layout.json"
+sheng_source = "refer/ipados18/UniXNU-sheng"
+wifi_shared = "refer/ipados18/Ath12kWifi"
+wifi_linux = "refer/ipados18/linux-7.0.14"
+wifi_firmware = "out/ipados18/firmware/qca6490"
+# Run prepare-pong-wifi.py --serial <Pong REC serial> --out out/ipados18/firmware.
+# Keep its local-inputs.json next to qca6490; capture follows the active modem slot.
+audio_container = "out/ipados18/firmware/audio/tfa98xx.cnt"
+storage_source = "refer/ipados18/IOStorageFamily-323"

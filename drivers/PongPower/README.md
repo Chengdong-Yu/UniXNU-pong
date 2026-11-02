@@ -11,13 +11,15 @@
 
 ## 板级音频约束
 
-Pong 是 TFA98xx 双功放（I2C `a94000`，地址 `34/35`）及 WCD938x，不能加载 Sheng CS35L43 功放配置。实际 `pinctrl-0` 是 qupv3_se13_i2c_active，GPIO48/49、qup13 mux1、pull-up / 2mA；GPIO52/53 不属于这条总线。复位为 GPIO1/89；本机 DT 未设置 `reset-polarity`，Nothing 驱动默认高电平有效，必须 HIGH 10ms 后 LOW 10ms 释放。此前反向序列将功放一直保持在复位状态。PCM 为 tertiary MI2S。只应用本机容器中的易失性 speaker 配置，不运行校准或写工厂 MTP。仍需真机确认 LPASS 时钟、DMA 周期完成及匹配 Darwin24 的 HAL。CPU 调频/系统睡眠回调尚未接入；保留当前固件策略。
+Pong 是 TFA98xx 双功放（I2C `a94000`，地址 `34/35`）及 WCD938x，不能加载 Sheng CS35L43 功放配置。实际 `pinctrl-0` 是 qupv3_se13_i2c_active，GPIO48/49、qup13 mux1、pull-up / 2mA；GPIO52/53 不属于这条总线。复位为 GPIO1/89；本机 DT 未设置 `reset-polarity`，Nothing 驱动默认高电平有效，必须 HIGH 10ms 后 LOW 10ms 释放。此前反向序列将功放一直保持在复位状态。PCM 为 tertiary MI2S SD1（本机 DT rx-lines=0x2）；SD0（tx-lines=0x1）属于反馈，不能用于播放输出。只应用本机容器中的易失性 speaker 配置，不运行校准或写工厂 MTP。仍需真机确认 LPASS 时钟、DMA 周期完成及匹配 Darwin24 的 HAL。CPU 调频/系统睡眠回调尚未接入；保留当前固件策略。
 
 ## 构建与输入
 
 `scripts/build-pong-power-native.py` 产生 `libPongPower.a`，由主构建脚本 force-load，`ArmDTPlatform` 在 CPU nubs 已发布后调用。电池 metaclass 延后注册，避免 prelink 静态初始化顺序依赖。
 
-参数：`pong_adsp=2`；PCM 调试显式传入 `pong_audio=2`，默认不启用。HAL 默认保留在 `/pong/staged-audio18`，`refresh_runtime --enable-audio-hal` 才将其放入可枚举目录；即使启用，工厂也仅在真实内核设备就绪时创建实例。但 services44 的真实记录说明该检查仍未避免 audiomxd 的 SIGSEGV 循环，当前必须继续默认隔离，尚不能声称 HAL 已与 22H374 正常协作。内核仅提供 control/output 两个内存类型和输出 start/stop，不创建占位 capture 环。本机 `adsp.mbn` 通过 `refresh_runtime --power-firmware DIR` 放入 `/pong/firmware/adsp.mbn`；固件不放入 Git。
+`CONFIG_XNU_PONG_POWER`独立编译和启动电源/ADSP/音频。打包器只在该开关启用时添加 `pong_adsp=2`、`pong_audio=2`。HAL由 `refresh_runtime --enable-audio-hal` 或 `refresh_ui --enable-audio-hal` 安装为现代 `.driver`；工厂提供真实接口，实际端点Ready后才枚举设备。内核仅提供control/output两个内存类型和输出start/stop，不创建capture环。本机 `adsp.mbn` 通过 `refresh_runtime --power-firmware DIR` 放入 `/pong/firmware/adsp.mbn`，也可用 `pong_adsp-fw=/absolute/directory` 选择显式目录；固件不放入Git。
+
+RPMh和APPSSMMU lease由独立 `PongPlatformResources` 提供，不再定义在无线对象内。GPU/Wi-Fi/音频共享唯一 `libPongSmmu4K.a`；SID1801使用与其他客户端相同的禁用context编程、回读和TLBSYNC顺序。公开来源及私有输入路径见 `configs/pong-native-sources.toml` 和 `local.toml.example`。详见[源码审计](../../migration/ipados18/services74-source-audit.md)；HAL加载和服务发布仍不是实际PCM发声证据。
 
 参考：UniXNU 官方 `docs/zh/porting/power.md`；UniXNU-sheng `0e1f6e5` 的 Qualcomm 协议/服务结构（保留原 BSD-2-Clause-Patent 声明）；NothingOSS `android_kernel_msm-5.10_nothing_sm8475` `sm8475/t` 的 PAS 与电池驱动。
 

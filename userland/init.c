@@ -3,6 +3,7 @@
  * Static init; the build selects the matching restore and runtime UI adapter.
  */
 #include "mini.h"
+#include "PongTweakConfig.h"
 #ifndef PONG_NATIVE_APFS18
 #error This init belongs to the native Darwin24 APFS recipe
 #endif
@@ -216,6 +217,9 @@ prepare_runtime_paths(void)
      * or change ownership of an existing directory. */
     static const struct { const char *path; int mode; } root_dirs[] = {
         {"/private/var/keybags", 0700}, {"/private/var/logs", 0755},
+        {"/private/var/root/Library", 0700},
+        {"/private/var/root/Library/Lockdown", 0700},
+        {"/private/var/root/Library/Lockdown/pair_records", 0700},
         /* The reduced 22H374 Data seed has the MCM database but omits the
          * standard roots where the native manager creates per-system and
          * system-group containers. Create only those roots; MCM still owns
@@ -395,17 +399,47 @@ static void
 configure_ui_library(void)
 {
     const char *path=PONG_UI_LIBRARY_PATH;
-    /* 22H374 has audiomxd and no mediaserverd job. Its audio daemon needs no
-     * UI hooks; inject only processes with an actual Darwin24 adapter. */
-    const char *base=PONG_UI_LIBRARY_PATH " SpringBoard backboardd containermanagerd containermanagerd_system Preferences" PONG_UI_EXTRA_PROCESSES;
+    /* 22H374 has audiomxd and no mediaserverd job. Keep its codec adapter
+     * separate from the UI hooks and their framework dependencies. */
+    const char *base=PONG_UI_LIBRARY_PATH " SpringBoard backboardd InputUI containermanagerd containermanagerd_system Preferences MobilePhone Sileo contextstored SBRendererService PowerUIAgent wifid" PONG_UI_EXTRA_PROCESSES;
     struct stat st;
     if (stat(path,&st)!=0 || (st.st_mode&S_IFMT)!=S_IFREG || st.st_uid!=0) {
         puts("Pong init: UI compatibility library absent; SKIP");return;
     }
-    /* Only the matching 22H374 runtime adapter is injected. */
-    int result=sysctlbyname("kern.exec_inject",NULL,NULL,(void *)base,strlen(base)+1);
+    char configured[1024];size_t length=strlen(base);
+    if(length>=sizeof(configured)) {
+        puts("Pong init: runtime injection configuration exceeds bound; existing configuration retained");return;
+    }
+    memcpy(configured,base,length+1);
+    const char codec_path[]="/pong/libpong-audio-codecs18.dylib";
+    const char codec_rule[]="; /pong/libpong-audio-codecs18.dylib audiomxd AudioConverterService AUHostingServiceXPC_arrow Preferences tonelibraryd SpringBoard";
+    if(stat(codec_path,&st)==0 && (st.st_mode&S_IFMT)==S_IFREG && st.st_uid==0 && !(st.st_mode&022)) {
+        if(length+sizeof(codec_rule)<=sizeof(configured)) {
+            memcpy(configured+length,codec_rule,sizeof(codec_rule));
+            length+=sizeof(codec_rule)-1;
+            puts("Pong init: independent 22H374 software codec adapter selected");
+        } else puts("Pong init: codec rule exceeds bounded configuration; native decoders retained");
+    }
+    const char usb_path[]="/pong/libpong-usb18.dylib";
+    const char usb_rule[]="; /pong/libpong-usb18.dylib lockdownd usb-mux audiomxd SpringBoard backboardd PowerUIAgent Preferences MobileGestaltHelper";
+    if(stat(usb_path,&st)==0 && (st.st_mode&S_IFMT)==S_IFREG && st.st_uid==0 && !(st.st_mode&022)) {
+        if(length+sizeof(usb_rule)<=sizeof(configured)) {
+            memcpy(configured+length,usb_rule,sizeof(usb_rule));
+            puts("Pong init: real USB transport/board identity adapter selected");
+        } else puts("Pong init: USB rule exceeds configuration bound; native USB retained");
+    }
+    /* ElleKit's optional rule must remain last: tweak-refresh truncates
+     * that rule before rebuilding it. Keep board codec rules before it. */
+    char composed[1024];
+    int tweaks=pong_tweak_config(composed,sizeof(composed),configured);
+    const char *selected=tweaks>=0?composed:configured;
+    if(tweaks<0)puts("Pong init: invalid optional tweak rule; native adapters preserved");
+    int result=sysctlbyname("kern.exec_inject",NULL,NULL,(void *)selected,strlen(selected)+1);
     printf("Pong init: UI library configuration result=%d errno=%d\n",result,result?errno:0);
 }
+
+/* Optional package setup is a launchd job. Never fork its clients before
+ * PID 1 installs the real bootstrap service namespace. */
 
 int
 main(int argc, char **argv, char **envp)

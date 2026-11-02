@@ -12,15 +12,23 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <syslog.h>
 #include "ShengAudioAbi.h"
+#define PONG_ROUTE_LOG(...) syslog(LOG_NOTICE,__VA_ARGS__)
+#include "PongAudioRoute.h"
+#undef PONG_ROUTE_LOG
 
-enum {kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kInStream = 4, kVolume = 5};
+enum {kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kInStream = 4, kVolume = 5, kMute = 6};
 #define kPlugInBundleID "org.unixnu.pong.audio"
 #define kDeviceUID "PongAudioDevice"
 #define kModelUID "PongAudioModel"
+// AudioHardware.h legacy selectors; its whole macOS header must not replace
+// the selected iPhoneOS SDK. These ABI values match the public SDK header.
+enum {kPongDeviceVolumeScalar='volm',kPongDeviceVolumeDecibels='vold',kPongDeviceMute='mute',
+    kPongDeviceDbRange='vdb#',kPongDeviceScalarToDb='v2db',kPongDeviceDbToScalar='db2v'};
 static const Float64 kRate = SHENG_AUDIO_RATE;
 
 static AudioServerPlugInHostRef gHost;
@@ -32,15 +40,23 @@ static int16_t *gOut;
 static atomic_uint gIoUsers;
 static atomic_uint gOutActive = 1;
 static _Atomic(Float32) gVolume = 0.25f;
+static atomic_uint gMuted;
 static Float64 gHostTicksPerFrame;
 static uint64_t gZeroOrigin, gZeroSeed;
 static void setHostClock(void);
+static Float32 currentVolume(void) {
+    return gControl?(Float32)__atomic_load_n(&gControl->out_gain_q16,__ATOMIC_ACQUIRE)/65536.0f:gVolume;
+}
 
 // ---- Kernel service ------------------------------------------------------------------------------------------------------------
 static mach_vm_address_t gMapped[2];
-static int ready(void) {
-    return gControl && (__atomic_load_n(&gControl->state, __ATOMIC_ACQUIRE) & ShengAudioOutputReady);
+static int physicalReady(void) {
+    return gControl && (__atomic_load_n(&gControl->state,__ATOMIC_ACQUIRE)&ShengAudioOutputReady);
 }
+static int nativeOutput(void) {
+    return gControl && (__atomic_load_n(&gControl->state,__ATOMIC_ACQUIRE)&ShengAudioNativeOutput);
+}
+static int ready(void) {return physicalReady() && !nativeOutput();}
 static void disconnectService(void) {
     gControl = NULL; gOut = NULL;
     for (unsigned i=0; i<2; ++i) if(gMapped[i]) {
@@ -57,7 +73,7 @@ static int mapType(uint32_t type, void **out, mach_vm_size_t minimum) {
     *out=(void *)(uintptr_t)address; return 0;
 }
 static int connectService(void) {
-    if(gControl)return ready()?0:-1;
+    if(gControl)return physicalReady()?0:-1;
     io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching(SHENG_AUDIO_CLASS));
     if(!service)return -1;
     kern_return_t kr=IOServiceOpen(service,mach_task_self(),0,&gConnect);
@@ -75,7 +91,7 @@ static int connectService(void) {
     }
     gOut=out;gControl=c;
     gHostTicksPerFrame=(Float64)c->ticks_per_frame_q32/4294967296.0;
-    setHostClock();
+    if(gHost)setHostClock();
     syslog(LOG_NOTICE,"PongAudio HAL: physical stereo service connected");
     return 0;
 }
@@ -83,13 +99,49 @@ static void *awaitService(void *unused) {
     (void)unused;
     // The DSP and real amplifier graph can become ready after audiomxd loads.
     // Advertise no audio device until the physical endpoint actually exists.
+    usleep(100000); // Initialize must return before notifying its host.
     for(unsigned i=0;i<900;i++) {
         pthread_mutex_lock(&gLock);int connected=connectService()==0;pthread_mutex_unlock(&gLock);
+        if(connected && nativeOutput()) {
+            // Keep only the validated host-clock adapter. Publishing a
+            // second PCM endpoint routes samples into a ring the native
+            // engine does not consume and lets one client stop the other.
+            syslog(LOG_NOTICE,"PongAudio HAL: native Speaker owns PCM; compatibility clock only");
+            return NULL;
+        }
         if(connected) {
             AudioObjectPropertyAddress p[2]={
                 {kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain},
                 {kAudioObjectPropertyOwnedObjects,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain}};
-            if(gHost)gHost->PropertiesChanged(gHost,kPlugIn,2,p);
+            OSStatus result=gHost?gHost->PropertiesChanged(gHost,kPlugIn,2,p):kAudioHardwareNotRunningError;
+            if(!result || i<3 || !(i%100))
+                syslog(result?LOG_ERR:LOG_NOTICE,"PongAudio HAL: real device discovery notification result=%d",result);
+            if(result) {usleep(100000);continue;}
+            // This is the discovery worker, outside Initialize, host
+            // callbacks and gLock. Embedded CoreAudio's public HAL API
+            // operates on the calling process's HALS_System. Select the
+            // real output here in audiomxd, not in an unrelated helper's
+            // separately started audio server. Never call it from an ASPL
+            // property/IO callback, and never substitute a fabricated ID.
+            int routed=pong_audio_select_native_route();
+            syslog(routed?LOG_ERR:LOG_NOTICE,"PongAudio HAL: native host route selection result=%d",routed);
+            // Native HAL controls own the shared gain. Publish any actual
+            // gain/mute change to the host; physical keys never write it.
+            UInt32 gain=__atomic_load_n(&gControl->out_gain_q16,__ATOMIC_ACQUIRE);
+            UInt32 muted=__atomic_load_n(&gControl->out_muted,__ATOMIC_ACQUIRE);
+            while(ready()) {
+                usleep(200000);
+                UInt32 next=__atomic_load_n(&gControl->out_gain_q16,__ATOMIC_ACQUIRE);
+                UInt32 mute=__atomic_load_n(&gControl->out_muted,__ATOMIC_ACQUIRE);
+                if(next!=gain || mute!=muted) {
+                    gain=next;muted=mute;
+                    AudioObjectPropertyAddress control[2]={{kAudioLevelControlPropertyScalarValue,kAudioObjectPropertyScopeGlobal,0},
+                        {kAudioLevelControlPropertyDecibelValue,kAudioObjectPropertyScopeGlobal,0}};
+                    AudioObjectPropertyAddress volume[2]={{'volm',kAudioObjectPropertyScopeOutput,0},{'mute',kAudioObjectPropertyScopeOutput,0}};
+                    gHost->PropertiesChanged(gHost,kVolume,2,control);
+                    gHost->PropertiesChanged(gHost,kDevice,2,volume);
+                }
+            }
             return NULL;
         }
         usleep(100000);
@@ -140,12 +192,21 @@ static ULONG Release(void *self) {(void)self; UInt32 r = atomic_load(&gRefs); if
 static OSStatus Initialize(AudioServerPlugInDriverRef d, AudioServerPlugInHostRef host) {
     (void)d;
     gHost = host;
-    pthread_mutex_lock(&gLock);int connected=connectService()==0;pthread_mutex_unlock(&gLock);
+    pthread_mutex_lock(&gLock);
+    const int alreadyConnected=gControl!=NULL;
+    int connected=connectService()==0;
+    if(connected && alreadyConnected)setHostClock();
+    pthread_mutex_unlock(&gLock);
     syslog(LOG_NOTICE,"PongAudio HAL: AudioServerPlugIn initialized connected=%d",connected);
-    if(!connected) {
-        pthread_t worker;
-        if(pthread_create(&worker,NULL,awaitService,NULL)==0)pthread_detach(worker);
-    }
+    // Explicitly publish the real endpoint after Initialize returns, even
+    // when the DSP was already ready during initial bundle loading.
+    pthread_t worker;
+    int created=pthread_create(&worker,NULL,awaitService,NULL);
+    if(!created)pthread_detach(worker);
+    else syslog(LOG_ERR,"PongAudio HAL: discovery worker unavailable result=%d",created);
+    // AudioServerPlugIn must never reenter the CoreAudio client HAL API.
+    // The host owns discovery and route selection; callbacks above publish
+    // the actual physical device after Initialize has returned.
     return 0;
 }
 static OSStatus CreateDevice(AudioServerPlugInDriverRef d, CFDictionaryRef desc, const AudioServerPlugInClientInfo *c, AudioObjectID *o) {(void)d; (void)desc; (void)c; (void)o; return kAudioHardwareUnsupportedOperationError;}
@@ -162,11 +223,30 @@ static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID 
 static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, UInt32 qs,
                                 const void *q, UInt32 inDataSize, UInt32 *outDataSize, void *outData);
 
+static bool deviceGainProperty(AudioObjectID o,const AudioObjectPropertyAddress *a) {
+    return o==kDevice && a->mScope==kAudioObjectPropertyScopeOutput && a->mElement<=2 &&
+        (a->mSelector==kPongDeviceVolumeScalar || a->mSelector==kPongDeviceVolumeDecibels ||
+         a->mSelector==kPongDeviceMute);
+}
+static void gainChanged(void) {
+    if(!gHost)return;
+    AudioObjectPropertyAddress control[2]={{kAudioLevelControlPropertyScalarValue,kAudioObjectPropertyScopeGlobal,0},
+        {kAudioLevelControlPropertyDecibelValue,kAudioObjectPropertyScopeGlobal,0}};
+    AudioObjectPropertyAddress device[3]={{kPongDeviceVolumeScalar,kAudioObjectPropertyScopeOutput,0},
+        {kPongDeviceVolumeDecibels,kAudioObjectPropertyScopeOutput,0},
+        {kPongDeviceMute,kAudioObjectPropertyScopeOutput,0}};
+    gHost->PropertiesChanged(gHost,kVolume,2,control);
+    const AudioObjectPropertyAddress mute={kAudioBooleanControlPropertyValue,kAudioObjectPropertyScopeGlobal,0};
+    gHost->PropertiesChanged(gHost,kMute,1,&mute);
+    gHost->PropertiesChanged(gHost,kDevice,3,device);
+}
+
 static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, Boolean *out) {
     (void)d; (void)pid;
     *out = (o == kVolume && (a->mSelector == kAudioLevelControlPropertyScalarValue || a->mSelector == kAudioLevelControlPropertyDecibelValue)) ||
+           (o == kMute && a->mSelector == kAudioBooleanControlPropertyValue) ||
            (o == kOutStream && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat || a->mSelector == kAudioStreamPropertyIsActive)) ||
-           (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate);
+           (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate) || deviceGainProperty(o,a);
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
@@ -175,15 +255,24 @@ static Float32 toDb(Float32 scalar) {return scalar <= 0.0001f ? -96.0f : 20.0f *
 static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, UInt32 qs,
                                 const void *q, UInt32 size, const void *data) {
     (void)d; (void)pid; (void)qs; (void)q;
-    if (o == kVolume && size >= sizeof(Float32)) {
+    if((deviceGainProperty(o,a) && a->mSelector==kPongDeviceMute) ||
+       (o==kMute && a->mSelector==kAudioBooleanControlPropertyValue)) {
+        if(size!=sizeof(UInt32))return kAudioHardwareBadPropertySizeError;
+        UInt32 muted=*(const UInt32 *)data;
+        if(muted>1)return kAudioHardwareIllegalOperationError;
+        atomic_store(&gMuted,muted);if(gControl)__atomic_store_n(&gControl->out_muted,muted,__ATOMIC_RELEASE);gainChanged();return 0;
+    }
+    if (o == kVolume || deviceGainProperty(o,a)) {
+        if(size!=sizeof(Float32))return kAudioHardwareBadPropertySizeError;
         Float32 v = *(const Float32 *)data;
-        if (a->mSelector == kAudioLevelControlPropertyDecibelValue) v = v <= -96.0f ? 0.0f : powf(10.0f, v / 20.0f);
-        else if (a->mSelector != kAudioLevelControlPropertyScalarValue) return kAudioHardwareUnknownPropertyError;
+        if (a->mSelector == kAudioLevelControlPropertyDecibelValue || a->mSelector==kPongDeviceVolumeDecibels)
+            v = v <= -96.0f ? 0.0f : powf(10.0f, v / 20.0f);
+        else if (a->mSelector != kAudioLevelControlPropertyScalarValue && a->mSelector!=kPongDeviceVolumeScalar)
+            return kAudioHardwareUnknownPropertyError;
         if(!isfinite(v))return kAudioHardwareIllegalOperationError;
         gVolume = v < 0 ? 0 : v > 1 ? 1 : v;
-        AudioObjectPropertyAddress changed[2] = {{kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-                                                 {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
-        gHost->PropertiesChanged(gHost, kVolume, 2, changed);
+        if(gControl)__atomic_store_n(&gControl->out_gain_q16,(UInt32)(gVolume*65536.0f),__ATOMIC_RELEASE);
+        gainChanged();
         return 0;
     }
     if(o==kOutStream && a->mSelector==kAudioStreamPropertyIsActive) {
@@ -229,6 +318,7 @@ static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObje
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kVolume;
+        if (scope != kAudioObjectPropertyScopeInput) list[n++] = kMute;
     }
     return n;
 }
@@ -240,7 +330,7 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
     const AudioObjectPropertySelector s = a->mSelector;
     // iOS18 enumerates these lists before accepting a newly discovered
     // device. An empty supported list differs from an unknown property.
-    if(o>=kPlugIn && o<=kVolume &&
+    if(o>=kPlugIn && o<=kMute &&
        (s==kAudioObjectPropertyCustomPropertyInfoList ||
         (o==kPlugIn && (s==kAudioPlugInPropertyBoxList || s==kAudioPlugInPropertyClockDeviceList)) ||
         (o==kOutStream && s=='taps'))) {
@@ -253,6 +343,8 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioPlugInClassID);
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kAudioObjectUnknown);
         case kAudioObjectPropertyManufacturer: REPLY_STR("UniXNU");
+        case kAudioObjectPropertyName: REPLY_STR("Pong Audio");
+        case kAudioPlugInPropertyBundleID: REPLY_STR(kPlugInBundleID);
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
             if (!ready() || inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
@@ -267,10 +359,36 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         }
     case kDevice:
         switch (s) {
+        case kPongDeviceDbRange:
+            if(a->mScope!=kAudioObjectPropertyScopeOutput || a->mElement>2)return kAudioHardwareUnknownPropertyError;
+            REPLY(AudioValueRange,((AudioValueRange){-96.0,0.0}));
+        case kPongDeviceScalarToDb: case kPongDeviceDbToScalar: {
+            if(a->mScope!=kAudioObjectPropertyScopeOutput || a->mElement>2)return kAudioHardwareUnknownPropertyError;
+            if(inDataSize<sizeof(Float32))return kAudioHardwareBadPropertySizeError;
+            Float32 value=*(Float32 *)outData;
+            if(!isfinite(value))return kAudioHardwareIllegalOperationError;
+            if(s==kPongDeviceScalarToDb)value=toDb(value<0?0:value>1?1:value);
+            else value=value<=-96?0:value>=0?1:powf(10.0f,value/20.0f);
+            REPLY(Float32,value);
+        }
+        // Legacy device-volume queries and the native level-control object
+        // must describe the same gain actually applied to PCM, including mute.
+        case kPongDeviceVolumeScalar:
+            if(!deviceGainProperty(o,a))return kAudioHardwareUnknownPropertyError;
+            REPLY(Float32,currentVolume());
+        case kPongDeviceVolumeDecibels:
+            if(!deviceGainProperty(o,a))return kAudioHardwareUnknownPropertyError;
+            REPLY(Float32,toDb(currentVolume()));
+        case kPongDeviceMute:
+            if(!deviceGainProperty(o,a))return kAudioHardwareUnknownPropertyError;
+            REPLY(UInt32,gControl?__atomic_load_n(&gControl->out_muted,__ATOMIC_ACQUIRE):atomic_load(&gMuted));
         case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioObjectClassID);
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioDeviceClassID);
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kPlugIn);
-        case kAudioObjectPropertyName: REPLY_STR("Speaker");
+        // Keep the board's display name separate from its stable UID.
+        // VirtualAudio dispatches Apple's reserved UIDs before transport;
+        // PongAudioDevice remains a generic driver device in 22H374.
+        case kAudioObjectPropertyName: REPLY_STR("Pong Stereo Speakers");
         case kAudioObjectPropertyManufacturer: REPLY_STR("UniXNU");
         case kAudioDevicePropertyDeviceUID: REPLY_STR(kDeviceUID);
         case kAudioDevicePropertyModelUID: REPLY_STR(kModelUID);
@@ -306,21 +424,21 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioDevicePropertyClockIsStable: REPLY(UInt32, 1);
         case kAudioDevicePropertyClockAlgorithm: REPLY(UInt32, kAudioDeviceClockAlgorithmRaw);
         case kAudioDevicePropertyPreferredChannelsForStereo: {
-            if (inDataSize < 2 * sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
-            ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = a->mScope == kAudioObjectPropertyScopeInput ? 1 : 2;
-            *outDataSize = 2 * sizeof(UInt32); return 0;
+            if(a->mScope==kAudioObjectPropertyScopeInput) {*outDataSize=0;return 0;}
+            if(inDataSize<2*sizeof(UInt32))return kAudioHardwareBadPropertySizeError;
+            UInt32 *channels=outData;channels[0]=1;channels[1]=2;
+            *outDataSize=2*sizeof(UInt32);return 0;
         }
         case kAudioDevicePropertyPreferredChannelLayout: {
-            const UInt32 channels = a->mScope == kAudioObjectPropertyScopeInput ? 0 : 2;
-            const UInt32 bytes = (UInt32)(offsetof(AudioChannelLayout, mChannelDescriptions) + channels * sizeof(AudioChannelDescription));
-            if (inDataSize < bytes) return kAudioHardwareBadPropertySizeError;
-            AudioChannelLayout *l = outData;
-            memset(l, 0, bytes);
-            l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
-            l->mNumberChannelDescriptions = channels;
-            if(channels)l->mChannelDescriptions[0].mChannelLabel=kAudioChannelLabel_Left;
-            if (channels == 2) l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
-            *outDataSize = bytes; return 0;
+            const UInt32 channels=a->mScope==kAudioObjectPropertyScopeInput?0:2;
+            const UInt32 bytes=(UInt32)(offsetof(AudioChannelLayout,mChannelDescriptions)+channels*sizeof(AudioChannelDescription));
+            if(inDataSize<bytes)return kAudioHardwareBadPropertySizeError;
+            AudioChannelLayout *layout=outData;memset(layout,0,bytes);
+            layout->mChannelLayoutTag=kAudioChannelLayoutTag_UseChannelDescriptions;
+            layout->mNumberChannelDescriptions=channels;
+            if(channels) {layout->mChannelDescriptions[0].mChannelLabel=kAudioChannelLabel_Left;
+                layout->mChannelDescriptions[1].mChannelLabel=kAudioChannelLabel_Right;}
+            *outDataSize=bytes;return 0;
         }
         case kAudioObjectPropertyOwnedObjects:
         case kAudioDevicePropertyStreams:
@@ -328,8 +446,22 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
             AudioObjectID list[3];
             UInt32 n = objects(kDevice, a->mScope, list), out = 0;
             for (UInt32 i = 0; i < n; ++i) {
-                if (s == kAudioDevicePropertyStreams && list[i] == kVolume) continue;
-                if (s == kAudioObjectPropertyControlList && list[i] != kVolume) continue;
+                if(s==kAudioObjectPropertyOwnedObjects && q && qs) {
+                    if(qs%sizeof(AudioClassID))return kAudioHardwareBadPropertySizeError;
+                    const AudioClassID child=list[i]==kVolume?kAudioVolumeControlClassID:
+                        list[i]==kMute?kAudioMuteControlClassID:kAudioStreamClassID;
+                    const AudioClassID base=list[i]==kVolume?kAudioLevelControlClassID:
+                        list[i]==kMute?kAudioBooleanControlClassID:kAudioObjectClassID;
+                    bool accepted=false;
+                    for(UInt32 k=0;k<qs/sizeof(AudioClassID);k++) {
+                        AudioClassID wanted=((const AudioClassID *)q)[k];
+                        if(wanted==child || wanted==base || wanted==kAudioObjectClassID ||
+                           ((list[i]==kVolume || list[i]==kMute) && wanted==kAudioControlClassID))accepted=true;
+                    }
+                    if(!accepted)continue;
+                }
+                if (s == kAudioDevicePropertyStreams && list[i] != kOutStream) continue;
+                if (s == kAudioObjectPropertyControlList && list[i] == kOutStream) continue;
                 if ((out + 1) * sizeof(AudioObjectID) > inDataSize) break;
                 ((AudioObjectID *)outData)[out++] = list[i];
             }
@@ -344,7 +476,7 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioObjectClassID);
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioStreamClassID);
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
-        case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("Speaker"); REPLY_STR("Microphone");
+        case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("Pong Speaker Output"); REPLY_STR("Microphone");
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
         case kAudioStreamPropertyIsActive: REPLY(UInt32, atomic_load(&gOutActive));
         case kAudioStreamPropertyDirection: REPLY(UInt32, o == kInStream);
@@ -363,14 +495,15 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
     }
     case kVolume:
         switch (s) {
+        case kAudioObjectPropertyName: REPLY_STR("Pong Speaker Volume");
         case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioLevelControlClassID);
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioVolumeControlClassID);
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
         case kAudioControlPropertyScope: REPLY(AudioObjectPropertyScope, kAudioObjectPropertyScopeOutput);
         case kAudioControlPropertyElement: REPLY(AudioObjectPropertyElement, kAudioObjectPropertyElementMain);
-        case kAudioLevelControlPropertyScalarValue: REPLY(Float32, gVolume);
-        case kAudioLevelControlPropertyDecibelValue: REPLY(Float32, toDb(gVolume));
+        case kAudioLevelControlPropertyScalarValue: REPLY(Float32, currentVolume());
+        case kAudioLevelControlPropertyDecibelValue: REPLY(Float32, toDb(currentVolume()));
         case kAudioLevelControlPropertyDecibelRange: REPLY(AudioValueRange, ((AudioValueRange){-96.0, 0.0}));
         case kAudioLevelControlPropertyConvertScalarToDecibels:
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
@@ -379,6 +512,19 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
             *(Float32 *)outData = *(Float32 *)outData <= -96.0f ? 0.0f : powf(10.0f, *(Float32 *)outData / 20.0f); *outDataSize = sizeof(Float32); return 0;
         default: return kAudioHardwareUnknownPropertyError;
+        }
+    case kMute:
+        switch(s) {
+        case kAudioObjectPropertyName: REPLY_STR("Pong Speaker Mute");
+        case kAudioObjectPropertyBaseClass: REPLY(AudioClassID,kAudioBooleanControlClassID);
+        case kAudioObjectPropertyClass: REPLY(AudioClassID,kAudioMuteControlClassID);
+        case kAudioObjectPropertyOwner: REPLY(AudioObjectID,kDevice);
+        case kAudioObjectPropertyOwnedObjects: *outDataSize=0;return 0;
+        case kAudioControlPropertyScope: REPLY(AudioObjectPropertyScope,kAudioObjectPropertyScopeOutput);
+        case kAudioControlPropertyElement: REPLY(AudioObjectPropertyElement,kAudioObjectPropertyElementMain);
+        case kAudioBooleanControlPropertyValue:
+            REPLY(UInt32,gControl?__atomic_load_n(&gControl->out_muted,__ATOMIC_ACQUIRE):atomic_load(&gMuted));
+        default:return kAudioHardwareUnknownPropertyError;
         }
     default:
         return kAudioHardwareBadObjectError;
@@ -452,9 +598,17 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
     if (!ready()) return kAudioHardwareNotRunningError;
     // HAL queries this clock while discovering an idle device too. The
     // shared anchor is established when the physical service is published.
-    uint32_t seq;
-    uint64_t anchor;
-    do {seq = gControl->out_seq; anchor = gControl->out_anchor_host;} while ((seq & 1) || seq != gControl->out_seq);
+    uint32_t seq=0;
+    uint64_t anchor=0;
+    bool stable=false;
+    for(unsigned attempt=0;attempt<128;attempt++) {
+        seq=__atomic_load_n(&gControl->out_seq,__ATOMIC_ACQUIRE);
+        if(seq&1)continue;
+        anchor=__atomic_load_n(&gControl->out_anchor_host,__ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if(seq==__atomic_load_n(&gControl->out_seq,__ATOMIC_RELAXED)){stable=true;break;}
+    }
+    if(!stable)return kAudioHardwareNotRunningError;
     const uint64_t now = mach_absolute_time();
     const Float64 period = gHostTicksPerFrame * SHENG_AUDIO_RING_FRAMES;
     const uint64_t origin=anchor+(uint64_t)((Float64)gZeroOrigin*gHostTicksPerFrame);
@@ -481,7 +635,8 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
     if (op == kAudioServerPlugInIOOperationWriteMix && stream == kOutStream) {
         const Float32 *src = main;
         uint64_t t = (uint64_t)info->mOutputTime.mSampleTime;
-        const Float32 gain = gVolume;
+        const bool muted=gControl?__atomic_load_n(&gControl->out_muted,__ATOMIC_ACQUIRE)!=0:atomic_load(&gMuted)!=0;
+        const Float32 gain=muted?0.0f:currentVolume();
         const Boolean active = atomic_load(&gOutActive);
         for (UInt32 i = 0; i < frames; ++i, ++t) {
             int16_t *dst = gOut + 2 * (t % SHENG_AUDIO_RING_FRAMES);
@@ -529,5 +684,11 @@ __attribute__((visibility("default"))) void *PongAudio_Create(CFAllocatorRef all
         mach_timebase_info(&tb);
         gHostTicksPerFrame = 1e9 / kRate * tb.denom / tb.numer;
     }
+    // Prepare an already-existing physical endpoint before handing out its
+    // interface. Darwin24 may query DeviceList on the factory interface;
+    // an empty initial list must not hide a service that was ready all along.
+    // Registry lookup is nonwaiting, graph/stream start stays in StartIO,
+    // and the host callback is not used until Initialize supplies it.
+    pthread_mutex_lock(&gLock);(void)connectService();pthread_mutex_unlock(&gLock);
     return &gInterfacePtr;
 }

@@ -99,6 +99,7 @@ typedef struct {
     uint32_t handle;                 /* AR_OP_MEM_MAP_DONE */
     uint64_t address;                /* write/read done: the buffer */
     uint32_t data_bytes;             /* read done: bytes filled */
+    uint32_t offset;                 /* READ_DONE_V2: offset within returned buffer */
 } ArAnswer;
 enum {ArUnknown = 0, ArBasicResult = 1, ArMapped = 2, ArWriteDone = 3, ArReadDone = 4, ArFrameworkState = 5, ArPrmDone = 6, ArBad = -1};
 int ar_parse(const uint8_t *in, uint32_t length, ArAnswer *a);

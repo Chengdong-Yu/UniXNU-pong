@@ -152,7 +152,11 @@ not Sheng's 0x14220/0x14224. The supplied DT declares 21 context banks and
   clock setup, GCC and GPUCC branches. Parent clocks/votes and exclusive
   stopped-master ownership are prerequisites. No A740 PLL program is reused.
 - `PongAdrenoGmuStartPower`: real matching-ACK PERF -> BW -> CORE_FW_START
-  -> default blocking GX/BW vote after actual HFI readiness. Vendor START10
+  -> selected blocking GX/BW vote after actual HFI readiness. Darwin24 defaults
+  to `pong_gpu_pwrlevel=0` (Pong DT 900 MHz, DDR index11); `=11` restores
+  the previous 285 MHz request. Frequency, ARC dependencies and bandwidth
+  remain paired; GMU acknowledgement is not a measurement of actual frequency.
+  Vendor START10
   belongs later in GPU boot before OOB_GPU, not in this cold HFI sequence.
 - `PongAdrenoZap.c`: structural split ELF32 MDT planner and actual PAS13
   shutdown/init/mem-setup/auth-reset flow through a bounded SCM adapter.

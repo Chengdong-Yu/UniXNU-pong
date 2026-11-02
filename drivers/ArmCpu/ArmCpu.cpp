@@ -29,7 +29,23 @@ volatile uint64_t armcpu_timer_interrupts, armcpu_ipi_interrupts;
 volatile uint32_t armcpu_gic_boot[8], armcpu_gic_typer_probe[2], armcpu_gic_stride;
 volatile uint32_t armcpu_controller_attached, armcpu_controller_published;
 volatile uint64_t armcpu_cntv_state[5];
+/* Read-only feature evidence; key writes/instruction execution are separate
+ * arm64e prerequisites. Never advertise PAC from these registers alone. */
+volatile uint64_t armcpu_pac_features[8][3];
 }
+
+#if PONG_DARWIN_MAJOR >= 24
+/* Pure scheduler hint: logical IDs follow the selected Pong DT's sorted
+ * MPIDRs. Keep the 4+3+1 board knowledge out of the generic scheduler.
+ * An occupied/offline/unrecommended core is absent from the supplied map;
+ * this never binds a thread or removes any of the eight eligible CPUs. */
+extern "C" uint64_t pong_cpu_preferred_idle_mask(uint64_t available)
+{
+  if (available & (1ULL << 7)) return available & (1ULL << 7); // Cortex-X2
+  if (available & 0x70ULL) return available & 0x70ULL;         // Cortex-A710
+  return available;                                         // Cortex-A510
+}
+#endif
 
 static uint64_t gRedistStride;
 static const uint32_t kSgiPpiEnable = 1U | (1U << 27);
@@ -349,6 +365,11 @@ bool ArmCpu::start(IOService *provider)
   for (unsigned i=0; i<ml_get_cpu_count(); i++) {
     pong_cpu_first_boot_wait(gCpus[i]->machProcessor);
     IOLog("ArmCpu: CPU %u first boot completed\n", i);
+    const uint64_t isar1=armcpu_pac_features[i][0],isar2=armcpu_pac_features[i][1];
+    const bool address=((isar1>>4)&15) || ((isar1>>8)&15) || ((isar2>>12)&15);
+    const bool generic=((isar1>>24)&15) || ((isar1>>28)&15) || ((isar2>>8)&15);
+    IOLog("ArmCpu: CPU %u PAC features ISAR1=%#llx ISAR2=%#llx SCTLR=%#llx address=%u generic=%u key-access=not-probed\n",
+        i,isar1,isar2,armcpu_pac_features[i][2],address,generic);
   }
   ml_cpu_init_completed();
 #else
@@ -380,6 +401,7 @@ bool ArmCpu::start(IOService *provider)
       ctl, cval, now, frequency, daif, armcpu_timer_interrupts);
 #if PONG_DARWIN_MAJOR >= 24
   PongCpuPolicy::start();
+  IOLog("ArmCpu: all registered CPUs available; idle preference X2, A710, A510 (no affinity binding)\n");
 #endif
   return true;
 }
@@ -387,6 +409,14 @@ bool ArmCpu::start(IOService *provider)
 void ArmCpu::initCPU(bool boot)
 {
   (void)boot; // XNU passes true for the first initialization of each CPU.
+  if(logicalId<8) {
+    uint64_t isar1,isar2,sctlr;
+    __asm__ volatile("mrs %0, id_aa64isar1_el1":"=r"(isar1));
+    __asm__ volatile("mrs %0, S3_0_C0_C6_2":"=r"(isar2));
+    __asm__ volatile("mrs %0, sctlr_el1":"=r"(sctlr));
+    armcpu_pac_features[logicalId][0]=isar1;armcpu_pac_features[logicalId][1]=isar2;
+    armcpu_pac_features[logicalId][2]=sctlr;
+  }
   if (logicalId != static_cast<uint32_t>(ml_get_boot_cpu_number())) {
     if (!wakeRedistributor(true)) panic("ArmCpu: CPU %u redistributor did not wake", logicalId);
   }

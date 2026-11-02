@@ -35,3 +35,7 @@ services61 实际 panic 证明 AppleARMPlatform 随后会注册 `AppleARMBacklig
 - NothingOSS 版本 `c402fcdb3a1523d10b15ef1123bced45456f7592` 的 [dsi_panel.c](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/blob/c402fcdb3a1523d10b15ef1123bced45456f7592/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_panel.c)、[dsi_ctrl_hw_cmn.c](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/blob/c402fcdb3a1523d10b15ef1123bced45456f7592/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_ctrl_hw_cmn.c)、`dsi_ctrl_reg.h` 和 `drivers/gpu/drm/drm_mipi_dsi.c`：Pong 编码、FIFO、BTA、状态及寄存器事实。本实现为本项目的工作循环传输，没有引入 Linux 运行时依赖。
 
 已完成编译并按用户后续指令临时启动，Fastboot Sending/Booting 均为 OKAY；尚待确认滑块、最低/中间/最高亮度及面板回读。
+
+DCS GET_DISPLAY_BRIGHTNESS 的双字节值按高字节、低字节解码。services87 的实际写入 `00 b4` 对应回包 `22 00 b4`，确认旧 little-endian 推断错误。固件初始 `22 20 00` 保留原始读数 8192，发布给系统的控制值按声明的 0–4095 范围限制；原始读数单独记录，不能交换字节来让读数落入范围。退休后的错误回包保留错误、允许后续滑块请求；DMA 归属不明确时继续保护 FIFO，不复用未完成事务。
+
+services84 的面板双字节回读已通过，随后 backboardd 在 22H374 CoreBrightness 默认映射尚未分配时崩溃。配套 `ui_compat18.c` 只在真实 NT37705 服务存在、目标 CoreBrightness 身份匹配且映射为空的初始化窗口，使用同一运行时自带的软件默认曲线；映射建立后恢复原函数。它不代替面板光度校准。详见 `migration/ipados18/services85-backlight-startup.md`。

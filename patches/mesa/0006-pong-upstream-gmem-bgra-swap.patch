@@ -1,0 +1,298 @@
+diff --git a/src/freedreno/fdl/fd6_view.cc b/src/freedreno/fdl/fd6_view.cc
+index 67f2095..c56a830 100644
+--- a/src/freedreno/fdl/fd6_view.cc
++++ b/src/freedreno/fdl/fd6_view.cc
+@@ -537,7 +537,12 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+       tile_mode == TILE6_LINEAR && args->base_miplevel != layout->mip_levels - 1;
+ 
+    view->ubwc_enabled = ubwc_enabled;
+-   view->is_mutable = layout->is_mutable;
++   /* Mutability changes how a tiled image's swap is stored (MUTABLEEN above, only set for TILE6_3). A linear image keeps its
++    * swap in memory whatever its formats, so it is not mutable for the code that loads and stores it through tile memory
++    * (tu_clear_blit.cc and the GMEM input attachments of tu_cmd_buffer.cc take the swap and MUTABLEEN for a mutable view): it
++    * swapped the tile's red and blue once more on the way to memory.
++    */
++   view->is_mutable = is_mutable;
+    view->color_swap = color_swap;
+ 
+    view->RB_MRT_BUF_INFO =
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+index ce3eca9..898a304 100644
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -206,6 +206,32 @@ format_to_ifmt(enum pipe_format format)
+    }
+ }
+ 
++/* Tile memory holds a colour as the shader wrote it, whatever swap its image has in memory, so a load or store reads and writes
++ * it with the identity swap. Per site (tu_gmem_side_stats): [0] transfers, [1] of them with a swap other than WZYX on the tile
++ * side, [2] with MUTABLEEN, [3] of a linear image in memory. [1] is the counter that must stay zero for linear images.
++ */
++static uint64_t tu_gmem_side_counts[4][4];
++
++void
++tu_note_gmem_side(unsigned site, bool linear, bool mutableen, unsigned swap)
++{
++   p_atomic_inc(&tu_gmem_side_counts[site][0]);
++   if (swap != WZYX)
++      p_atomic_inc(&tu_gmem_side_counts[site][1]);
++   if (mutableen)
++      p_atomic_inc(&tu_gmem_side_counts[site][2]);
++   if (linear)
++      p_atomic_inc(&tu_gmem_side_counts[site][3]);
++}
++
++extern "C" __attribute__((visibility("default"))) void tu_gmem_side_stats(uint64_t out[16]);
++extern "C" __attribute__((visibility("default"))) void
++tu_gmem_side_stats(uint64_t out[16])
++{
++   for (unsigned i = 0; i < 16; i++)
++      out[i] = p_atomic_read(&tu_gmem_side_counts[i / 4][i % 4]);
++}
++
+ template <chip CHIP>
+ static struct tu_native_format
+ blit_format_texture(enum pipe_format format, enum a6xx_tile_mode tile_mode, bool is_mutable, bool gmem)
+@@ -543,12 +569,27 @@ r2d_src_buffer_unaligned(struct tu_cmd_buffer *cmd,
+                    TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = pitch));
+ }
+ 
++/* GMEM holds a colour in the byte order its render target writes it in: a linear image's MRT swap (WXYZ for BGRA) is already applied
++ * there, as system memory rendering writes it. A load or a store therefore moves the bytes as they are, with the identity swap on the
++ * memory side too; the image's own swap on top exchanged red and blue against what system memory rendering writes (a frame mixing
++ * both modes: the wallpaper of the lock screen 51 % exchanged in i-batch, centre redrawn in system memory correct). A mutable tiled
++ * image (MUTABLEEN) keeps its swap.
++ */
++static inline uint32_t
++tu_gmem_transfer_swap_fixup(uint32_t info, uint32_t swap_mask, uint32_t identity, bool mutable_view)
++{
++   return mutable_view ? info : ((info & ~swap_mask) | identity);
++}
++
+ template <chip CHIP>
+ static void
+-r2d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
+-        enum pipe_format src_format)
++r2d_dst_impl(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
++             enum pipe_format src_format, bool gmem_transfer)
+ {
+    uint32_t dst_info = iview->RB_A2D_DEST_BUFFER_INFO;
++   if (gmem_transfer)
++      dst_info = tu_gmem_transfer_swap_fixup(dst_info, A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_SWAP__MASK,
++                                             A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_SWAP(WZYX), iview->is_mutable);
+    enum a6xx_format fmt = (enum a6xx_format) pkt_field_get(
+       A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_FORMAT, dst_info);
+    enum pipe_format dst_format = iview->format;
+@@ -563,6 +604,14 @@ r2d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
+    tu_cs_image_flag_ref(cs, iview, layer);
+ }
+ 
++template <chip CHIP>
++static void
++r2d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
++        enum pipe_format src_format)
++{
++   r2d_dst_impl<CHIP>(cs, iview, layer, src_format, false);
++}
++
+ static void
+ r2d_dst_depth(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
+ {
+@@ -1594,6 +1643,7 @@ r3d_src_gmem_load(struct tu_cmd_buffer *cmd,
+                   const struct tu_image_view *iview,
+                   uint32_t layer)
+ {
++   tu_note_gmem_side(1, iview->image->layout[0].tile_mode == TILE6_LINEAR, false, WZYX);
+    r3d_src_load<CHIP>(cmd, cs, iview, layer, VK_FILTER_NEAREST, true);
+ }
+ 
+@@ -1631,6 +1681,8 @@ r3d_src_gmem(struct tu_cmd_buffer *cmd,
+ 
+    if (!iview->view.is_mutable)
+       tu_desc_set_swap<CHIP>(desc, WZYX);
++   tu_note_gmem_side(0, iview->image->layout[0].tile_mode == TILE6_LINEAR, false,
++                     iview->view.is_mutable ? iview->view.color_swap : WZYX);
+ 
+    /* If FDM offset is used, the last row and column extend beyond the
+     * framebuffer but are shifted over when storing. Expand the width and
+@@ -1672,10 +1724,13 @@ r3d_src_gmem(struct tu_cmd_buffer *cmd,
+ 
+ template <chip CHIP>
+ static void
+-r3d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
+-        enum pipe_format src_format)
++r3d_dst_impl(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
++             enum pipe_format src_format, bool gmem_transfer)
+ {
+    uint32_t mrt_buf_info = iview->RB_MRT_BUF_INFO;
++   if (gmem_transfer)
++      mrt_buf_info = tu_gmem_transfer_swap_fixup(mrt_buf_info, A6XX_RB_MRT_BUF_INFO_COLOR_SWAP__MASK,
++                                                 A6XX_RB_MRT_BUF_INFO_COLOR_SWAP(WZYX), iview->is_mutable);
+ 
+    enum a6xx_format fmt = (enum a6xx_format) pkt_field_get(
+       A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT, mrt_buf_info);
+@@ -1705,6 +1760,14 @@ r3d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
+       tu_cs_emit_regs(cs, GRAS_SU_RENDER_CNTL(CHIP));
+ }
+ 
++template <chip CHIP>
++static void
++r3d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
++        enum pipe_format src_format)
++{
++   r3d_dst_impl<CHIP>(cs, iview, layer, src_format, false);
++}
++
+ template <chip CHIP>
+ static void
+ r3d_dst_depth(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
+@@ -1792,6 +1855,8 @@ r3d_dst_gmem(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+    } else {
+       RB_MRT_BUF_INFO = iview->view.RB_MRT_BUF_INFO;
+       gmem_offset = tu_attachment_gmem_offset(cmd, att, layer);
++      RB_MRT_BUF_INFO = tu_gmem_transfer_swap_fixup(RB_MRT_BUF_INFO, A6XX_RB_MRT_BUF_INFO_COLOR_SWAP__MASK,
++                                                    A6XX_RB_MRT_BUF_INFO_COLOR_SWAP(WZYX), iview->view.is_mutable);
+    }
+ 
+    /* On a7xx we must always use FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8. See
+@@ -2339,7 +2404,8 @@ event_blit_run(struct tu_cmd_buffer *cmd,
+                struct tu_cs *cs,
+                const struct tu_render_pass_attachment *att,
+                const event_blit_dst_view *blt_view,
+-               bool separate_stencil)
++               bool separate_stencil,
++               bool gmem_transfer = false)
+ {
+    tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO, 4);
+    if (blt_view->image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+@@ -2357,7 +2423,12 @@ event_blit_run(struct tu_cmd_buffer *cmd,
+          tu_cs_emit(cs, A6XX_RB_RESOLVE_SYSTEM_BUFFER_PITCH(blt_view->stencil_pitch).value);
+       }
+    } else {
+-      tu_cs_emit(cs, blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO);
++      tu_cs_emit(cs, gmem_transfer ?
++                        tu_gmem_transfer_swap_fixup(blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO,
++                                                    A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_COLOR_SWAP__MASK,
++                                                    A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_COLOR_SWAP(WZYX),
++                                                    blt_view->view->is_mutable) :
++                        blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO);
+       tu_cs_image_ref_2d<CHIP>(cs, blt_view->view, blt_view->layer, false);
+ 
+       tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_SYSTEM_FLAG_BUFFER_BASE, 3);
+@@ -2784,6 +2855,34 @@ copy_compressed(VkFormat format,
+       *height = DIV_ROUND_UP(*height, block_height);
+ }
+ 
++/* Telemetry for the copies that need a row-by-row path (tu_copy_row_stats). [0] buffer to image copies, [1] those split into one blit per row, [2] their
++ * rows, [3] image to buffer copies, [4] those split per row, [5] their rows, [6] rows of the largest split copy, [7] its pitch in bytes,
++ * [8] its width | height << 32, [9] its VkFormat. A copy is counted per layer. */
++static uint64_t tu_copy_row_counters[16];
++static void
++tu_note_copy_rows(unsigned kind, bool split, uint32_t rows, uint32_t pitch, uint32_t width, uint32_t height, uint32_t format)
++{
++   uint64_t *c = tu_copy_row_counters + kind * 3;
++   __atomic_fetch_add(&c[0], 1, __ATOMIC_RELAXED);
++   if (!split)
++      return;
++   __atomic_fetch_add(&c[1], 1, __ATOMIC_RELAXED);
++   __atomic_fetch_add(&c[2], rows, __ATOMIC_RELAXED);
++   if (rows > tu_copy_row_counters[6]) {
++      tu_copy_row_counters[6] = rows;
++      tu_copy_row_counters[7] = pitch;
++      tu_copy_row_counters[8] = (uint64_t)height << 32 | width;
++      tu_copy_row_counters[9] = format;
++   }
++}
++extern "C" __attribute__((visibility("default"))) void tu_copy_row_stats(uint64_t out[16]);
++extern "C" void
++tu_copy_row_stats(uint64_t out[16])
++{
++   for (unsigned i = 0; i < 16; i++)
++      out[i] = __atomic_load_n(&tu_copy_row_counters[i], __ATOMIC_RELAXED);
++}
++
+ template <chip CHIP>
+ static void
+ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
+@@ -2841,6 +2940,7 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
+ 
+       uint64_t src_va = vk_buffer_address(&src_buffer->vk, info->bufferOffset) + layer_size * i;
+       bool unaligned = (src_va & 63) || (pitch & 63);
++      tu_note_copy_rows(0, !has_unaligned && unaligned, extent.height, pitch, extent.width, extent.height, dst_image->vk.format);
+       if (!has_unaligned && unaligned) {
+          for (uint32_t y = 0; y < extent.height; y++) {
+             uint32_t x = (src_va & 63) / block_size;
+@@ -3064,6 +3164,7 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
+       ops->src(cmd, cs, &src, i, VK_FILTER_NEAREST, dst_format);
+ 
+       uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, info->bufferOffset) + layer_size * i;
++      tu_note_copy_rows(1, (dst_va & 63) || (pitch & 63), extent.height, pitch, extent.width, extent.height, src_image->vk.format);
+       if ((dst_va & 63) || (pitch & 63)) {
+          for (uint32_t y = 0; y < extent.height; y++) {
+             uint32_t x = (dst_va & 63) / block_size;
+@@ -5523,7 +5624,7 @@ tu_emit_blit(struct tu_cmd_buffer *cmd,
+          tu6_emit_blit_scissor(cmd, cs, i, align_scissor);
+       }
+       event_blit_dst_view blt_view = blt_view_from_tu_view(iview, i);
+-      event_blit_run<CHIP>(cmd, cs, attachment, &blt_view, separate_stencil);
++      event_blit_run<CHIP>(cmd, cs, attachment, &blt_view, separate_stencil, true);
+    }
+ 
+    tu_flush_for_access(&cmd->state.cache, TU_ACCESS_BLIT_WRITE_GMEM,
+@@ -5839,7 +5940,7 @@ store_cp_blit(struct tu_cmd_buffer *cmd,
+          r2d_dst_stencil(cs, dst_iview, layer);
+       }
+    } else {
+-      r2d_dst<CHIP>(cs, &dst_iview->view, layer, src_format);
++      r2d_dst_impl<CHIP>(cs, &dst_iview->view, layer, src_format, true);
+    }
+ 
+    /* Note: we compute the swap here instead of using the color_swap as
+@@ -5867,6 +5968,8 @@ store_cp_blit(struct tu_cmd_buffer *cmd,
+       src_height += tiling->tile0.height;
+    }
+ 
++   tu_note_gmem_side(2, dst_iview->image->layout[0].tile_mode == TILE6_LINEAR, src_iview->view.is_mutable, fmt.swap);
++
+    uint64_t va = gmem_offset;
+    if (CHIP < A8XX) {
+       /* For gen8, address is simply gmem_offset if tile_mode is gmem
+@@ -5957,7 +6060,7 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
+          r3d_dst_stencil<CHIP>(cs, dst_iview, layer);
+       }
+    } else {
+-      r3d_dst<CHIP>(cs, &dst_iview->view, layer, src_format);
++      r3d_dst_impl<CHIP>(cs, &dst_iview->view, layer, src_format, true);
+    }
+ 
+    r3d_src_gmem<CHIP>(cmd, cs, src_iview, src_format, dst_format, gmem_offset, cpp);
+diff --git a/src/freedreno/vulkan/tu_clear_blit.h b/src/freedreno/vulkan/tu_clear_blit.h
+index 62d1e43..7d59dc3 100644
+--- a/src/freedreno/vulkan/tu_clear_blit.h
++++ b/src/freedreno/vulkan/tu_clear_blit.h
+@@ -103,6 +103,12 @@ tu_choose_gmem_layout(struct tu_cmd_buffer *cmd);
+ bool
+ tu_attachment_unpadded(struct tu_cmd_buffer *cmd, const struct tu_image_view *iview);
+ 
++/* Telemetry of the tile-memory side of GMEM loads and stores (tu_gmem_side_stats): site 0 a 3D store's source, 1 a 3D load's source,
++ * 2 a 2D store's source, 3 an input attachment read from tile memory.
++ */
++void
++tu_note_gmem_side(unsigned site, bool linear, bool mutableen, unsigned swap);
++
+ void
+ tu_cmd_fill_buffer_addr(VkCommandBuffer commandBuffer,
+                         VkDeviceAddress dstAddr,
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 33a22aa..bc779a7 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -2899,6 +2901,8 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
+ 
+       if (!iview->view.is_mutable)
+          tu_desc_set_swap<CHIP>(dst, WZYX);
++      tu_note_gmem_side(3, iview->image->layout[0].tile_mode == TILE6_LINEAR, false,
++                        iview->view.is_mutable ? iview->view.color_swap : WZYX);
+ 
+       /* If FDM offset is used, the last row and column extend beyond the
+        * framebuffer but are shifted over when storing. Expand the width and

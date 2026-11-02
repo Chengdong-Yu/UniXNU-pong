@@ -32,6 +32,9 @@ enum {
     NativeAdrenoMethodGetDeviceInfo = 15,
     NativeAdrenoMethodBoImport = 16,
     NativeAdrenoMethodSubmitBatch = 17,
+    NativeAdrenoMethodSetPriority = 18,
+    NativeAdrenoMethodSyncHostRange = 19,
+    NativeAdrenoMethodSyncHostBatch = 20,
     NativeAdrenoAbiMetadataBytes = 64,
     NativeAdrenoAbiMaxQueues = 8
 };
@@ -44,7 +47,11 @@ struct NativeAdrenoAbiParams {
 };
 enum {
     NativeAdrenoParamsHostImport = 1, /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
-    NativeAdrenoParamsSubmitBatch = 2 /* Method17 accepts one atomic 128-IB batch; method5 stays unchanged */
+    NativeAdrenoParamsSubmitBatch = 2, /* Method17 remains the atomic128-IB extension. */
+    NativeAdrenoParamsPriority = 4, /* Pong ABI1 method18, never upstream ABI2 method17. */
+    NativeAdrenoParamsExplicitHostSync = 8,
+    NativeAdrenoParamsExplicitHostAcquire = 16,
+    NativeAdrenoParamsHostSyncBatch = 32
 };
 struct NativeAdrenoAbiBoAlloc {
     uint64_t bytes;               /* 4KiB multiple, <= max_bo_bytes */
@@ -96,6 +103,23 @@ struct NativeAdrenoAbiSubmitBatch {
     uint64_t queue,wait_fence,wait_timeout_ns;
     NativeAdrenoAbiSubmitBuffer buffers[NativeAdrenoAbiMaxBatchBuffers];
 };
+struct NativeAdrenoAbiPriority {uint32_t foreground,background;};
+/* Opt-in, full-import cache ownership contract. Phase0 publishes, phase1
+ * acquires after actual GPU completion. Phase2 publishes and opts into
+ * explicit acquire when separately negotiated with flag16. Imports not
+ * participating retain conservative per-submit/per-completion maintenance.
+ * Only this connection's retained imported pages inside the supplied range
+ * are touched. No arbitrary user/kernel address cache operation. */
+struct NativeAdrenoAbiSyncHostRange {uint64_t address,bytes;uint32_t after,reserved;};
+/* Same ownership contract as method19, up to64 retained host ranges in one
+ * gate/entry-table pass. A reply bit proves complete coverage of that range;
+ * uncovered ranges retain the caller's conservative CPU maintenance. */
+struct NativeAdrenoAbiHostRange {uint64_t address,bytes;};
+struct NativeAdrenoAbiSyncHostBatch {
+    uint32_t count,after;
+    NativeAdrenoAbiHostRange ranges[64];
+};
+struct NativeAdrenoAbiSyncHostBatchReply {uint64_t covered,bytes,elapsed_us;};
 struct NativeAdrenoAbiMetadata {
     uint64_t handle;              /* object identity */
     uint32_t bytes;               /* set: length; get: requested capacity */

@@ -10,6 +10,7 @@
 [Sources]
   DarwinBoot.c
   PackedRamdisk.h
+  UsbOwnership.h
   BootArgs.h
   BootVideo.h
   DiagFont.h
@@ -34,6 +35,7 @@
   gEfiSimpleFileSystemProtocolGuid ## CONSUMES
   gEfiLoadedImageProtocolGuid ## CONSUMES
   gEfiGraphicsOutputProtocolGuid ## CONSUMES
+  gEfiUsbFunctionIoProtocolGuid ## CONSUMES
 
 [Guids]
   gEfiFileInfoGuid

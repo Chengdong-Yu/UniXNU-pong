@@ -14,12 +14,17 @@
 #include <errno.h>
 #include <mach/mach_time.h>
 #include <notify.h>
+#include <signal.h>
+#include <limits.h>
 #include "touch.h"
 #define say(...) fprintf(stderr,__VA_ARGS__)
 /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef struct __IOHIDServiceClient *IOHIDServiceClientRef;
+typedef struct __IOHIDUserDevice *IOHIDUserDeviceRef;
+static IOHIDUserDeviceRef (*IOHIDUserDeviceCreate)(CFAllocatorRef,CFDictionaryRef);
+static int (*IOHIDUserDeviceHandleReportWithTimeStamp)(IOHIDUserDeviceRef,uint64_t,const uint8_t *,CFIndex);
 
 /* IOHIDVirtualServiceClientCallbacksV2 */
 struct virtual_service_callbacks {
@@ -361,44 +366,60 @@ buttons_thread(void *unused)
         if (!keys) CFRelease(client);
     }
     if (!keys) {say("Pong keys HID: event server unavailable; SKIP\n");close(fd);return NULL;}
-    say("Pong keys HID: physical side/volume consumer opened\n");
+    // Let the stock event driver parse the real PMIC Consumer reports.
+    // Do not declare a QWERTY keyboard/modifiers: iPadOS treats that as a
+    // connected hardware keyboard and suppresses the on-screen keyboard.
+    // Consumer elements still dispatch the native volume-key events.
+    static const uint8_t descriptor[]={
+        0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x02,
+        0x09,0xe9,0x09,0xea,0x15,0x00,0x25,0x01,
+        0x75,0x01,0x95,0x02,0x81,0x02,0x75,0x06,0x95,0x01,0x81,0x03,0xc0
+    };
+    IOHIDUserDeviceRef volume=NULL;
+    if(IOHIDUserDeviceCreate && IOHIDUserDeviceHandleReportWithTimeStamp) {
+        CFMutableDictionaryRef properties=CFDictionaryCreateMutable(NULL,0,
+            &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        CFDataRef report=CFDataCreate(NULL,descriptor,sizeof(descriptor));
+        if(properties && report) {
+            CFDictionarySetValue(properties,CFSTR("ReportDescriptor"),report);
+            CFDictionarySetValue(properties,CFSTR("Built-In"),kCFBooleanTrue);
+            CFDictionarySetValue(properties,CFSTR("HIDDefaultBehavior"),kCFBooleanTrue);
+            CFDictionarySetValue(properties,CFSTR("Transport"),CFSTR("SPMI"));
+            CFDictionarySetValue(properties,CFSTR("Product"),CFSTR("Pong PMIC volume keys"));
+            CFDictionarySetValue(properties,CFSTR("Manufacturer"),CFSTR("Pong"));
+            volume=IOHIDUserDeviceCreate(NULL,properties);
+        }
+        if(report)CFRelease(report);
+        if(properties)CFRelease(properties);
+    }
+    say("Pong keys HID: physical side consumer opened; volume report device=%s\n",volume?"native":"unavailable, consumer events retained");
     struct pong_touch sample;ssize_t n;unsigned held=0;
-    int ready=-1,volume_tokens[2]={-1,-1};uint64_t volume_counts[2]={0,0};
-    (void)notify_register_check("dev.unixnu.pong.volume18.ready",&ready);
-    (void)notify_register_check("dev.unixnu.pong.volume18.increase",&volume_tokens[0]);
-    (void)notify_register_check("dev.unixnu.pong.volume18.decrease",&volume_tokens[1]);
     const uint32_t usages[]={HID_USAGE_POWER,HID_USAGE_VOLUME_UP,HID_USAGE_VOLUME_DOWN};
     while ((n=read(fd,&sample,sizeof(sample)))>0 || (n<0 && errno==EINTR)) {
         if (n<0) continue;
         if (n!=(ssize_t)sizeof(sample) || sample.finger>=3 ||
             (sample.type!=PONG_BUTTON_DOWN && sample.type!=PONG_BUTTON_UP)) continue;
         bool down=sample.type==PONG_BUTTON_DOWN;
-        uint64_t native_ready=0;
-        if (sample.finger && ready>=0 && !notify_get_state(ready,&native_ready) && native_ready==1 &&
-            volume_tokens[sample.finger-1]>=0) {
-            // Darwin24 accepted the consumer HID report but did not dispatch
-            // its volume action on this imported iPad board. Deliver only
-            // volume transitions to SpringBoard's actual volume controller.
-            // A press counter preserves a short click if notify coalesces
-            // its down/up pair; power remains on the working HID route.
-            unsigned index=sample.finger-1;
-            if(down)volume_counts[index]++;
-            uint64_t state=(volume_counts[index]<<1)|(unsigned)down;
-            if(!notify_set_state(volume_tokens[index],state) &&
-               !notify_post(index?"dev.unixnu.pong.volume18.decrease":"dev.unixnu.pong.volume18.increase")) {
-                say("Pong keys18: volume=%u down=%u native action queued\n",index,down);
-                continue;
-            }
+        if (down) held|=1u<<sample.finger;else held&=~(1u<<sample.finger);
+        if(sample.finger && volume) {
+            const uint8_t report[]={2,(uint8_t)((held>>1)&3)};
+            int result=IOHIDUserDeviceHandleReportWithTimeStamp(volume,sample.time,report,sizeof(report));
+            say("Pong keys HID: PMIC volume report=%u result=%#x\n",report[1],result);
+            continue;
         }
         IOHIDEventRef event=IOHIDEventCreateKeyboardEvent(NULL,sample.time,HID_PAGE_CONSUMER,
             usages[sample.finger],down,0);
         if (!event) continue;
         IOHIDEventSetIntegerValue(event,FIELD_IS_BUILT_IN,1);
         Boolean sent=IOHIDVirtualServiceClientDispatchEvent(keys,event);CFRelease(event);
-        if (down) held|=1u<<sample.finger;else held&=~(1u<<sample.finger);
         say("Pong keys HID: key=%u down=%u sent=%u\n",sample.finger,down,sent);
     }
-    for (unsigned i=0;i<3;i++) if (held&(1u<<i)) {
+    if(volume) {
+        const uint8_t release[]={2,0};
+        IOHIDUserDeviceHandleReportWithTimeStamp(volume,mach_absolute_time(),release,sizeof(release));
+        CFRelease(volume);
+    }
+    for (unsigned i=0;i<3;i++) if ((held&(1u<<i)) && (!volume || !i)) {
         IOHIDEventRef up=IOHIDEventCreateKeyboardEvent(NULL,mach_absolute_time(),HID_PAGE_CONSUMER,usages[i],false,0);
         if (up) {IOHIDVirtualServiceClientDispatchEvent(keys,up);CFRelease(up);}
     }
@@ -418,6 +439,8 @@ pong_touch_start(void)
     RESOLVE(IOHIDEventCreateDigitizerFingerEvent);
     /* Physical touches remain available if this optional wake API is absent. */
     IOHIDEventCreateKeyboardEvent=(__typeof__(IOHIDEventCreateKeyboardEvent))dlsym(RTLD_DEFAULT,"IOHIDEventCreateKeyboardEvent");
+    IOHIDUserDeviceCreate=(__typeof__(IOHIDUserDeviceCreate))dlsym(RTLD_DEFAULT,"IOHIDUserDeviceCreate");
+    IOHIDUserDeviceHandleReportWithTimeStamp=(__typeof__(IOHIDUserDeviceHandleReportWithTimeStamp))dlsym(RTLD_DEFAULT,"IOHIDUserDeviceHandleReportWithTimeStamp");
     RESOLVE(IOHIDEventAppendEvent);
     RESOLVE(IOHIDEventSetIntegerValue);
 #undef RESOLVE

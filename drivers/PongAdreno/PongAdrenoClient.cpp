@@ -7,20 +7,32 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
+#include <mach/mach_time.h>
 namespace {
 PongCpBackend *backend;
 IOLock *client_gate;
-bool slots[4];
+constexpr unsigned ClientSlots=10;
+bool slots[ClientSlots];
 struct Window {uint64_t start,bytes;};
-const Window windows[4]={{0x20000000,0x40000000},{0x60000000,0xaaa9000},
-    {0x6aaa9000,0xaaa9000},{0x75552000,0xaaa9000}};
+// Use the already advertised 2.5 GiB aperture. The old secondary windows
+// stopped at 170 MiB while leaving the upper half unused. All windows stay
+// inside the existing 32-bit context and clear of the kernel rings.
+// Keep the compositor's 1GiB and the next client's 512MiB, then share the
+// remaining 1GiB across eight distinct 128MiB process windows. The old
+// four-client cap refused SBRendererService before it could create a Metal
+// device; Neutrino then aborted because its iOS CPU renderer is unsupported.
+constexpr Window windows[ClientSlots]={{0x20000000,0x40000000},{0x60000000,0x20000000},
+    {0x80000000,0x08000000},{0x88000000,0x08000000},{0x90000000,0x08000000},{0x98000000,0x08000000},
+    {0xa0000000,0x08000000},{0xa8000000,0x08000000},{0xb0000000,0x08000000},{0xb8000000,0x08000000}};
+static_assert(ClientSlots<=NativeAdrenoMaxClients,"Pong native queue scopes");
+static_assert(windows[ClientSlots-1].start+windows[ClientSlots-1].bytes==0xc0000000ULL,"Pong GPU aperture");
 }
 class PongAdrenoUserClient final:public IOUserClient {
     OSDeclareDefaultStructors(PongAdrenoUserClient)
     NativeAdrenoUserClient *core=nullptr;
     task_t owner=TASK_NULL;
     bool live=false,closing=false;
-    unsigned slot=4;
+    unsigned slot=ClientSlots;
     struct View {uint32_t token;IOMemoryDescriptor *memory;};
     View *views=nullptr;
     IORecursiveLock *operations=nullptr;
@@ -49,14 +61,14 @@ bool PongAdrenoUserClient::mount(task_t task)
     views=IONewZero(View,NativeAdrenoClientMaxObjects);
     if(!core || !views || !operations)return false;
     IOLockLock(client_gate);
-    for(unsigned i=0;i<4;i++)if(!slots[i]){slot=i;break;}
-    IOReturn result=slot<4?core->open(NativeAdrenoAbiVersion,backend->vm,backend->submit,backend->ring,32,backend->output_bits):kIOReturnNoResources;
+    for(unsigned i=0;i<ClientSlots;i++)if(!slots[i]){slot=i;break;}
+    IOReturn result=slot<ClientSlots?core->open(NativeAdrenoAbiVersion,backend->vm,backend->submit,backend->ring,32,backend->output_bits):kIOReturnNoResources;
     if(!result)result=core->setScope(slot*NativeAdrenoAbiMaxQueues,windows[slot].start,windows[slot].bytes);
     if(!result)result=core->attachTimer(backend->timer);
     if(!result)result=core->attachStatus(backend->status);
     if(!result)result=core->attachDeviceInfo(&backend->info);
     if(!result){live=true;slots[slot]=true;backend->ring->requestContextReset();}
-    else if(core)core->releaseAll(&backend->clock,0);
+    else {IOLog("Pong Adreno: client mount refused slot=%u result=%x\n",slot,result);if(core)core->releaseAll(&backend->clock,0);}
     IOLockUnlock(client_gate);return live;
 }
 void PongAdrenoUserClient::dropViews(uint32_t token)
@@ -105,7 +117,12 @@ IOReturn PongAdrenoUserClient::clientMemoryForType(UInt32 token,IOOptionBits *op
         if(!*memory) {
             NativeAdrenoMemory *bo=core->memoryForToken(token);
             size_t count=bo?bo->spanCount():0;
-            if(count && count<=65536) {
+            if(bo && bo->system() && bo->descriptor()) {
+                IOMemoryDescriptor *view=bo->descriptor();
+                for(unsigned i=0;i<NativeAdrenoClientMaxObjects;i++)if(!views[i].memory) {
+                    view->retain();views[i]={token,view};view->retain();*memory=view;result=kIOReturnSuccess;break;
+                }
+            } else if(count && count<=65536) {
                 auto ranges=IONewData(IOAddressRange,count);
                 if(ranges) {
                     for(size_t i=0;i<count;i++)ranges[i]={bo->spans()[i].physical,bo->spans()[i].bytes};
@@ -122,12 +139,32 @@ IOReturn PongAdrenoUserClient::clientMemoryForType(UInt32 token,IOOptionBits *op
             }
         }
     }
-    *options=kIOMapAnywhere|kIOMapInhibitCache;IOLockUnlock(client_gate);
+    NativeAdrenoMemory *backing=live && !closing?core->memoryForToken(token):nullptr;
+    *options=kIOMapAnywhere|((backing && backing->system())?0:kIOMapInhibitCache);IOLockUnlock(client_gate);
     IORecursiveLockUnlock(operations);return result;
 }
 IOReturn PongAdrenoUserClient::run(unsigned method,const void *in,size_t inBytes,void *out,size_t outBytes)
 {
     if(current_task()!=owner)return kIOReturnNotPermitted;
+    if(method==NativeAdrenoMethodWaitFence && inBytes==sizeof(NativeAdrenoAbiWaitFence)) {
+        NativeAdrenoAbiWaitFence request{};memcpy(&request,in,sizeof(request));
+        const uint64_t timeout=request.timeout_ns>500000000ULL?500000000ULL:request.timeout_ns;
+        const uint64_t began=mach_absolute_time();
+        request.timeout_ns=0;
+        for(;;) {
+            // A blocking poll used to hold every process's GPU gate for
+            // 500 ms. Poll and retire under the gate, sleep outside it.
+            // The per-client operations lock still protects this client.
+            IOLockLock(client_gate);
+            IOReturn result=live && !closing && backend->healthy()?
+                core->dispatch(method,&request,sizeof(request),out,outBytes,&backend->clock):kIOReturnNotReady;
+            IOLockUnlock(client_gate);
+            if(result!=kIOReturnTimeout || !timeout)return result;
+            uint64_t elapsed=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&elapsed);
+            if(elapsed>=timeout)return kIOReturnTimeout;
+            IOSleep(1);
+        }
+    }
     if(method==NativeAdrenoMethodBoCpuUnmap && inBytes==sizeof(NativeAdrenoAbiBoCpuUnmap)) {
         const auto *request=static_cast<const NativeAdrenoAbiBoCpuUnmap *>(in);
         IOLockLock(client_gate);bool last=live && core->mappingLeases(request->token)<=1;IOLockUnlock(client_gate);
@@ -135,10 +172,26 @@ IOReturn PongAdrenoUserClient::run(unsigned method,const void *in,size_t inBytes
     }
     IOLockLock(client_gate);IOReturn result=kIOReturnNotReady;
     if(live && !closing && backend->healthy()) {
-        /* Each page-table update runs with ALL ring jobs genuinely retired. */
+        /* New maps fill invalid leaves. A free still drains all jobs of this
+         * client, since textures referenced by an IB need not be IB BOs. */
         result=kIOReturnSuccess;
-        if(method==NativeAdrenoMethodBoMap || method==NativeAdrenoMethodBoFree)
-            result=backend->submit->waitAll(&backend->clock,500000);
+        if(method==NativeAdrenoMethodBoFree) {
+            const uint64_t began=mach_absolute_time();
+            for(;;) {
+                result=backend->submit->retireCompleted();
+                if(!result && core->ownRangeOutstanding())result=kIOReturnTimeout;
+                if(result!=kIOReturnTimeout)break;
+                uint64_t elapsed=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&elapsed);
+                if(elapsed>=500000000ULL)break;
+                // The per-client operations lock protects this request.
+                // Let other clients retire/query their real fences while
+                // hardware is busy instead of holding the system-wide GPU
+                // gate for the entire half-second wait. Recheck under the
+                // same gate before any page-table mutation.
+                IOLockUnlock(client_gate);IOSleep(1);IOLockLock(client_gate);
+                if(!live || closing || !backend->healthy()){result=kIOReturnNotReady;break;}
+            }
+        }
         if(!result && method==NativeAdrenoMethodBoImport) {
             NativeAdrenoAbiBoImport request{};NativeAdrenoAbiBoAllocReply reply{};
             memcpy(&request,in,sizeof(request));result=core->importBo(&request,owner,&reply);

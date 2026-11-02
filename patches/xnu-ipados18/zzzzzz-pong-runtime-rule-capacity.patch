@@ -1,0 +1,11 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5972,7 +5972,7 @@
+ #if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
+ /* HackiOS's per-program compatibility-library insertion. Keep a bounded,
+  * locked snapshot: root may update configuration while another task execs. */
+-static char exec_inject_conf[512];
++static char exec_inject_conf[1024];
+ static LCK_MTX_DECLARE_ATTR(exec_inject_lock, &proc_lck_grp, &proc_lck_attr);
+ 
+ static int

@@ -103,9 +103,13 @@ static int bcm(const PongPowerResource *r,uint32_t kbps,unsigned width,unsigned 
     }
     *out=word;return 0;
 }
-PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *in,PongPowerTables *out)
+PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *in,unsigned power_level,PongPowerTables *out)
 {
-    if (!in || !out || in->chip_id!=0x07030002 || !in->db_version) return PongPowerArgument;
+    if (!in || !out || in->chip_id!=0x07030002 || !in->db_version ||
+        power_level>=PongAdrenoPowerLevelCount) return PongPowerArgument;
+    const PongPowerLevel *selected=&PongAdrenoPowerLevels[power_level];
+    if (!selected->hz || !selected->bus || selected->bus>=PongAdrenoBandwidthCount ||
+        selected->bus<selected->bus_min || selected->bus>selected->bus_max) return PongPowerArgument;
     unsigned gn=rail_count(&in->gfx),mn=rail_count(&in->mx),cn=rail_count(&in->cx);
     if (!gn || !mn || !cn) return PongPowerCorrupt;
     const PongPowerResource *all[]={&in->gfx,&in->mx,&in->cx,&in->sh0,&in->mc0,&in->acv,&in->cn0};
@@ -146,7 +150,7 @@ PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *in,PongPowerTa
             if (bcm(ddr[j],PongAdrenoDdrBandwidth[i],widths[j],j==2,commit,
                 &table.bandwidth[31+8*i+j])) return PongPowerCorrupt;
     }
-    table.default_gpu_index=2; /* DT initial-pwrlevel11 -> ascending wire index2 */
-    table.default_bus_index=PongAdrenoPowerLevels[11].bus;
+    table.gpu_index=PongAdrenoPowerLevelCount-power_level;
+    table.bus_index=selected->bus;
     *out=table;return PongPowerSuccess;
 }

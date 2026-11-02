@@ -35,6 +35,8 @@ size_t nmb_device_name(const NmbDevice *, char *out, size_t size);
 uint64_t nmb_device_max_buffer_length(const NmbDevice *);
 // Pipeline makings (count, total us, longest us, waited us, failed), sink messages (info, warning+), shader cache hits/misses/writes.
 bool nmb_device_work_stats(const NmbDevice *, uint64_t out[10]);
+/* Upstream runtime resource-cache pressure response, with live owners kept. */
+size_t nmb_device_release_kept_memory(const NmbDevice *);
 /* Artifact lookups and driver pipeline records are separate cache layers. */
 struct NmbShaderCacheStats {
     uint64_t hits, misses, rejected, read_failures, writes, write_failures, evictions;
@@ -70,7 +72,7 @@ uint64_t nmb_buffer_length(const NmbBuffer *);
 uint64_t nmb_buffer_gpu_address(const NmbBuffer *);
 
 struct NmbTextureDescriptor {
-    uint64_t type, format, width, height, depth, levels, samples, array_length, usage, options;
+    uint64_t type, format, width, height, depth, levels, samples, array_length, usage, options, swizzle;
 };
 /* Heaps: type 0 automatic / 1 placement; offset UINT64_MAX asks an automatic heap to place the resource. */
 NmbHeap *nmb_heap_new(NmbDevice *, uint64_t type, uint64_t size, uint64_t options);
@@ -120,6 +122,9 @@ NmbFunction *nmb_function_new(NmbLibrary *, const char *name);
  * indexed value; bytes holds the value's bytes. */
 struct NmbConstant {uint64_t type, index; const char *name; const void *bytes; uint64_t length;};
 NmbFunction *nmb_function_new_specialized(NmbLibrary *, const char *name, const struct NmbConstant *constants, uint32_t count);
+NmbFunction *nmb_function_new_zeroed(NmbLibrary *, const char *name);
+bool nmb_device_heap_texture_size_and_align(NmbDevice *, const struct NmbTextureDescriptor *, uint64_t out[2]);
+bool nmb_device_heap_buffer_size_and_align(NmbDevice *, uint64_t length, uint64_t options, uint64_t out[2]);
 void nmb_function_release(NmbFunction *);
 /* Metal's MTLFunctionType (1 vertex, 2 fragment, 3 kernel, ...). */
 uint64_t nmb_function_type(const NmbFunction *);
@@ -173,9 +178,13 @@ NmbDepthStencil *nmb_depth_stencil_new(NmbDevice *, const struct NmbDepthStencil
 void nmb_depth_stencil_release(NmbDepthStencil *);
 
 NmbQueue *nmb_queue_new(NmbDevice *);
+NmbQueue *nmb_queue_new_with_max_count(NmbDevice *, size_t count);
 void nmb_queue_release(NmbQueue *);
 NmbCommandBuffer *nmb_command_buffer_new(NmbQueue *);
 void nmb_command_buffer_release(NmbCommandBuffer *);
+/* Actual runtime timestamps in uptime ns: commit/run/prepared/handed/taken/
+ * submit begin/end/poll armed/done/seen/finished, then held-reason mask. */
+bool nmb_command_buffer_stage_summary(const NmbCommandBuffer *, uint64_t out[12]);
 /* 1 storage dependency, 0 unrelated/already complete, -1 unknown (caller must wait).
  * Includes texture roots, buffer-backed textures, heaps and overlapping imported host ranges.
  * This frontend does not rebind/remap live backing ranges. */
@@ -219,6 +228,8 @@ struct NmbPassAttachment {
     NmbTexture *texture;
     uint64_t level, slice, depth_plane, load, store;
     double clear[4]; /* color, or clear[0] depth / stencil */
+    NmbTexture *resolve_texture;
+    uint64_t resolve_level,resolve_slice,resolve_depth_plane,resolve_filter;
 };
 struct NmbRenderPassDescriptor {
     struct NmbPassAttachment colors[8], depth, stencil;
@@ -231,6 +242,13 @@ void nmb_encoder_discard(NmbEncoder *);
 
 /* stage: 0 compute, 1 vertex, 2 fragment */
 bool nmb_encoder_set_buffer(NmbEncoder *, uint32_t stage, NmbBuffer *, uint64_t offset, uint32_t index);
+/* Indirect shader accesses must enter the runtime's residency/address tables.
+ * kind 0 buffer, 1 texture; object is the corresponding Nmb* handle. */
+struct NmbResourceRef {void *object; uint32_t kind, reserved;};
+bool nmb_encoder_use_resources(NmbEncoder *, const struct NmbResourceRef *, size_t count, uint64_t usage, uint64_t stages);
+bool nmb_encoder_use_heaps(NmbEncoder *, NmbHeap *const *, size_t count, uint64_t stages);
+bool nmb_encoder_barrier_scope(NmbEncoder *, uint64_t scope, uint64_t after, uint64_t before);
+bool nmb_encoder_barrier_resources(NmbEncoder *, const struct NmbResourceRef *, size_t count, uint64_t after, uint64_t before);
 bool nmb_encoder_set_buffer_offset(NmbEncoder *, uint32_t stage, uint64_t offset, uint32_t index);
 bool nmb_encoder_set_bytes(NmbEncoder *, uint32_t stage, const void *bytes, size_t length, uint32_t index);
 bool nmb_encoder_set_texture(NmbEncoder *, uint32_t stage, NmbTexture *, uint32_t index);
@@ -267,6 +285,23 @@ bool nmb_blit_texture_to_buffer(NmbEncoder *, NmbTexture *source, uint64_t slice
                                 const uint64_t size[3], NmbBuffer *destination, uint64_t offset, uint64_t bytes_per_row,
                                 uint64_t bytes_per_image);
 bool nmb_blit_generate_mipmaps(NmbEncoder *, NmbTexture *);
+
+uint64_t nmb_texture_allocated_size(const NmbTexture *);
+uint64_t nmb_device_current_allocated_size(const NmbDevice *);
+bool nmb_texture_make_aliasable(const NmbTexture *);
+bool nmb_texture_is_aliasable(const NmbTexture *);
+bool nmb_buffer_make_aliasable(const NmbBuffer *);
+bool nmb_buffer_is_aliasable(const NmbBuffer *);
+NmbTexture *nmb_texture_new_view_swizzle(NmbTexture *, uint64_t format, uint64_t kind, const uint64_t levels[2], const uint64_t slices[2], uint64_t swizzle);
+uint32_t nmb_function_constant_count(const NmbFunction *);
+size_t nmb_function_constant_name_size(const NmbFunction *, uint32_t at);
+bool nmb_function_constant_at(const NmbFunction *, uint32_t at, char *name, size_t capacity, uint64_t *index, uint64_t *data_type, bool *required);
+bool nmb_render_set_viewports(NmbEncoder *, const double *values, size_t count);
+bool nmb_render_set_scissors(NmbEncoder *, const uint64_t *values, size_t count);
+bool nmb_function_set_specialized_name(NmbFunction *, const char *);
+NmbQueue *nmb_queue_new_with_max_command_buffer_count(NmbDevice *, size_t);
+uint64_t nmb_command_buffer_diagnostic_id(const NmbCommandBuffer *buffer);
+void nmb_gpu_diagnostic_hook(void (*hook)(uint32_t,uint64_t,uint64_t,uint64_t));
 #ifdef __cplusplus
 }
 #endif

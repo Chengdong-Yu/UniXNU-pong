@@ -102,10 +102,10 @@ volume = "UNIXNU"
 # inside the payload image the package step repacks, so the volume stays well
 # below that bound.
 size_mib = 96
-# The arguments this board brings up with: the ones scripts/build-ipados18-prelinked-boot.py
+# The current runtime arguments this board brings up with: the ones scripts/build-ipados18-prelinked-boot.py
 # used to write, minus its boot-epoch (the ADT carries a software clock instead) and with the
 # applog list trimmed to the services the trace reads. DarwinBoot copies the line into a
-# 1024-byte buffer and refuses more than 1000 bytes; this line is 583.
+# 1024-byte buffer and refuses more than 1000 bytes; keep the final assembled line within1023 bytes.
 kernel_args = [
   "keepsyms=1",
   "cpus=1",
@@ -135,6 +135,14 @@ kernel_args = [
   "pong_buttons=1",
   "pong_init_path=/pong/init",
   "pong_build=ipados18-22H374",
+  "pong_gpu_scanout=1",
+  "pong_gpu_pool_mib=0",
+  "pong_metal_global=1",
+  "pong_gpu_lock_max=1",
+  "pong_usb=1",
+  "pong_usb_mux=1",
+  "pong_usb_iphone=1",
+  "pong_rootful=1",
 ]
 
 [payload.adt]

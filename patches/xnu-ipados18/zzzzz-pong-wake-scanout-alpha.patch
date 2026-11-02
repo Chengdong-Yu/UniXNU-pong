@@ -1,0 +1,46 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -586,7 +586,8 @@
+ 		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+ 		if (job->unscaled) {
+ 			/* not scaled at all */
+-			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
++			const uint32_t *row = (const uint32_t *)(pixels + (size_t)(sy + y - py0) * stride) + sx;
++			for (int32_t x=0;x<sw;x++) to[px0+x]=row[x] | 0xff000000u;
+ 			continue;
+ 		}
+ 		if (filter) {
+@@ -634,11 +635,11 @@
+ 			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
+ 				uint32_t c = column[i], w = weights[i], a = from[c];
+ 
+-				out[i] = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
++				out[i] = (w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w)) | 0xff000000u;
+ 			}
+ 		} else {
+ 			for (int32_t x = cx0; x < cx1; x++) {
+-				to[x] = from[fColumn[x]];
++				to[x] = from[fColumn[x]] | 0xff000000u;
+ 			}
+ 		}
+ 	}
+@@ -697,7 +698,8 @@
+ 	PE_initialize_console(NULL, kPEGraphicsMode);
+ 	PE_initialize_console(NULL, kPEReleaseScreen);
+ 	for (uint32_t y = 0; y < fPanelHeight; y++) {
+-		bzero(fBase + (size_t)y * fRowBytes, (size_t)fPanelWidth * 4);
++		uint32_t *row=(uint32_t *)(fBase + (size_t)y * fRowBytes);
++					for (uint32_t x=0;x<fPanelWidth;x++) row[x]=0xff000000u;
+ 	}
+ 	fGraphics = true;
+ }
+@@ -1084,7 +1086,8 @@
+ 			/* the bottom layer taken away: nothing is shown, the screen is black */
+ 			if (!gpuFrame && layer == 0 && (set & 1) && fGraphics) {
+ 				for (uint32_t y = 0; y < fPanelHeight; y++) {
+-					bzero(fBase + (size_t)y * fRowBytes, (size_t)fPanelWidth * 4);
++					uint32_t *row=(uint32_t *)(fBase + (size_t)y * fRowBytes);
++					for (uint32_t x=0;x<fPanelWidth;x++) row[x]=0xff000000u;
+ 				}
+ 			}
+ 			continue;

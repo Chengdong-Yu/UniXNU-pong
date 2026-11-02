@@ -1,0 +1,15 @@
+# services157：壁纸VA耗尽与退役开销
+
+156仍有实际GPU scanout与1148次提交/完成，但用户报告低帧和壁纸异常。MercuryPoster日志明确先出现no-copy OutOfMemory(Device)，随后连续AttachmentFormat(Color(0))拒绝。此前各普通客户端固定128MiB VA；系统物理RAM并未因此获得相同的可用GPU地址预算。
+
+本轮保持ABI1/32位及backboardd1280MiB、SpringBoard512MiB的既有范围，剩余1792MiB按实际仍活跃的客户端寻找连续不重叠空洞：Poster/Wallpaper优先384MiB，InputUI/Preferences优先256MiB，其余优先128MiB；内存压力时按64MiB粒度降低，真实无空洞则返回NoSpace。一个连接的VA终生不移动，实际映射和DMA不成功退役时，其窗口和slot保持占用，禁止复用。每次实际连接记录获得的窗口，不将虚拟预算误称为固定物理显存。
+
+已完成多个任务的批量退役中，同一窗口在同一实际已观察完成fence下只做一次导入缓存acquire。每个job的真实fence和引用计数仍单独退役；任何新提交、完成fence变化或窗口变化都会使复用失效。减少重复全surface维护，保留真实CPU/GPU交接。
+
+接入已有VM计时hook，并每1024次实际提交汇总cache distrust/dirty/reset、维护量与耗时、映射/解除映射各阶段和重复acquire节省次数。无额外shader工作负载或合成测试，避免把设备发现或空闲帧率当作优化证据。
+
+156单独MemoryLimit字段没有改变实际27MiB摄像头任务上限，故不能宣称已修复其jetsam。本轮补充active/inactive原生字段，并为同一原生job增加30秒ThrottleInterval；保留真实服务、IPC、内存保护及系统按钮。后续以实际进程上限和退出间隔判断，未伪造摄像头硬件。
+
+保留156的异步Metal构建、真实heap查询、141个展开shader资源、函数常量预热和completion QoS，以及154/155的缓存初始化、动态系统BO、锁外回收、128IB原子提交和BGRA路径。Darwin26/A740寄存器、未知Metal能力不硬套到A730。
+
+当前REC OS为增量基线，Data和配对保留；release内核构建通过后临时启动，实际设备结果另记。

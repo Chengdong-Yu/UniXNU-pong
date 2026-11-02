@@ -1,0 +1,9 @@
+# services154：修复Darwin24系统BO交接
+
+153在首个用户IB发生CP opcode错误。本轮保留153的BGRA/sysmem、GMEM swap、同描述符CPU视图、锁外prepare、按客户端free等待，以及152的页所有权索引、客户端VA分配、BO缓存和iOS QoS。
+
+Darwin24的VM通过bzero_phys零填充新页面；Pong物理aperture保持缓存block映射，不受普通PV页面属性切换跟踪。因此在客户端收到WC视图之前，prepareSystem按实际物理段完成一次clean+invalidate，再检查/恢复真实WCOMB属性，避免在首次submit的缓存审计时才写回旧零填充。该维护在共享GPU锁外进行，无永久kernel VA，也不建立第二个物理pager。
+
+恢复system BO的提交前缓存属性检查。保留真实CP故障保护，在故障时只打印已收集的有限缓存记录；不伪造fence或屏蔽opcode错误。编译和临时启动不代表GPU工作，需以实际用户命令和scanout完成记录判断。
+
+本轮仅更新内核，设备使用已安装153配套运行时；OS、128GB Data和配对记录不写入。所有生成文件位于PongDev。

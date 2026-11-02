@@ -16,6 +16,7 @@ extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
 /* Time and bytes of every CPU cache maintenance pass (the board page shows them per submission), and the pages user BOs made
  * write-combined: [0] ticks, [1] bytes, [2] longest pass in ticks, [3] passes, [4] write-combined pages now. */
 extern "C" {volatile uint64_t native_adreno_cache_stats[5];}
+extern "C" {volatile uint64_t native_adreno_cache_batches[3];}
 /* Time spent checking and re-asserting write-combined page attributes (NativeAdrenoReassertWriteCombined), for the board page. */
 extern "C" {volatile uint64_t native_adreno_reassert_ticks;}
 static void noteMaintenance(uint64_t began,size_t bytes)
@@ -39,6 +40,22 @@ static bool managedSpan(uint64_t physical,size_t bytes)
         if(!pmap_valid_page((ppnum_t)((physical+offset)>>12)))return false;
     return true;
 }
+bool NativeAdrenoPagesUncached(const NativeAdrenoPhysicalSpan *spans,size_t count)
+{
+    if(!spans || !count)return false;
+    for(size_t i=0;i<count;++i) {
+        if(!spans[i].bytes || ((spans[i].physical|spans[i].bytes)&4095) ||
+           spans[i].physical>UINT64_MAX-spans[i].bytes)return false;
+        for(uint64_t offset=0;offset<spans[i].bytes;offset+=4096) {
+            const ppnum_t pn=ppnum_t((spans[i].physical+offset)>>12);
+            // Pong has multiple managed DRAM banks: gPhysSize alone must
+            // never classify a cached high-bank page as device memory.
+            if(pmap_valid_page(pn) && !(pmap_cache_attributes(pn)&VM_MEM_NOT_CACHEABLE))return false;
+        }
+    }
+    return true;
+}
+
 
 IOReturn NativeAdrenoQueryCpu4K(NativeAdrenoCpuState *out)
 {
@@ -128,6 +145,50 @@ IOReturn NativeAdrenoMaintainPhysicalPages(uint64_t physical,size_t bytes,Native
     }
     noteMaintenance(began,bytes);
     return kIOReturnSuccess;
+}
+IOReturn NativeAdrenoMaintainPhysicalSpans(const NativeAdrenoPhysicalSpan *spans,size_t count,size_t offset,size_t bytes,NativeAdrenoCacheOperation op)
+{
+    if(!spans || !count || !bytes || ((offset|bytes)&4095) || offset>SIZE_MAX-bytes ||
+       op<NativeAdrenoClean || op>NativeAdrenoInvalidate)return kIOReturnBadArgument;
+    uint64_t covered=0;
+    for(size_t i=0;i<count;++i) {
+        const auto &s=spans[i];
+        if(s.offset!=covered || !s.physical || !s.bytes || ((s.physical|s.bytes)&4095) ||
+           s.physical>UINT64_MAX-s.bytes || covered>UINT64_MAX-s.bytes)return kIOReturnBadArgument;
+        covered+=s.bytes;
+    }
+    if(offset>covered || bytes>covered-offset)return kIOReturnBadArgument;
+    const uint64_t began=mach_absolute_time();size_t at=0,position=offset,end=offset+bytes;
+    while(at<count && position>=spans[at].offset+spans[at].bytes)++at;
+    uint64_t batches=0;
+    while(position<end) {
+        // A fragmented IOSurface may have thousands of one-page spans.
+        // Keep the same cache operations, but complete a bounded 64-page
+        // batch across span boundaries, rather than one DSB pair per span.
+        disable_preemption();uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
+        const size_t line=(size_t)4<<((ctr>>16)&15);
+        if(line>4096){enable_preemption();return kIOReturnUnsupported;}
+        __asm__ volatile("dsb sy":::"memory");
+        for(unsigned pages=0;pages<64 && position<end;++pages,position+=4096) {
+            while(at<count && position>=spans[at].offset+spans[at].bytes)++at;
+            const uint64_t physical=spans[at].physical+position-spans[at].offset;
+            // Preserve the existing device-memory exception: phystokv
+            // cannot be used for the uncached firmware framebuffer.
+            if(!pmap_valid_page(ppnum_t(physical>>12)))continue;
+            const vm_offset_t alias=phystokv(physical);
+            if(!alias){__asm__ volatile("dsb sy":::"memory");enable_preemption();return kIOReturnUnsupported;}
+            for(uintptr_t address=alias,last=alias+4096;address<last;address+=line) {
+                if(op==NativeAdrenoClean)__asm__ volatile("dc cvac, %0"::"r"(address):"memory");
+                else if(op==NativeAdrenoCleanInvalidate)__asm__ volatile("dc civac, %0"::"r"(address):"memory");
+                else __asm__ volatile("dc ivac, %0"::"r"(address):"memory");
+            }
+        }
+        __asm__ volatile("dsb sy":::"memory");enable_preemption();++batches;
+    }
+    __atomic_fetch_add(&native_adreno_cache_batches[0],1,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&native_adreno_cache_batches[1],batches,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&native_adreno_cache_batches[2],bytes/4096,__ATOMIC_RELAXED);
+    noteMaintenance(began,bytes);return kIOReturnSuccess;
 }
 /* A user BO's pages become Normal non-cacheable (write-combined) for every CPU mapping the pmap tracks: the kernel's own mapping and each
  * client view. The views did not get the cache mode their mapping asked for (int-070: Turnip's write-combine view left IB words in a CPU

@@ -23,8 +23,6 @@ static bool overlap(uint64_t a,uint64_t ab,uint64_t b,uint64_t bb)
 /* Mappings of one cache/shareability/privilege class may share pages; only pages shared across classes refuse. */
 static unsigned aliasClass(unsigned permissions,unsigned writeback,unsigned shareability)
 {return writeback|(shareability<<1)|((permissions&ArmSmmu4KPrivileged)?8u:0u);}
-static void reverse(ArmSmmu4KRange *first,ArmSmmu4KRange *last)
-{while(first<last && first<--last) {const ArmSmmu4KRange t=*first;*first++=*last;*last=t;}}
 static bool validBinding(const NativeAdrenoVmRegion &r,unsigned upper)
 {
     return r.tables && r.arena && r.state && !r.tables->quarantined() &&
@@ -35,10 +33,9 @@ static bool validBinding(const NativeAdrenoVmRegion &r,unsigned upper)
         r.arena->capacity_pages==r.tables->bytes()/4096 && r.state->prepared &&
         !r.state->poisoned && !r.state->tables.leaf_pages;
 }
-ArmSmmu4KLiveRegion NativeAdrenoVm::region(unsigned upper) const
+ArmSmmu4KLiveRegion NativeAdrenoVm::region(unsigned upper,const ArmSmmu4KRange *ranges,size_t count) const
 {
-    return {regions_[upper].arena,regions_[upper].state,
-        ranges_+(upper?lower_count_:0),upper?upper_count_:lower_count_};
+    return {regions_[upper].arena,regions_[upper].state,ranges,count};
 }
 /* Board hook and per-phase time of the two table transactions, for the log: [0] map, [1] unmap; each row is count, the phases in order, the slowest call
  * and the bytes mapped (int-134: BoMap averaged 135 ms and the desktop crawled). */
@@ -109,17 +106,19 @@ IOReturn NativeAdrenoVm::attach(const ArmSmmu4KIo *io,ArmSmmu4KContextConfig *co
     if(!io || !context || !streams || (!lower && !upper) || !capacity || capacity>262144 ||
         !budget || budget>1048576 || (lower && !validBinding(*lower,0)) || (upper && !validBinding(*upper,1)))
         return kIOReturnBadArgument;
-    ranges_=IONewData(ArmSmmu4KRange,capacity);if(!ranges_)return kIOReturnNoMemory;
+    capacity_=capacity;
+    ranges_=IONewData(ArmSmmu4KRange,capacity);
     mappings_=IONewData(Mapping,NativeAdrenoVmMaxObjects);
-    if(!mappings_) {IODeleteData(ranges_,ArmSmmu4KRange,capacity);return kIOReturnNoMemory;}
+    order_=IONewData(uint32_t,NativeAdrenoVmMaxObjects);
+    if(!ranges_ || !mappings_ || !order_ || !index_.allocate()) {freeMetadata();return kIOReturnNoMemory;}
     memset(mappings_,0,sizeof(Mapping)*NativeAdrenoVmMaxObjects);
-    if(!index_.allocate()) {IODeleteData(ranges_,ArmSmmu4KRange,capacity);IODeleteData(mappings_,Mapping,NativeAdrenoVmMaxObjects);return kIOReturnNoMemory;}
     free_hint_=0;high_=0;memset(class_spans_,0,sizeof(class_spans_));
+    order_count_[0]=order_count_[1]=0;
     capacity_=capacity;io_=*io;context_=context;streams_=streams;budget_=budget;
     if(lower)regions_[0]=*lower;if(upper)regions_[1]=*upper;
     for(unsigned i=0;i<2;++i)if(regions_[i].arena) {
         if(NativeAdrenoBindSmmuVisibility(regions_[i].tables,&visibility_[i])!=kIOReturnSuccess) {
-            IODeleteData(ranges_,ArmSmmu4KRange,capacity_);IODeleteData(mappings_,Mapping,NativeAdrenoVmMaxObjects);index_.release();
+            freeMetadata();
             regions_[0]={};regions_[1]={};return kIOReturnBadArgument;
         }
     }
@@ -131,9 +130,16 @@ IOReturn NativeAdrenoVm::detach()
 {
     if(poisoned_ || objects_ || spanCount())return kIOReturnBusy;
     if(!attached_)return kIOReturnNotReady;
-    IODeleteData(ranges_,ArmSmmu4KRange,capacity_);IODeleteData(mappings_,Mapping,NativeAdrenoVmMaxObjects);index_.release();
+    freeMetadata();
     attached_=false;regions_[0]={};regions_[1]={};context_=nullptr;streams_=nullptr;capacity_=0;
     return kIOReturnSuccess;
+}
+void NativeAdrenoVm::freeMetadata()
+{
+    if(ranges_)IODeleteData(ranges_,ArmSmmu4KRange,capacity_);
+    if(mappings_)IODeleteData(mappings_,Mapping,NativeAdrenoVmMaxObjects);
+    if(order_)IODeleteData(order_,uint32_t,NativeAdrenoVmMaxObjects);
+    index_.release();ranges_=nullptr;mappings_=nullptr;order_=nullptr;capacity_=0;
 }
 IOReturn NativeAdrenoVm::findAddress(unsigned upper,size_t bytes,uint64_t alignment,uint64_t *out) const
 {
@@ -143,14 +149,14 @@ IOReturn NativeAdrenoVm::findAddress(unsigned upper,size_t bytes,uint64_t alignm
         (alignment&(alignment-1)))return kIOReturnBadArgument;
     const ArmSmmu4KLiveArena *a=regions_[upper].arena;
     uint64_t offset=0;
-    for(size_t i=upper?lower_count_:0;;++i) {
+    for(size_t i=orderBegin(upper);;++i) {
         uint64_t rem=(a->iova+offset)&(alignment-1),padding=rem?alignment-rem:0;
         if(padding>a->bytes-offset)return kIOReturnNoResources;offset+=padding;
         if(bytes>a->bytes-offset)return kIOReturnNoResources;
-        if(i==(upper?spanCount():lower_count_) ||
-            (ranges_[i].iova-a->iova>=offset && bytes<=ranges_[i].iova-a->iova-offset))
+        const Mapping *m=i<orderEnd(upper)?&mappings_[order_[i]]:nullptr;
+        if(!m || (m->iova-a->iova>=offset && bytes<=m->iova-a->iova-offset))
             {*out=a->iova+offset;return kIOReturnSuccess;}
-        uint64_t end=ranges_[i].iova-a->iova+ranges_[i].bytes;
+        uint64_t end=m->iova-a->iova+m->memory->bytes();
         if(end>offset)offset=end;
     }
 }
@@ -163,12 +169,11 @@ IOReturn NativeAdrenoVm::preflight(const NativeAdrenoMemory *memory,unsigned upp
     const ArmSmmu4KLiveArena *a=regions_[upper].arena;
     if((iova&4095) || iova<a->iova || iova-a->iova>=a->bytes || memory->bytes()>a->bytes-(iova-a->iova))
         return kIOReturnBadArgument;
-    if(objects_>=NativeAdrenoVmMaxObjects || memory->spanCount()>capacity_-spanCount())return kIOReturnNoResources;
+    if(objects_>=NativeAdrenoVmMaxObjects || memory->spanCount()>capacity_)return kIOReturnNoResources;
     {
-        /* ranges_ is sorted by address: only the first range not wholly below iova can overlap (native addresses may end at 2^64,
-         * so ends are compared as last bytes). A walk over every range cost each map a pass over 52609 of them (i567). */
-        const size_t i=rangeAt(iova);
-        if(i<spanCount() && ranges_[i].iova<=iova+(memory->bytes()-1))return kIOReturnBusy;
+        /* Disjoint object extents, ordered within this region. */
+        const size_t i=orderAt(upper,iova);
+        if(i<orderEnd(upper) && mappings_[order_[i]].iova<=iova+(memory->bytes()-1))return kIOReturnBusy;
     }
     if(a->config.output_bits<32 || a->config.output_bits>48)return kIOReturnBadArgument;
     uint64_t offset=0,limit=UINT64_C(1)<<a->config.output_bits;
@@ -182,46 +187,37 @@ IOReturn NativeAdrenoVm::preflight(const NativeAdrenoMemory *memory,unsigned upp
         offset+=span.bytes;
     }
     if(offset!=memory->bytes())return kIOReturnBadArgument;
-    /* Only another cache/shareability/privilege class can conflict. Reuse the
-     * arena's caller-owned temporary alias scratch before the table transaction
-     * uses it. Index the smaller side and query the other in O(log n); neither
-     * the resource spans nor the actual page tables are modified here. */
-    /* exclusive (exclusivePages): no mapped range can alias these pages in conflict, so the pass over every other class's ranges is
-     * not needed. i568: this pass and the table transaction's walked every one of about 50000 ranges on each map, 0.6 ms of its 0.66. */
     if(exclusive)return kIOReturnSuccess;
     const unsigned mine=aliasClass(permissions,writeback,shareability);
-    const size_t other=spanCount()-class_spans_[mine&15];
-    if(!other)return kIOReturnSuccess;
-    const bool indexNew=memory->spanCount()<=other;
-    const size_t smaller=indexNew?memory->spanCount():other;
-    uint32_t *order=a->alias_scratch;
-    if(order && smaller<=a->alias_scratch_entries) {
-        if(indexNew) {
-            for(size_t i=0;i<smaller;++i)order[i]=(uint32_t)i;
-            NativeAdrenoPhysicalIndex index(memory->spans(),order,smaller);
-            for(size_t i=0;i<spanCount();++i) {
-                const auto &r=ranges_[i];
-                if(aliasClass(r.permissions,r.writeback,r.shareability)!=mine && index.overlaps(r.physical,r.bytes))return kIOReturnBadArgument;
-            }
-        } else {
-            size_t n=0;
-            for(size_t i=0;i<spanCount();++i)
-                if(aliasClass(ranges_[i].permissions,ranges_[i].writeback,ranges_[i].shareability)!=mine)order[n++]=(uint32_t)i;
-            NativeAdrenoPhysicalIndex index(ranges_,order,n);
-            for(size_t j=0;j<memory->spanCount();++j)
-                if(index.overlaps(memory->spans()[j].physical,memory->spans()[j].bytes))return kIOReturnBadArgument;
+    if(spanCount()==class_spans_[mine&15])return kIOReturnSuccess;
+    // The upstream page-owner index proves when only imports can conflict.
+    // If unavailable, or any page belongs to a BO, retain the full check.
+    const bool importsOnly=memory->imported() &&
+        !NativeAdrenoMemory::ownsAnyPage(memory->spans(),memory->spanCount());
+    uint32_t *scratch=a->alias_scratch;
+    if(scratch && memory->spanCount()<=a->alias_scratch_entries) {
+        for(size_t i=0;i<memory->spanCount();++i)scratch[i]=(uint32_t)i;
+        NativeAdrenoPhysicalIndex index(memory->spans(),scratch,memory->spanCount());
+        for(size_t k=0;k<high_;++k) {
+            const Mapping &m=mappings_[k];
+            if(!m.memory || !m.mapped_spans || aliasClass(m.permissions,m.writeback,m.shareability)==mine)continue;
+            if(importsOnly && !m.memory->imported())continue;
+            for(size_t j=0;j<m.memory->spanCount();++j)
+                if(index.overlaps(m.memory->spans()[j].physical,m.memory->spans()[j].bytes))return kIOReturnBadArgument;
         }
         return kIOReturnSuccess;
     }
-    /* Small/unconfigured callers retain the conservative allocation-free path. */
-    for(size_t i=0;i<spanCount();++i) {
-        const ArmSmmu4KRange &r=ranges_[i];
-        if(aliasClass(r.permissions,r.writeback,r.shareability)==mine)continue;
-        for(size_t j=0;j<memory->spanCount();++j)
-            if(overlap(memory->spans()[j].physical,memory->spans()[j].bytes,r.physical,r.bytes))return kIOReturnBadArgument;
+    for(size_t k=0;k<high_;++k) {
+        const Mapping &m=mappings_[k];
+        if(!m.memory || !m.mapped_spans || aliasClass(m.permissions,m.writeback,m.shareability)==mine)continue;
+        if(importsOnly && !m.memory->imported())continue;
+        for(size_t i=0;i<m.memory->spanCount();++i)for(size_t j=0;j<memory->spanCount();++j)
+            if(overlap(m.memory->spans()[i].physical,m.memory->spans()[i].bytes,
+                memory->spans()[j].physical,memory->spans()[j].bytes))return kIOReturnBadArgument;
     }
     return kIOReturnSuccess;
 }
+
 /* Whether no mapped range can alias memory's pages with another cache/shareability/privilege class. A buffer this driver allocated
  * owns its pages until its unmap has completed (the free waits for it). An import (a user range, usually an IOSurface, which any
  * process may import again) can alias only another import or a range of driver memory it covers: it is exclusive when every mapped
@@ -229,22 +225,10 @@ IOReturn NativeAdrenoVm::preflight(const NativeAdrenoMemory *memory,unsigned upp
  * 5000-6000 spans each, every one checked against every other range. */
 bool NativeAdrenoVm::exclusivePages(const NativeAdrenoMemory *memory,unsigned cls) const
 {
-    if(!memory->imported())return true;
+    if(!memory || !memory->imported())return true;
     size_t imports=0;for(size_t k=0;k<16;++k)imports+=import_spans_[k];
     if(imports!=import_spans_[cls&15])return false;
-    const uint64_t pool=NativeAdrenoMemory::poolPhysical();const size_t poolBytes=NativeAdrenoMemory::poolBytes();
-    const auto *spans=memory->spans();const size_t n=memory->spanCount();
-    if(pool)for(size_t j=0;j<n;++j)if(overlap(spans[j].physical,spans[j].bytes,pool,poolBytes))return false;
-    size_t pairs=0;
-    for(size_t i=0;i<high_;++i) {
-        const Mapping &m=mappings_[i];
-        if(!m.memory || m.memory->imported() || m.memory->pooled())continue;
-        const size_t mn=m.memory->spanCount();
-        if(mn>(size_t)65536/(n?n:1) || (pairs+=mn*n)>(size_t)1<<20)return false;   /* too many to compare: the full check */
-        for(size_t a=0;a<mn;++a)for(size_t b=0;b<n;++b)
-            if(overlap(m.memory->spans()[a].physical,m.memory->spans()[a].bytes,spans[b].physical,spans[b].bytes))return false;
-    }
-    return true;
+    return !NativeAdrenoMemory::ownsAnyPage(memory->spans(),memory->spanCount());
 }
 NativeAdrenoVm::Mapping *NativeAdrenoVm::find(uint64_t handle)
 {return const_cast<Mapping *>(static_cast<const NativeAdrenoVm *>(this)->find(handle));}
@@ -255,38 +239,34 @@ const NativeAdrenoVm::Mapping *NativeAdrenoVm::find(uint64_t handle) const
     const Mapping *m=&mappings_[slot];
     return m->handle==handle && m->memory?m:nullptr;
 }
-/* The first range whose last byte is at or past iova (spanCount() when none). */
-size_t NativeAdrenoVm::rangeAt(uint64_t iova) const
+/* The first object whose last byte reaches iova in the selected region. */
+size_t NativeAdrenoVm::orderAt(unsigned upper,uint64_t iova) const
 {
-    size_t low=0,high=spanCount();
+    size_t low=orderBegin(upper),high=orderEnd(upper);
     while(low<high) {
         const size_t mid=low+(high-low)/2;
-        if(ranges_[mid].iova+(ranges_[mid].bytes-1)<iova)low=mid+1;else high=mid;
+        const Mapping &m=mappings_[order_[mid]];
+        if(m.iova+(m.memory->bytes()-1)<iova)low=mid+1;else high=mid;
     }
     return low;
 }
-/* The n ranges just past the table's end (one mapping's spans, consecutive in IOVA and all in one gap) take their sorted place. */
-void NativeAdrenoVm::insert(size_t n,unsigned upper)
+void NativeAdrenoVm::insert(Mapping *record)
 {
-    const size_t count=spanCount();
-    for(size_t i=0;i<n;++i)++class_spans_[aliasClass(ranges_[count+i].permissions,ranges_[count+i].writeback,ranges_[count+i].shareability)&15];
-    const size_t at=rangeAt(ranges_[count].iova);
-    /* With room for a copy of the new ranges past them, one memmove opens the gap (the three reversals moved every later range twice). */
-    if(capacity_-count-n>=n) {
-        memcpy(ranges_+count+n,ranges_+count,n*sizeof(*ranges_));
-        memmove(ranges_+at+n,ranges_+at,(count-at)*sizeof(*ranges_));
-        memcpy(ranges_+at,ranges_+count+n,n*sizeof(*ranges_));
-    } else {
-        reverse(ranges_+at,ranges_+count);reverse(ranges_+count,ranges_+count+n);reverse(ranges_+at,ranges_+count+n);
-    }
-    if(upper)upper_count_+=n;else lower_count_+=n;
+    const size_t at=orderAt(record->upper,record->iova),total=order_count_[0]+order_count_[1];
+    memmove(order_+at+1,order_+at,(total-at)*sizeof(*order_));
+    order_[at]=(uint32_t)(record-mappings_);++order_count_[record->upper];
+    class_spans_[aliasClass(record->permissions,record->writeback,record->shareability)&15]+=record->spans;
+    if(record->upper)upper_count_+=record->spans;else lower_count_+=record->spans;
 }
-void NativeAdrenoVm::erase(size_t at,size_t n,unsigned upper)
+bool NativeAdrenoVm::erase(Mapping *record)
 {
-    const size_t count=spanCount();
-    for(size_t i=0;i<n;++i)--class_spans_[aliasClass(ranges_[at+i].permissions,ranges_[at+i].writeback,ranges_[at+i].shareability)&15];
-    memmove(ranges_+at,ranges_+at+n,(count-at-n)*sizeof(*ranges_));
-    if(upper)upper_count_-=n;else lower_count_-=n;
+    const size_t at=orderAt(record->upper,record->iova),total=order_count_[0]+order_count_[1];
+    if(at>=orderEnd(record->upper) || order_[at]!=(uint32_t)(record-mappings_))return false;
+    memmove(order_+at,order_+at+1,(total-at-1)*sizeof(*order_));
+    --order_count_[record->upper];
+    class_spans_[aliasClass(record->permissions,record->writeback,record->shareability)&15]-=record->spans;
+    if(record->upper)upper_count_-=record->spans;else lower_count_-=record->spans;
+    return true;
 }
 IOReturn NativeAdrenoVm::map(NativeAdrenoMemory *memory,unsigned upper,uint64_t iova,
     unsigned permissions,unsigned writeback,unsigned shareability,uint64_t *handle)
@@ -307,16 +287,16 @@ IOReturn NativeAdrenoVm::map(NativeAdrenoMemory *memory,unsigned upper,uint64_t 
         record=&mappings_[i];free_hint_=i+1;if(high_<i+1)high_=i+1;break;
     }
     if(!record) {memory->quarantine();return fail(ArmSmmu4KStateMismatch);}
-    *record={memory,0,iova,memory->spanCount(),0,permissions,writeback,shareability,0};++objects_;
+    *record={memory,0,iova,memory->spanCount(),0,permissions,writeback,shareability,0,upper};++objects_;
     if(coherentMapping(writeback))native_adreno_coherent_skips[0]=native_adreno_coherent_skips[0]+1;
     else {
         checked=memory->publishForDevice(0,memory->bytes(),permissions&ArmSmmu4KWrite,distrust_write_combined_);
         if(checked)return fail(ArmSmmu4KIoError);
     }
     clock.lap(0,2);
-    /* Every span in one table transaction, staged in the table's free tail (preflight checked the room). */
+    /* Only this object's spans are staged; page-table leaves remain verified. */
     const size_t spans=record->spans;
-    ArmSmmu4KRange *changes=ranges_+spanCount();
+    ArmSmmu4KRange *changes=ranges_;
     for(size_t i=0;i<spans;++i) {
         const auto &span=memory->spans()[i];
         changes[i]={iova+span.offset,span.physical,span.bytes,permissions,writeback,shareability};
@@ -329,7 +309,7 @@ IOReturn NativeAdrenoVm::map(NativeAdrenoMemory *memory,unsigned upper,uint64_t 
             high.arena?&high:nullptr,upper,&visibility_[upper],changes,spans,1,budget_,&update);
     if(status)return fail(status);
     clock.lap(0,3);
-    insert(spans,upper);record->mapped_spans=spans;result_.completed_spans=spans;
+    insert(record);record->mapped_spans=spans;result_.completed_spans=spans;
     if(memory->imported())import_spans_[cls]+=spans;
     clock.lap(0,4);clock.done(0,memory->bytes());
     {
@@ -352,32 +332,36 @@ IOReturn NativeAdrenoVm::unmap(uint64_t handle)
     native_adreno_trace_stage=11;
     if(status)return fail(status);
     clock.lap(1,1);
-    unsigned upper=regions_[1].arena && record->iova>=regions_[1].arena->iova;
+    const unsigned upper=record->upper;
     if(coherentMapping(record->writeback))native_adreno_coherent_skips[1]=native_adreno_coherent_skips[1]+1;
     else if(record->permissions&ArmSmmu4KWrite) {
         if(record->memory->acquireDeviceWrites(0,record->memory->bytes())!=kIOReturnSuccess)
             return fail(ArmSmmu4KIoError);
     }
     clock.lap(1,2);
-    /* The mapping's spans are consecutive in the table; unmap them in one transaction. */
     const size_t spans=record->spans;
-    const size_t at=rangeAt(record->iova);
-    if(at>=spanCount() || ranges_[at].iova!=record->iova || spans>spanCount()-at)return fail(ArmSmmu4KStateMismatch);
+    if(!spans || spans!=record->mapped_spans || spans!=record->memory->spanCount() || spans>capacity_)
+        return fail(ArmSmmu4KStateMismatch);
+    const size_t at=orderAt(upper,record->iova);
+    if(at>=orderEnd(upper) || order_[at]!=(uint32_t)(record-mappings_))return fail(ArmSmmu4KStateMismatch);
     for(size_t i=0;i<spans;++i) {
         const auto &span=record->memory->spans()[i];
-        const ArmSmmu4KRange &r=ranges_[at+i];
-        if(r.iova!=record->iova+span.offset || r.physical!=span.physical || r.bytes!=span.bytes ||
-            r.permissions!=record->permissions || r.writeback!=record->writeback || r.shareability!=record->shareability)
-            return fail(ArmSmmu4KStateMismatch);
+        ranges_[i]={record->iova+span.offset,span.physical,span.bytes,
+            record->permissions,record->writeback,record->shareability};
     }
-    ArmSmmu4KLiveRegion lower=region(0),high=region(1);ArmSmmu4KLiveResult update;
+    /* This kit verifies the actual old leaf descriptors against these spans
+     * before unmapping, then publishes and synchronizes the real TLB. */
+    ArmSmmu4KLiveRegion lower=upper?region(0):region(0,ranges_,spans);
+    ArmSmmu4KLiveRegion high=upper?region(1,ranges_,spans):region(1);
+    ArmSmmu4KLiveResult update;
     native_adreno_trace_stage=12;
     status=ArmSmmu4KLiveUpdateContextBatch(&io_,streams_->bank,context_,lower.arena?&lower:nullptr,
-        high.arena?&high:nullptr,upper,&visibility_[upper],ranges_+at,spans,0,budget_,&update);
+        high.arena?&high:nullptr,upper,&visibility_[upper],ranges_,spans,0,budget_,&update);
     native_adreno_trace_stage=13;
     if(status)return fail(status);
     clock.lap(1,3);
-    erase(at,spans,upper);record->mapped_spans=0;result_.completed_spans=spans;
+    if(!erase(record))return fail(ArmSmmu4KStateMismatch);
+    record->mapped_spans=0;result_.completed_spans=spans;
     native_adreno_trace_stage=14;
     clock.lap(1,4);
     if(record->memory->retireAfterQuiescence()!=kIOReturnSuccess)return fail(ArmSmmu4KStateMismatch);
@@ -421,10 +405,12 @@ IOReturn NativeAdrenoVm::publishMapped(uint64_t window_start,uint64_t window_byt
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(window_bytes && window_start>UINT64_MAX-window_bytes)return kIOReturnBadArgument;
-    for(size_t i=0;i<high_;++i) {
-        const Mapping &m=mappings_[i];
+    const size_t total=order_count_[0]+order_count_[1];
+    for(size_t i=window_bytes?orderAt(0,window_start):0;i<total;++i) {
+        const Mapping &m=mappings_[order_[i]];
+        if(window_bytes && (m.upper || m.iova>=window_start+window_bytes))break;
         if(!m.memory || !inWindow(m.iova,m.memory->bytes(),window_start,window_bytes))continue;
-        if(coherentMapping(m.writeback) || importedUntouched(m.memory)) {native_adreno_coherent_skips[2]=native_adreno_coherent_skips[2]+1;continue;}
+        if(coherentMapping(m.writeback) || importedUntouched(m.memory) || m.memory->explicitSync()) {native_adreno_coherent_skips[2]=native_adreno_coherent_skips[2]+1;continue;}
         if(m.memory->publishForDevice(0,m.memory->bytes(),true,distrust_write_combined_))return fail(ArmSmmu4KIoError);
     }
     return kIOReturnSuccess;
@@ -433,11 +419,13 @@ IOReturn NativeAdrenoVm::acquireImported(uint64_t window_start,uint64_t window_b
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(window_bytes && window_start>UINT64_MAX-window_bytes)return kIOReturnBadArgument;
-    for(size_t i=0;i<high_;++i) {
-        const Mapping &m=mappings_[i];
+    const size_t total=order_count_[0]+order_count_[1];
+    for(size_t i=window_bytes?orderAt(0,window_start):0;i<total;++i) {
+        const Mapping &m=mappings_[order_[i]];
+        if(window_bytes && (m.upper || m.iova>=window_start+window_bytes))break;
         if(!m.memory || !m.memory->imported() || !(m.permissions&ArmSmmu4KWrite) ||
             !inWindow(m.iova,m.memory->bytes(),window_start,window_bytes))continue;
-        if(coherentMapping(m.writeback) || importedUntouched(m.memory)) {native_adreno_coherent_skips[3]=native_adreno_coherent_skips[3]+1;continue;}
+        if(coherentMapping(m.writeback) || importedUntouched(m.memory) || m.memory->explicitAcquire()) {native_adreno_coherent_skips[3]=native_adreno_coherent_skips[3]+1;continue;}
         if(m.memory->acquireDeviceWrites(0,m.memory->bytes()))return fail(ArmSmmu4KIoError);
     }
     return kIOReturnSuccess;
@@ -472,8 +460,10 @@ IOReturn NativeAdrenoVm::reassertWriteCombined(uint32_t *reset,uint64_t window_s
     if(!reset)return kIOReturnBadArgument;
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(window_bytes && window_start>UINT64_MAX-window_bytes)return kIOReturnBadArgument;
-    for(size_t i=0;i<high_;++i) {
-        const Mapping &m=mappings_[i];
+    const size_t total=order_count_[0]+order_count_[1];
+    for(size_t i=window_bytes?orderAt(0,window_start):0;i<total;++i) {
+        const Mapping &m=mappings_[order_[i]];
+        if(window_bytes && (m.upper || m.iova>=window_start+window_bytes))break;
         if(!m.memory || !inWindow(m.iova,m.memory->bytes(),window_start,window_bytes))continue;
         const IOReturn status=m.memory->reassertWriteCombined(reset);
         if(status)return status;

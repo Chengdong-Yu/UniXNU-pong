@@ -90,7 +90,7 @@ void pong_boot_snapshot_start(const char *name)
 {
     if(strcmp(name,"SpringBoard") && strcmp(name,"backboardd") && strcmp(name,"lsd") &&
        strcmp(name,"containermanagerd") && strcmp(name,"containermanagerd_system") &&
-       strcmp(name,"runningboardd") && strcmp(name,"PosterBoard"))return;
+       strcmp(name,"runningboardd") && strcmp(name,"PosterBoard") && strcmp(name,"wifid"))return;
     process_name=name;
     pthread_attr_t attr;
     if(pthread_attr_init(&attr))return;

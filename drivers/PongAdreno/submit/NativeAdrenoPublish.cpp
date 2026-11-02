@@ -18,8 +18,13 @@
 #include <IOKit/IOUserClient.h>
 #include <string.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
+#include <pexpert/pexpert.h>
 #include "NativeAdrenoUserClient.h"
 #include "../PongAdrenoScanout.h"
+#include "NativeGpuTrace.inc"
+extern "C" unsigned kauth_cred_getuid(void *);
+extern "C" int proc_selfpid(void);
 extern "C" const NativeAdrenoStatus *pong_adreno_native_status(void);
 extern "C" bool pong_adreno_native_healthy(void);
 
@@ -51,7 +56,7 @@ enum : UInt32 {NativeAdrenoPluginOpenType=0x4147,NativeAdrenoTunnelMagic=0x4e544
  * original sandbox profiles admit this class but not the presenter's own service. Methods 0x7000 + the presenter's NGP_METHOD numbers (mode,
  * wait for a frame, complete it) are forwarded unchanged, without the GPU lock (a wait sleeps); memory type NativeAdrenoScanoutType is the
  * writable scanout. Nothing here touches the GPU. */
-enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7003,NativeAdrenoScanoutType=0x5343,
+enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7004,NativeAdrenoScanoutType=0x5343,
                NativeAdrenoHandoffOpenType=0x4148};
 /* Open type 0x4148 is a connection that serves only the hand-off: it does not mount a GPU core, so it does not need (or take) a
  * GPU connection slot (the Vulkan driver holds one for as long as the Metal device lives). Same class, so the same sandbox admission. */
@@ -108,19 +113,10 @@ volatile uint32_t native_adreno_mount_fail[4];
 struct NativeAdrenoAskerRecord {char name[20]; uint32_t reads;};
 struct NativeAdrenoAskerRecord native_adreno_metal_askers[12];
 }
-/* Preserve the working 32-bit client layout. backboardd needs its 1 GiB
- * window for the compositor; the other processes keep their original
- * disjoint windows above the boot firmware/CP reservation. */
-static const struct {uint64_t start,bytes;} kClientWindows[NativeAdrenoMaxClients]={
-    {0x20000000ull,0x40000000ull},{0x60000000ull,0x0AAA9000ull},
-    {0x6AAA9000ull,0x0AAA9000ull},{0x75552000ull,0x0AAA9000ull},
-    {0x80000000ull,0x10000000ull},{0x90000000ull,0x10000000ull},
-    {0xA0000000ull,0x10000000ull},{0xB0000000ull,0x10000000ull},
-    {0xC0000000ull,0x08000000ull},{0xC8000000ull,0x08000000ull},
-    {0xD0000000ull,0x08000000ull},{0xD8000000ull,0x08000000ull},
-    {0xE0000000ull,0x08000000ull},{0xE8000000ull,0x08000000ull},
-    {0xF0000000ull,0x08000000ull},{0xF8000000ull,0x08000000ull}};
-static_assert(sizeof(kClientWindows)/sizeof(kClientWindows[0])==NativeAdrenoMaxClients);
+/* ABI1 still shares one32-bit space. Keep both UI reservations unchanged;
+ * lease the remaining VA by live process demand instead of wasting fourteen
+ * fixed128MiB windows. These are VA leases, never wired RAM reservations. */
+struct NativeAdrenoClientWindow {uint64_t start=0,bytes=0;};
 
 namespace {
 void shiftName(char names[3][17]) {
@@ -139,10 +135,38 @@ struct Published {
     IOLock *lock=nullptr;
     IOService *service=nullptr;
     bool slots[NativeAdrenoMaxClients]{};
+    NativeAdrenoClientWindow windows[NativeAdrenoMaxClients]{};
     bool kernel_client=false;
     uint32_t input_bits=0,output_bits=0;
     uint32_t opened=0,closed=0;
 } g;
+static NativeAdrenoClientWindow clientWindow(unsigned slot,const char *name)
+{
+    if(slot==0)return {0x20000000ull,0x50000000ull};
+    if(slot==1)return {0x70000000ull,0x20000000ull};
+    bool poster=false;
+    for(unsigned at=0;at<20 && name[at];++at)
+        if(!strncmp(name+at,"Poster",6) || !strncmp(name+at,"Wallpaper",9)) {poster=true;break;}
+    // MercuryPoster hit real device-VA OOM with128MiB while importing its
+    // FP16 targets. Prefer384MiB for posters,256MiB for input/preferences,
+    //128MiB otherwise. Search actual holes; never relocate a live mapping.
+    uint64_t preferred=poster?0x18000000ull:
+        (!strcmp(name,"InputUI") || !strcmp(name,"Preferences"))?0x10000000ull:0x08000000ull;
+    for(uint64_t amount=preferred;amount>=0x04000000ull;amount-=0x04000000ull) {
+        uint64_t start=0x90000000ull;
+        for(unsigned pass=0;pass<=NativeAdrenoMaxClients && start+amount<=0x100000000ull;++pass) {
+            uint64_t next=start;
+            for(unsigned i=2;i<NativeAdrenoMaxClients;++i)if(g.slots[i]) {
+                const auto &window=g.windows[i];
+                if(start<window.start+window.bytes && window.start<start+amount && next<window.start+window.bytes)
+                    next=window.start+window.bytes;
+            }
+            if(next==start)return {start,amount};
+            start=next;
+        }
+    }
+    return {};
+}
 }
 
 class NativeAdrenoGpuPublished : public IOService {
@@ -158,6 +182,7 @@ class AGXDeviceUserClient : public IOUserClient {
     bool live_=false;
     bool closing_=false;
     bool handoffOnly_=false;
+    IOBufferMemoryDescriptor *traceSnapshots_[2]{};
     task_t handoffTask_=nullptr;
     bool kernel_=false;
     NativeAdrenoUserClient *core_=nullptr;   /* own core; deleted in free(), so a call that raced the close sees live_ false, never freed memory */
@@ -178,7 +203,7 @@ class AGXDeviceUserClient : public IOUserClient {
     IOReturn run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size);
 public:
     void setHandoffOnly(task_t task) {handoffOnly_=true;handoffTask_=task;}
-    bool mount(bool kernel);
+    IOReturn mount(bool kernel);
     friend IOReturn runCore(AGXDeviceUserClient *,uint32_t,const void *,size_t,void *,size_t);
     friend void nativeAdrenoMailboxPoller(void *,wait_result_t);
     IOReturn clientClose() APPLE_KEXT_OVERRIDE;
@@ -229,11 +254,11 @@ static NativeAdrenoClientRecord *clientRecord(const char *name)
     }
     return nullptr;
 }
-bool AGXDeviceUserClient::mount(bool kernel)
+IOReturn AGXDeviceUserClient::mount(bool kernel)
 {
     proc_selfname(name_,sizeof name_);
     NativeAdrenoUserClient *core=new NativeAdrenoUserClient;
-    if(!core)return false;
+    if(!core)return kIOReturnNoMemory;
     IOLockLock(g.lock);
     bool ok=false;
     /* The render server takes slot 0 (the large window) when free; every other process, or a second render-server connection, the next free one. */
@@ -241,19 +266,27 @@ bool AGXDeviceUserClient::mount(bool kernel)
     if(kernel)slot=g.kernel_client?NativeAdrenoMaxClients:0;
     else {
         if(!strncmp(name_,"backboardd",sizeof name_) && !g.slots[0])slot=0;
-        for(unsigned i=1;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients;++i)if(!g.slots[i])slot=i;
+        if(!strncmp(name_,"SpringBoard",sizeof name_) && !g.slots[1])slot=1;
+        for(unsigned i=2;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients;++i)if(!g.slots[i])slot=i;
     }
     const IOReturn opened=slot<NativeAdrenoMaxClients?core->open(NativeAdrenoAbiVersion,g.vm,g.submit,g.ring,g.input_bits,g.output_bits):kIOReturnNoSpace;
+    IOReturn result=opened;
     if(opened!=kIOReturnSuccess) {native_adreno_mount_fail[0]=slot<NativeAdrenoMaxClients?2:1;native_adreno_mount_fail[1]=uint32_t(opened);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;}
     if(opened==kIOReturnSuccess) {
         if(g.timer)core->attachTimer(g.timer);
         if(g.info)core->attachDeviceInfo(g.info);
         if(const auto *status=pong_adreno_native_status())core->attachStatus(status);
         /* Queue ranges: the kernel client keeps range 0 alone (no user slot is live while the board's self-test runs); users get their slot's. */
-        const IOReturn scoped=kernel?core->setScope(0,0,0):core->setScope(slot*NativeAdrenoAbiMaxQueues,kClientWindows[slot].start,kClientWindows[slot].bytes);
+        const NativeAdrenoClientWindow window=kernel?NativeAdrenoClientWindow{}:clientWindow(slot,name_);
+        const IOReturn scoped=kernel?core->setScope(0,0,0):window.bytes?
+            core->setScope(slot*NativeAdrenoAbiMaxQueues,window.start,window.bytes):kIOReturnNoSpace;
+        result=scoped;
         if(scoped==kIOReturnSuccess) {
             core_=core;core=nullptr;slot_=slot;kernel_=kernel;live_=true;ok=true;
-            if(kernel)g.kernel_client=true;else g.slots[slot]=true;
+            if(kernel)g.kernel_client=true;else {
+                g.windows[slot]=window;g.slots[slot]=true;
+                IOLog("NativeAdreno: %s VA lease=%uMiB start=0x%llx slot=%u\n",name_,unsigned(window.bytes>>20),(unsigned long long)window.start,slot);
+            }
             ++g.opened;
             if(NativeAdrenoClientRecord *record=clientRecord(name_))record->slot=slot;
         } else {
@@ -280,7 +313,8 @@ bool AGXDeviceUserClient::mount(bool kernel)
     }
     IOLockUnlock(g.lock);
     if(core)delete core;
-    return ok;
+    if(result)IOLog("Pong Adreno: client %s mount failed slot=%u opened=0x%x result=0x%x\n",name_,slot,opened,result);
+    return result;
 }
 /* Removes the cached view(s) of token (0 = all) and tears down every user mapping of them, so the BO's pages are never freed while a user
  * PTE still points at them, whether or not the client unmapped. */
@@ -328,7 +362,19 @@ IOReturn AGXDeviceUserClient::clientClose()
     if(gMailboxOwner==this) {mailbox=gMailboxOwner;gMailboxOwner=nullptr;}
     if(live_) {
         const uint64_t peak=core_->windowPeak();
-        status=core_->releaseAll(&g.clock,2000000);
+        /* This client's unmaps alter the same table used by every other
+         * client. Drain globally, yielding the gate between polls. Waiting
+         * for two seconds inside releaseAll used to block every GPU caller
+         * and could still unmap while another client's work was in flight. */
+        const uint64_t began=g.clock.now_us(g.clock.cookie);
+        for(;;) {
+            status=pong_adreno_native_healthy()?g.submit->waitAll(&g.clock,0):kIOReturnNotReady;
+            if(status!=kIOReturnTimeout || g.clock.now_us(g.clock.cookie)-began>=500000)break;
+            IOLockUnlock(g.lock);
+            if(g.clock.idle)g.clock.idle(g.clock.cookie);else IOSleep(1);
+            IOLockLock(g.lock);
+        }
+        if(!status)status=core_->releaseAll(&g.clock,0);
         /* A failed teardown leaves the objects live and the slot taken: nothing is forced or reused. */
         if(!status) {
             live_=false;
@@ -348,6 +394,7 @@ IOReturn AGXDeviceUserClient::clientClose()
 void AGXDeviceUserClient::free()
 {
     if(handoffOnly_ && handoffTask_) {pong_scanout_disconnect(handoffTask_);handoffTask_=nullptr;}
+    for(auto *snapshot:traceSnapshots_)if(snapshot)snapshot->release();
     (void)dropViews(0);
     if(views_) {IODelete(views_,View,MaxViews);views_=nullptr;}
     /* Still live only when a teardown failed: its objects stay referenced by the VM and the ring, so the core is kept, not freed. */
@@ -359,6 +406,24 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
     if(memory)*memory=nullptr;
     if(!memory || !options)return kIOReturnBadArgument;
     IOReturn status=kIOReturnNotFound;
+    // Root-only snapshots use ordinary IOKit mapped memory, avoiding a new
+    // UFS/export region or large inline Mach replies. Each returned buffer
+    // owns its copied data until the helper unmaps it; no GPU gate is held.
+    if(type==0x4754 || type==0x4755) {
+        if(kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
+        if(!native_gpu_trace_enabled())return kIOReturnNotReady;
+        const unsigned index=type==0x4754?0:1;
+        if(traceSnapshots_[index]){traceSnapshots_[index]->retain();*memory=traceSnapshots_[index];*options=kIOMapAnywhere|kIOMapReadOnly;return kIOReturnSuccess;}
+        const uint32_t capacity=type==0x4754?sizeof(NativeGpuTraceHeader)+
+            (NativeGpuTraceCapacity+NativeGpuTraceMetadata+(gpuPixels?NativeGpuCaptureRecords*NativeGpuPixelSlots:0))*sizeof(NativeGpuTraceRecord):
+            16+NativeGpuPixelSlots*(sizeof(NativeGpuPixelHeader)+NativeGpuPixelBytes);
+        auto buffer=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,capacity,4096);
+        if(!buffer)return kIOReturnNoMemory;
+        const uint32_t size=type==0x4754?native_gpu_trace_snapshot(buffer->getBytesNoCopy(),capacity):
+            native_gpu_pixel_snapshot(buffer->getBytesNoCopy(),capacity);
+        if(!size){buffer->release();return kIOReturnNotReady;}
+        buffer->setLength(size);traceSnapshots_[index]=buffer;buffer->retain();*memory=buffer;*options=kIOMapAnywhere|kIOMapReadOnly;return kIOReturnSuccess;
+    }
     if(type==NativeAdrenoScanoutType) {
         if(!live_ && !handoffOnly_)return kIOReturnNotReady;
         IOMemoryDescriptor *scanout=native_gop_handoff_memory();
@@ -385,13 +450,24 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
     if(!views_)views_=IONewZero(View,MaxViews);
     if(!views_) {IOLockUnlock(g.lock);return kIOReturnNoMemory;}
     for(size_t i=0;i<MaxViews;++i)if(views_[i].descriptor && views_[i].token==type) {
-        views_[i].descriptor->retain();*memory=views_[i].descriptor;*options=kIOMapAnywhere|kIOMapInhibitCache;
+        views_[i].descriptor->retain();*memory=views_[i].descriptor;
+        NativeAdrenoMemory *bo=live_?core_->memoryForToken(type):nullptr;
+        *options=kIOMapAnywhere|((bo && bo->system())?0:kIOMapInhibitCache);
         native_adreno_view_diag[2]=native_adreno_view_diag[2]+1;
         IOLockUnlock(g.lock);
         return kIOReturnSuccess;
     }
     NativeAdrenoMemory *backing=live_?core_->memoryForToken(type):nullptr;
-    if(backing) {
+    if(backing && backing->system() && backing->descriptor()) {
+        // Map the VM object whose prepare() owns the pages/cache attribute,
+        // rather than creating a second physical pager over a wired UPL.
+        for(size_t i=0;i<MaxViews;++i)if(!views_[i].descriptor) {
+            IOMemoryDescriptor *descriptor=backing->descriptor();
+            descriptor->retain();views_[i]={type,descriptor};
+            descriptor->retain();*memory=descriptor;*options=kIOMapAnywhere;
+            status=kIOReturnSuccess;native_adreno_view_diag[1]++;break;
+        }
+    } else if(backing) {
         /* The BO's pages are cached in the kernel and the GPU's PTEs are non-cacheable, so the client needs an uncached
          * view. A mapping of the buffer descriptor with a different cache mode is not reliable, so describe the same raw
          * physical spans (the ones the SMMU maps) and ask for kIOMapInhibitCache, exactly how the board code maps the
@@ -460,13 +536,30 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
          * board's (until the next GPU interrupt, at most 100 us). */
         NativeAdrenoAbiWaitFence poll{};
         memcpy(&poll,input,sizeof(poll));
-        const uint64_t timeout_us=poll.timeout_ns/1000,began=g.clock.now_us(g.clock.cookie);
+        const uint64_t requested_us=poll.timeout_ns/1000;
+        /* Vulkan may request UINT64_MAX. Preserve retryable timeout semantics
+         * without pinning one IOKit request forever if the GPU stops. */
+        const uint64_t timeout_us=requested_us>500000?500000:requested_us;
+        const uint64_t began=g.clock.now_us(g.clock.cookie);
         poll.timeout_ns=0;
         uint64_t waited=0;
         for(;;) {
+            waited=g.clock.now_us(g.clock.cookie)-began;
+            // Upstream dd43abd: unfinished CP work needs no global device
+            // lock on every poll. Only the advisory fence-page read is
+            // outside it; completion, timeout, failure and ownership checks
+            // still run through the existing locked dispatch below.
+            if(waited<timeout_us && poll.fence<=UINT32_MAX &&
+               __atomic_load_n(&connection->live_,__ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&connection->closing_,__ATOMIC_ACQUIRE) &&
+               g.ring && g.ring->fencePending(uint32_t(poll.fence))) {
+                native_adreno_wait_outer[2]=native_adreno_wait_outer[2]+1;
+                if(g.clock.idle && !g.clock.idle(g.clock.cookie))continue;
+            }
             /* The connection's own core while it is live; a close that ran between two polls ends the wait. */
             IOLockLock(g.lock);
-            status=connection->live_ && !connection->closing_?connection->core_->dispatch(method,&poll,sizeof(poll),output,output_size,&g.clock):kIOReturnNotReady;
+            status=connection->live_ && !connection->closing_ && pong_adreno_native_healthy()?
+                connection->core_->dispatch(method,&poll,sizeof(poll),output,output_size,&g.clock):kIOReturnNotReady;
             IOLockUnlock(g.lock);
             waited=g.clock.now_us(g.clock.cookie)-began;
             if(status!=kIOReturnTimeout || waited>=timeout_us)break;
@@ -476,12 +569,56 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         native_adreno_wait_outer[0]=native_adreno_wait_outer[0]+1;native_adreno_wait_outer[1]=native_adreno_wait_outer[1]+waited;
         if(waited>native_adreno_wait_outer[3])native_adreno_wait_outer[3]=waited;
     } else {
+        NativeAdrenoSystemPages pages{},freed{};
+        const bool allocating=method==NativeAdrenoMethodBoAlloc && input && output &&
+            input_size==sizeof(NativeAdrenoAbiBoAlloc) && output_size==sizeof(NativeAdrenoAbiBoAllocReply);
+        if(allocating) {
+            NativeAdrenoAbiBoAlloc request{};memcpy(&request,input,sizeof(request));
+            if(!request.contiguous && request.bytes && !(request.bytes&4095) &&
+               request.bytes<=(UINT64_C(1)<<NativeAdrenoAbiMaxBoBytesShift) &&
+               request.align_log2>=12 && request.align_log2<=24) {
+                IOLockLock(g.lock);const bool live=connection->live_ && !connection->closing_;IOLockUnlock(g.lock);
+                if(!live)return kIOReturnNotReady;
+                // Zero-fill, wire and apply cache mode outside the shared
+                // device gate; unrelated submits and completions keep moving.
+                const IOReturn prepared=NativeAdrenoMemory::prepareSystem(size_t(request.bytes),&pages);
+                if(prepared)return prepared;
+            }
+        }
         IOLockLock(g.lock);
-        status=connection->live_ && !connection->closing_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;
+        status=connection->live_ && !connection->closing_?kIOReturnSuccess:kIOReturnNotReady;
+        if(!status && method==NativeAdrenoMethodBoFree) {
+            /* The client's resources may be referenced by its IBs, not just
+             * the IB BO itself. Drain its whole queue range before a free;
+             * disjoint clients no longer hold up each other's releases.
+             * Poll under the gate, but never sleep with the gate held: other
+             * clients must be able to observe/retire their own completions. */
+            const uint64_t began=g.clock.now_us(g.clock.cookie);
+            for(;;) {
+                status=g.submit->retireCompleted();
+                if(!status && connection->core_->ownRangeOutstanding())status=kIOReturnTimeout;
+                if(status!=kIOReturnTimeout || g.clock.now_us(g.clock.cookie)-began>=500000)break;
+                IOLockUnlock(g.lock);
+                if(g.clock.idle)g.clock.idle(g.clock.cookie);else IOSleep(1);
+                IOLockLock(g.lock);
+                if(!connection->live_ || connection->closing_ || !pong_adreno_native_healthy()) {
+                    status=kIOReturnNotReady;break;
+                }
+            }
+        }
+        if(!status) {
+            connection->core_->offerSystemPages(pages.descriptor?&pages:nullptr);
+            if(method==NativeAdrenoMethodBoFree)connection->core_->collectFreedPages(&freed);
+            status=connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock);
+            connection->core_->offerSystemPages(nullptr);
+            connection->core_->collectFreedPages(nullptr);
+        }
         if(method==NativeAdrenoMethodBoMap && !status && connection->live_ && !connection->kernel_)
             if(NativeAdrenoClientRecord *record=clientRecord(connection->name_))
                 if(connection->core_->windowPeak()>>20>record->peak_mib)record->peak_mib=uint32_t(connection->core_->windowPeak()>>20);
         IOLockUnlock(g.lock);
+        NativeAdrenoMemory::discardSystem(&pages);
+        NativeAdrenoMemory::discardSystem(&freed);
     }
     native_adreno_metal_diag.inflight=0;
     native_adreno_metal_diag.calls=native_adreno_metal_diag.calls+1;
@@ -491,6 +628,16 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
 }
 IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size)
 {
+    if(method==NativeGpuTraceMethod) {
+        if(!input || input_size!=sizeof(NativeGpuTraceRecord) || output_size)return kIOReturnBadArgument;
+        const auto *record=static_cast<const NativeGpuTraceRecord *>(input);
+        if(record->event<30 || record->event>63)return kIOReturnBadArgument;
+        native_gpu_trace_record(record->event,proc_selfpid(),record->value,12);return kIOReturnSuccess;
+    }
+    if(method==NativeGpuPixelMethod) {
+        if(!input || input_size!=sizeof(NativeGpuPixelPiece) || output_size)return kIOReturnBadArgument;
+        return native_gpu_pixel_put(static_cast<const NativeGpuPixelPiece *>(input),proc_selfpid())?kIOReturnNoResources:kIOReturnSuccess;
+    }
     if(method>=NativeAdrenoHandoffBase && method<=NativeAdrenoHandoffLast)
         return native_gop_handoff_call(method-NativeAdrenoHandoffBase,current_task(),input,input_size,output,output_size);
     if(method==NativeAdrenoExportMethod) {
@@ -552,6 +699,9 @@ IOReturn AGXDeviceUserClient::action(OSObject *target,void *,IOExternalMethodArg
 IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *arguments,
     IOExternalMethodDispatch *,OSObject *target,void *reference)
 {
+    if((selector==NativeGpuTraceMethod || selector==NativeGpuPixelMethod) && arguments)
+        return run(selector,arguments->structureInput,arguments->structureInputSize,
+                   arguments->structureOutput,arguments->structureOutputSize);
     /* One entry per ABI method; sizes are the exact wire records. */
     static const IOExternalMethodDispatch table[]={
         {&action,0,0,0,sizeof(NativeAdrenoAbiParams)},
@@ -570,7 +720,10 @@ IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,IOExternalMethodA
         {&action,0,sizeof(NativeAdrenoAbiBoCpuUnmap),0,0},
         {&action,0,0,0,sizeof(NativeAdrenoAbiDeviceInfo)},
         {&action,0,sizeof(NativeAdrenoAbiBoImport),0,sizeof(NativeAdrenoAbiBoAllocReply)},
-        {&action,0,sizeof(NativeAdrenoAbiSubmitBatch),0,sizeof(NativeAdrenoAbiSubmitReply)}};
+        {&action,0,sizeof(NativeAdrenoAbiSubmitBatch),0,sizeof(NativeAdrenoAbiSubmitReply)},
+        {&action,0,sizeof(NativeAdrenoAbiPriority),0,0},
+        {&action,0,sizeof(NativeAdrenoAbiSyncHostRange),0,0},
+        {&action,0,sizeof(NativeAdrenoAbiSyncHostBatch),0,sizeof(NativeAdrenoAbiSyncHostBatchReply)}};
     native_adreno_metal_diag.ext_entries=native_adreno_metal_diag.ext_entries+1;
     if(selector<256)native_adreno_metal_diag.sel_bits[selector>>5]|=1u<<(selector&31);
     if(selector>=NativeAdrenoHandoffBase && selector<=NativeAdrenoHandoffLast) {
@@ -613,7 +766,8 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     OSDictionary *properties,IOUserClient **handler,unsigned limit)
 {
     if(handler)*handler=nullptr;
-    if(!handler || !g.published || !pong_adreno_native_healthy())return kIOReturnNotReady;
+    if(!handler || !g.published || (type!=0x4754 && !pong_adreno_native_healthy()))return kIOReturnNotReady;
+    if(type==0x4754 && kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
     /* Progress markers: open types 0x4147xxxx (xxxx nonzero) are not connections. The plugin sends one before and after each step so
      * that a sandbox that admits neither selectors nor mapping, or a crash, still leaves a trace of how far it got. */
     if((type>>16)==NativeAdrenoPluginOpenType && (type&0xffff)) {
@@ -701,6 +855,10 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
         record.type=type;record.macf=macf;record.res=resolver;record.attach=attach_state;record.foreign=type!=NativeAdrenoPluginOpenType;
         native_adreno_open_log_count=native_adreno_open_log_count+1;
     }
+    if(type==0x4754) {
+        if(attach_state!=1){connection->release();return kIOReturnNotReady;}
+        *handler=connection;return kIOReturnSuccess; // root read-only snapshots, no GPU/scanout slot
+    }
     if(type==NativeAdrenoHandoffOpenType) {
         const IOReturn handoff=pong_scanout_connect(owningTask);
         if(handoff) {connection->detach(provider);connection->release();return handoff;}
@@ -738,7 +896,7 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     IOLockUnlock(g.lock);
     IOReturn refusal=kIOReturnSuccess;
     if(capped)refusal=kIOReturnBusy;
-    else if(!connection->mount(kernel))refusal=kIOReturnBusy;   /* every slot taken */
+    else refusal=connection->mount(kernel);
     if(refusal) {
         connection->release();
         native_adreno_metal_diag.busy=native_adreno_metal_diag.busy+1;
@@ -783,6 +941,7 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
     uint32_t input_bits,uint32_t output_bits)
 {
     if(g.published || !vm || !submit || !ring || !clock || !clock->now_us)return kIOReturnBadArgument;
+    gpuTraceInit();
     g.lock=IOLockAlloc();
     NativeAdrenoGpuPublished *service=new NativeAdrenoGpuPublished;
     if(!g.lock || !service || !service->init() || !service->attach(IOService::getPlatform())) {
@@ -791,6 +950,7 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
     }
     g.vm=vm;g.submit=submit;g.ring=ring;g.clock=*clock;g.timer=timer;g.info=info;g.input_bits=input_bits;g.output_bits=output_bits;
     g.service=service;g.published=true;
+    gpuTraceEvent(GpuTraceConfig,0,1,0,0,input_bits,output_bits,0);
     service->setName("NativeAdrenoGpu");
     service->registerService();
     return kIOReturnSuccess;

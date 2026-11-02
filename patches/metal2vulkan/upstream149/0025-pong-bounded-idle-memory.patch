@@ -1,0 +1,42 @@
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -73,6 +73,17 @@
+ /// each frame, made and freed a block a frame. With two they make and free none
+ /// (`runtime_lane::pool_churn`).
+ pub(super) const KEPT_EMPTY_BLOCKS: usize = 2;
++
++// Optional board budget for idle memory only. The upstream default remains
++// unchanged when unset; live resources and submitted DMA are never reclaimed.
++fn board_spare_limit() -> Option<u64> {
++    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
++    *LIMIT.get_or_init(|| {
++        std::env::var("METAL2VULKAN_SPARE_IMAGE_MIB").ok()?
++            .parse::<u64>().ok()?.checked_mul(1 << 20)
++    })
++}
++
+ 
+ /// How long a kept empty pooled block beyond its pool's one stays empty before it is freed
+ /// ([`Pool::stale`]): a frame's dip comes back well within it.
+@@ -575,7 +586,7 @@
+         let kept = (self.blocks.iter().enumerate())
+             .filter(|&(other, block)| other != index && block.as_ref().is_some_and(PoolBlock::kept))
+             .count();
+-        if !dedicated && kept < KEPT_EMPTY_BLOCKS {
++        if !dedicated && kept < if board_spare_limit().is_some() { 1 } else { KEPT_EMPTY_BLOCKS } {
+             if let Some(block) = self.blocks[index].as_mut() {
+                 block.emptied = Some(now);
+             }
+@@ -1469,7 +1480,11 @@
+         }
+         self.age_spare(device, now);
+         match freed {
+-            Some((block, true)) if holds == Holds::Images && block.plain() => {
++            Some((block, true)) if holds == Holds::Images && block.plain() &&
++                board_spare_limit().map_or(true, |limit| {
++                    let kept = self.spare.iter().fold(0u64, |sum, spare| sum.saturating_add(spare.block.size));
++                    block.size <= limit.saturating_sub(kept)
++                }) => {
+                 self.say_block("kept a dedicated block of an image spare", &block);
+                 self.spare.push(Spare {
+                     pool: (holds, type_index),

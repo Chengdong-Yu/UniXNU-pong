@@ -4,6 +4,7 @@
  * endpoint DMA storage and translation tables stay retained until reset. */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOMapper.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <kern/thread.h>
@@ -11,21 +12,25 @@
 #include <pexpert/pexpert.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <sys/random.h>
+#include <vm/memory_types.h>
 #include "nw_abi.h"
 #include "../PongAdreno/ArmSmmu4K/ArmSmmu4KProgram.h"
 #include "PongWifiInputs.h"
 #include "QcomRpmh.h"
+#include "../PongPower/PongPlatformResources.h"
 extern "C" {
+boolean_t pmap_valid_page(ppnum_t);
+void pmap_set_cache_attributes(ppnum_t,unsigned int);
+unsigned int pmap_cache_attributes(ppnum_t);
+kern_return_t clear_wait(thread_t, wait_result_t);
 int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 void pong11_lx_irq_raise_all(void);
 void pong_wifi_net_start(const uint8_t mac[6]);
 bool pong_wifi_net_prepare(void);
+void pong_wifi_net_failed(void);
+int nw_wifi_firmware_error(void);
 void PongWifiNetStaticInit(void);
 bool pong_ufs_ready(void);
-bool pong_rpmh_vote(uint32_t,uint32_t);
-bool pong_smmu_lease_lock(void);
-void pong_smmu_lease_unlock(void);
-void pong_rpmh_init(void);
 extern const uint8_t pong_wifi_firmware[], pong_wifi_firmware_end[];
 }
 extern kmod_info_t g_kernel_kmod_info;
@@ -34,7 +39,7 @@ namespace {
 constexpr uint64_t Iova=0xa0000000;
 constexpr unsigned MsiAddressLo=0x820, MsiAddressHi=0x824, MsiEnable=0x828, MsiMask=0x82c, MsiStatus=0x830;
 constexpr unsigned PcieGlobalIntid=32+140, ParfMsi0=1u<<23;
-constexpr size_t ArenaBytes=128*1024*1024, TableBytes=512*1024;
+constexpr size_t ArenaBytes=64*1024*1024, TableBytes=512*1024;
 struct Window {
  IOMemoryMap *map=nullptr; volatile uint8_t *v=nullptr; size_t n=0;
  bool open(uint64_t pa,size_t bytes) {
@@ -45,7 +50,7 @@ struct Window {
  uint32_t r(size_t o) const {uint32_t x=*reinterpret_cast<volatile uint32_t *>(v+o);__asm__ volatile("dmb oshld":::"memory");return x;}
  void w(size_t o,uint32_t x) { *reinterpret_cast<volatile uint32_t *>(v+o)=x;__asm__ volatile("dsb oshst":::"memory");}
 };
-Window gcc,tlmm,parf,phy,dbi,atu,cfg,bar,smmu,gic,db,rsc;
+Window gcc,tlmm,parf,phy,dbi,atu,cfg,bar,smmu,gic,db;
 Window pmicCore,pmicConfig,pmicObserver;
 unsigned pmicChannels;
 IOBufferMemoryDescriptor *arena,*tables,*msiPage;
@@ -108,12 +113,21 @@ bool pmicRead(unsigned channel,unsigned reg,uint8_t *out,unsigned bytes) {
 bool railReady(const PongWifiRail &r) {
  if(!r.ppid)return true; // No guessed peripheral for shared analogue LDOs.
  const int channel=pmicChannel(r.ppid);uint8_t id[2]={};
- if(channel<0||!pmicRead(unsigned(channel),4,id,2)||id[0]!=r.type||id[1]!=r.subtype) {
-  IOLog("PongWifi: rail %s PPID=%x unavailable/type mismatch %x/%x\n",r.name,r.ppid,id[0],id[1]);return false;
- }
- uint8_t status=0,enable=0,voltage[2]={};unsigned mv=0;const uint64_t end=now()+100;
+ if(channel<0) {IOLog("PongWifi: rail %s PPID=%x has no observer channel\n",r.name,r.ppid);return false;}
+ uint8_t status=0,enable=0,voltage[2]={};unsigned mv=0,readFailures=0;const uint64_t end=now()+100;
  do {
-  if(!pmicRead(unsigned(channel),8,&status,1)||!pmicRead(unsigned(channel),0x46,&enable,1)||!pmicRead(unsigned(channel),0x40,voltage,2))return false;
+  // SPMI observer reads can be denied while the remote regulator owner
+  // changes this peripheral. Retry the complete sample within the settling
+  // deadline; a single transient read is not evidence of an unpowered rail.
+  // Never accept partially old status/enable/voltage as a coherent sample.
+  // Identification uses the same observer transport as the state reads.
+  // services93's first smpe3 read returned 00/00 before any voltage query;
+  // it must receive the same bounded retry as the rest of the sample.
+  // A successful sample still requires the exact Pong PMIC type/subtype.
+  if(!pmicRead(unsigned(channel),4,id,2)||id[0]!=r.type||id[1]!=r.subtype||
+     !pmicRead(unsigned(channel),8,&status,1)||!pmicRead(unsigned(channel),0x46,&enable,1)||!pmicRead(unsigned(channel),0x40,voltage,2)) {
+   ++readFailures;IOSleep(1);continue;
+  }
   mv=unsigned(voltage[0])|(unsigned(voltage[1])<<8);
   if((status&0x80)&&(enable&0x80)&&mv>=r.mv) {
    // Another PMIC consumer may legitimately request a higher setpoint.
@@ -121,27 +135,8 @@ bool railReady(const PongWifiRail &r) {
   }
   IOSleep(1);
  }while(now()<end);
- IOLog("PongWifi: rail %s not ready PPID=%x requested=%umV actual=%umV status=%x enable=%x\n",r.name,r.ppid,r.mv,mv,status,enable);
+ IOLog("PongWifi: rail %s not ready PPID=%x requested=%umV actual=%umV type=%x/%x status=%x enable=%x readFailures=%u\n",r.name,r.ppid,r.mv,mv,id[0],id[1],status,enable,readFailures);
  return false;
-}
-/* APSS DRV2: SLEEP0..2, ACTIVE3..4, WAKE5..6; GPU leases 3.
- * A fresh command-status completion and idle state are required. IRQ remains
- * masked because this owner polls and has no RSC interrupt handler. */
-IOLock *powerLock,*smmuLeaseLock;
-bool rawVote(uint32_t addr,uint32_t value) {
- constexpr unsigned b=0xd00+4*0x2a0,other=0xd00+3*0x2a0;
- unsigned caps=rsc.r(0xc),count=(caps>>12)&63,ncpt=(caps>>27)&31;
- if(((rsc.r(0)>>16)&255)>=3||count<8||ncpt<1||!rsc.r(b+0x18))return fail("active TCS4 unavailable");
- if(!rsc.r(other+0x18)){unsigned mask=rsc.r(other+0x1c);for(unsigned i=0;i<ncpt&&i<16;i++)if((mask&(1u<<i))&&rsc.r(other+0x34+20*i)==addr)return fail("conflicting RPMh transaction");}
- rsc.w(0xd00,rsc.r(0xd00)&~(1u<<4));
- rsc.w(b+0x14,rsc.r(b+0x14)&~((1u<<24)|(1u<<16)));rsc.w(b+0x1c,0);rsc.w(0xd08,1u<<4);
- if(!wait(rsc,0xd04,1u<<4,0,10))return false;
- rsc.w(b+0x30,0x10108);rsc.w(b+0x34,addr);rsc.w(b+0x38,value);
- rsc.w(b+0x10,1);rsc.w(b+0x1c,1);rsc.w(b+0x14,1u<<16);rsc.w(b+0x14,(1u<<16)|(1u<<24));
- bool progressed=false,done=false;uint64_t end=now()+100;
- do {unsigned st=rsc.r(b+0x3c),idle=rsc.r(b+0x18);if((st&0x10100)!=0x10100||!idle)progressed=true;if((st&0x10100)==0x10100&&idle&&(progressed||(rsc.r(0xd04)&(1u<<4)))){done=true;break;}IODelay(10);}while(now()<end);
- if(!done)return fail("RPMh response timeout; transaction retained");
- rsc.w(b+0x1c,0);rsc.w(0xd08,1u<<4);rsc.w(b+0x14,rsc.r(b+0x14)&~(1u<<24));return true;
 }
 // BCM auxiliary data is {u32 unit,u16 width,u8 vcd,...}, not ARC levels.
 // Parse the actual bounded cmd-db entry; never invent a bandwidth unit.
@@ -356,19 +351,26 @@ bool coldLink() {
  log(6,"QCA6490 PCIe0 link and BAR established, bus master held off");return true;
 }
 IOBufferMemoryDescriptor *buffer(size_t n,uint64_t *pa,bool uncached=false) {
- auto d=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPhysicallyContiguous)|IOOptionBits(kIOMemoryMapperNone)|IOOptionBits(uncached?kIOMapWriteCombineCache:0),n,4096);
+ auto d=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPhysicallyContiguous)|IOOptionBits(uncached?kIOMapWriteCombineCache:0),n,4096);
  if(!d)return nullptr;IOByteCount span=0;*pa=d->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
  if(!*pa||(*pa&4095)||span<n||*pa+n>(1ull<<36)){d->release();return nullptr;}
  bzero(d->getBytesNoCopy(),n);return d;
 }
 bool allocateArena() {
- // QCA6490 needs contiguous DMA addresses, not 128 MiB of adjacent RAM.
- // Wire ordinary pages and let this SID's native4K SMMU provide the IOVA
- // extent. A large physically contiguous allocation fails after UI startup.
+ // QCA6490 needs contiguous DMA addresses, not adjacent physical RAM.
+ // Keep descriptor options separate from mapping options: in Darwin24
+ // kIOMemoryMapperNone (0x800) overlaps kIOMapCacheMask (0xf00). Passing
+ // both MapperNone and WC (0x400) asks the buffer mapping for invalid mode
+ // 12. This board has no global IOMapper; isolation() confirms that before
+ // allocating. Physical segment queries still explicitly bypass mappers.
+ // ARM64 IOKit's pageable-map allocator rejects objects above 96MiB.
+ // Use a 64MiB VM-backed arena under that per-object limit and wire it
+ // explicitly. Allocation failure still stops DMA; every returned Linux
+ // allocation is range checked. Apply WC only to the owned wired pages.
  arena=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-  IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryMapperNone)|IOOptionBits(kIOMapWriteCombineCache),ArenaBytes,4096);
+  IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPageable),ArenaBytes,4096);
  if(!arena)return fail("WiFi wired DMA arena allocation failed");
- if(arena->prepare()!=kIOReturnSuccess)return fail("WiFi DMA arena wiring failed");
+ if(arena->prepare()!=kIOReturnSuccess){arena->release();arena=nullptr;return fail("WiFi DMA arena wiring failed");}
  arenaVa=static_cast<uint8_t *>(arena->getBytesNoCopy());
  if(!arenaVa||(reinterpret_cast<uintptr_t>(arenaVa)&4095)||arena->getLength()!=ArenaBytes)return fail("WiFi DMA arena mapping invalid");
  bzero(arenaVa,ArenaBytes);return true;
@@ -394,6 +396,9 @@ int smmuWrite64(void *,size_t off,uint64_t value) {
 int smmuBarrier(void *) {__asm__ volatile("dsb sy":::"memory");return 0;}
 bool isolation() {
  if(!smmu.open(0x15000000,0x100000))return false;
+ // IOPlatformExpert has already resolved global mapper discovery. WLAN
+ // owns SID1c01 directly; never silently layer a system mapper onto it.
+ if(IOMapper::gSystem)return fail("unexpected system IOMapper for owned WLAN SID");
  // Pong's root interrupt map routes int_global_int to SPI140. Use the
  // DesignWare MSI receiver already implemented in this core; GIC MBIS and
  // an unimplemented ITS command queue are not prerequisites for this path.
@@ -411,20 +416,39 @@ bool isolation() {
  size_t count=1;ranges[0]={Iova,msiPa,4096,3,0,2};
  for(size_t off=0;off<ArenaBytes;off+=4096) {
   IOByteCount span=0;const uint64_t pa=arena->getPhysicalSegment(off,&span,kIOMemoryMapperNone);
-  if(!pa||(pa&4095)||span<4096||pa>=(1ull<<36)||4096>(1ull<<36)-pa) {
+  if(!pa||(pa&4095)||span<4096||pa>=(1ull<<36)||4096>(1ull<<36)-pa||!pmap_valid_page(ppnum_t(pa>>12))) {
    IODeleteData(ranges,ArmSmmu4KRange,capacity);return fail("WiFi DMA page outside SM8475 output range");
   }
   auto &last=ranges[count-1];
   if(count>1&&last.physical+last.bytes==pa)last.bytes+=4096;
   else ranges[count++]={Iova+4096+off,pa,4096,3,0,2};
  }
+ // All pages were validated before changing any attribute. No endpoint DMA
+ // is enabled yet, the arena has no user mappings, and it stays owned until
+ // reset. Clean its cacheable contents before making every CPU view WC.
+ clean(arenaVa,ArenaBytes);
+ for(size_t i=1;i<count;i++)for(uint64_t off=0;off<ranges[i].bytes;off+=4096)
+  pmap_set_cache_attributes(ppnum_t((ranges[i].physical+off)>>12),VM_WIMG_WCOMB);
+ for(size_t i=1;i<count;i++)for(uint64_t off=0;off<ranges[i].bytes;off+=4096)
+  if((pmap_cache_attributes(ppnum_t((ranges[i].physical+off)>>12))&VM_WIMG_MASK)!=VM_WIMG_WCOMB) {
+   IODeleteData(ranges,ArmSmmu4KRange,capacity);return fail("WiFi owned DMA cache policy not established");
+  }
+ __asm__ volatile("dsb sy":::"memory");
  ArmSmmu4KResult br={};auto tv=static_cast<uint64_t *>(tables->getBytesNoCopy());
  const auto built=ArmSmmu4KBuild(&bc,ranges,count,tv,TableBytes/4096,&br);
  IODeleteData(ranges,ArmSmmu4KRange,capacity);
  if(built!=ArmSmmu4KSuccess)return fail("WiFi native4K page tables failed");
- IOLog("PongWifi: 128MiB wired DMA mapped from %lu spans, %lu native4K table pages\n",(unsigned long)(count-1),(unsigned long)br.table_pages);
+ IOLog("PongWifi: %luMiB wired DMA mapped from %lu spans, %lu native4K table pages\n",(unsigned long)(ArenaBytes>>20),(unsigned long)(count-1),(unsigned long)br.table_pages);
 
  ArmSmmu4KContextConfig cc={};cc.lower=&bc;cc.lower_tables=&br;cc.id0=smmu.r(0x20);cc.id2=smmu.r(0x28);cc.asid=0x1c01;cc.coherent_walk=1;cc.polled_faults=1;
+ // APPSSMMU on this board retains TBI0/TBI1 (TCR2=0x38071). All
+ // admitted WLAN IOVAs are untagged low32, so request that policy explicitly
+ // rather than rejecting its real readback or weakening context validation.
+ cc.ignore_top_byte=1;
+ // APPSSMMU retains ASIDPNE=0 (SCTLR=0x27). SID1c01 is also our
+ // globally distinct ASID; request this actual shared-ASID policy rather
+ // than demanding the unsupported private-ASID bit or masking readback.
+ cc.shared_asid=1;
  clean(tv,br.table_pages*4096);__asm__ volatile("dsb sy":::"memory");
  // Nothing's arm_smmu_write_context_bank requires TCR2/TCR BEFORE TTBR:
  // TCR2.AS controls access to ASID[15:8]. The old adapter wrote SID1c01's
@@ -462,11 +486,37 @@ void dmaSync(uint64_t bus,size_t n,int) {if(bus<Iova+4096||bus-(Iova+4096)>=Aren
 
 void *alloc(size_t n) {if(n>SIZE_MAX-16)return nullptr;auto p=static_cast<uint8_t *>(IOMallocData(n+16));if(!p)return nullptr;*reinterpret_cast<size_t *>(p)=n+16;return p+16;}
 void freeHeap(void *p) {if(p){auto b=static_cast<uint8_t *>(p)-16;IOFreeData(b,*reinterpret_cast<size_t *>(b));}}
-void halt() {stopped=1;pin(94,1u|1u<<9,0);IOLog("PongWifi: worker stopped; DMA retained until reset\n");thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
-void poll() {if(initDeadline&&now()>initDeadline){log(3,"firmware initialization exceeded deadline");halt();}if(dmaOwned){unsigned fs=smmu.r(cbOffset+0x58);if(fs&0xc00001fe){IOLog("PongWifi: owned SMMU fault=%x FAR=%x%08x FSYNR0=%x\n",fs,smmu.r(cbOffset+0x64),smmu.r(cbOffset+0x60),smmu.r(cbOffset+0x68));halt();}}}
+void halt() {stopped=1;if(hostMmioReady){dbi.w(MsiEnable,0);parf.w(0x22c,0);}if(tlmm.v)pin(94,1u|1u<<9,0);pong_wifi_net_failed();IOLog("PongWifi: worker stopped; DMA retained until reset\n");thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
+void poll() {if(nw_wifi_firmware_error()){log(3,"QCA6490 firmware failed; stop dispatcher and preserve normal iOS boot");halt();}if(initDeadline&&now()>initDeadline){log(3,"firmware initialization exceeded deadline");halt();}if(dmaOwned){unsigned fs=smmu.r(cbOffset+0x58);if(fs&0xc00001fe){IOLog("PongWifi: owned SMMU fault=%x FAR=%x%08x FSYNR0=%x\n",fs,smmu.r(cbOffset+0x64),smmu.r(cbOffset+0x60),smmu.r(cbOffset+0x68));halt();}}}
 void sleep(unsigned ms) {while(ms){poll();unsigned part=ms>100?100:ms;IOSleep(part);ms-=part;}poll();}
 int fwGet(const char *path,const uint8_t **data,size_t *size) {
  const char *name=path;for(const char *p=path;*p;p++)if(*p=='/')name=p+1;
+ if(!strcmp(name,"wlan_mac.bin")) {
+  // The phone's mobile firmware may leave the permanent MAC empty. Use
+  // an explicitly software-assigned, installation-stable unicast address,
+  // as the upstream board ABI permits. Never send all-zero vdev identity.
+  static char identity[40];
+  if(!identity[0]) {
+   auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
+   auto root=chosen?OSDynamicCast(OSData,chosen->getProperty("root-matching")):nullptr;
+   const char *bytes=root?static_cast<const char *>(root->getBytesNoCopy()):nullptr;
+   const size_t n=root?root->getLength():0;
+   const char marker[]="<key>UUID</key><string>";const size_t markerSize=sizeof(marker)-1;
+   const char *uuid=nullptr;
+   for(size_t i=0;bytes && i+markerSize+36<n;i++)if(!memcmp(bytes+i,marker,markerSize)){uuid=bytes+i+markerSize;break;}
+   char digits[32];unsigned count=0;
+   for(unsigned i=0;uuid && i<36;i++) {
+    const char c=uuid[i];if(c=='-')continue;
+    if(!((c>='0'&&c<='9')||(c>='A'&&c<='F')||(c>='a'&&c<='f'))){count=0;break;}
+    if(count<sizeof(digits))digits[count++]=c;
+   }
+   if(count==32)snprintf(identity,sizeof(identity),"Intf0MacAddress=02%.*s\n",10,digits+22);
+   if(chosen)chosen->release();
+   if(!identity[0])return -1;
+   IOLog("PongWifi: locally administered address assigned from installation identity\n");
+  }
+  *data=reinterpret_cast<const uint8_t *>(identity);*size=strlen(identity);return 0;
+ }
  // Linux WCN6855 hw2 firmware uses the vendor v2 image. Select from the
  // actual TCSR HW major (pci.c uses the same register), never PCI revision.
  if(!strcmp(name,"amss.bin")&&((bar.r(0x224)>>8)&15)==2)name="amss20.bin";
@@ -480,6 +530,17 @@ int msiTarget(uint32_t *lo,uint32_t *hi,uint32_t *data) {if(!dmaOwned)return -1;
 void *mapPhys(uint64_t pa,size_t n) {if(pa>=0x60200000&&pa<0x60400000&&n<=0x60400000-pa)return const_cast<uint8_t *>(bar.v)+pa-0x60200000;return nullptr;}
 volatile uint32_t msiArrivals;
 void signalWorker() {__atomic_store_n(&wake,1,__ATOMIC_RELEASE);thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
+void waitWorker(unsigned ms) {
+ // UniXNU's MSI/TX wait: arm before rechecking, so an event in the gap
+ // cannot be lost. Leave events arriving after thread_block for the next
+ // iteration instead of unconditionally clearing them on return.
+ if(__atomic_exchange_n(&wake,0u,__ATOMIC_ACQ_REL))return;
+ assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,ms,kMillisecondScale);
+ if(__atomic_exchange_n(&wake,0u,__ATOMIC_ACQ_REL)){
+  clear_wait(current_thread(),THREAD_AWAKENED);return;
+ }
+ thread_block(THREAD_CONTINUE_NULL);
+}
 void irq(void *) {
  unsigned pending=dbi.r(MsiStatus);
  if(pending){dbi.w(MsiStatus,pending);__atomic_fetch_add(&msiArrivals,1,__ATOMIC_RELAXED);}
@@ -514,15 +575,16 @@ void worker(void *,wait_result_t) {
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
  {bool net=false,irqSeen=false;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
-   if(!net&&st.channels){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
+   if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
      PongWifiNetStaticInit();if(OSMetaClass::postModLoad(handle)!=kIOReturnSuccess)goto done;
      pong_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
    }}
-   IOSleep(busy?1:5);
+   waitWorker(busy?1:10);
  }}
  done: stopped=1;
+ pong_wifi_net_failed();
  // A mapped address does not prove a powered device. Failed GDSC/clock
  // prerequisites must not be followed by cleanup MMIO into a dead domain.
  if(hostMmioReady){if(dbi.v)dbi.w(MsiEnable,0);if(parf.v)parf.w(0x22c,0);}
@@ -541,19 +603,3 @@ extern "C" void pong_wifi_start_optional(void) {
  // separate kext. Register their metaclasses before publishing any service.
  thread_t t=nullptr;if(kernel_thread_start(worker,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);else log(3,"WiFi worker allocation failed");
 }
-
-// All APSS software clients sharing active TCS4 use this sleeping lock.
-// GPU has a separate active TCS3 lease and its retained rail minima.
-extern "C" void pong_rpmh_init(void) {
- if(!powerLock)powerLock=IOLockAlloc();
- if(!smmuLeaseLock)smmuLeaseLock=IOLockAlloc();
-}
-extern "C" bool pong_rpmh_vote(uint32_t address,uint32_t value) {
- if(!powerLock)return false;
- IOLockLock(powerLock);
- bool ok=(rsc.v||rsc.open(0x17a20000,0x10000))&&rawVote(address,value);
- IOLockUnlock(powerLock);return ok;
-}
-
-extern "C" bool pong_smmu_lease_lock(void){if(!smmuLeaseLock)return false;IOLockLock(smmuLeaseLock);return true;}
-extern "C" void pong_smmu_lease_unlock(void){if(smmuLeaseLock)IOLockUnlock(smmuLeaseLock);}

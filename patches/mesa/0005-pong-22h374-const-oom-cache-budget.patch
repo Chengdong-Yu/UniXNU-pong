@@ -1,0 +1,178 @@
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -7809,7 +7809,15 @@
+       return (struct tu_draw_state) {};
+ 
+    struct tu_cs cs;
+-   tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
++   // On a failed BO reservation cs has not been initialized. Recording into
++   // it dereferences a null/random device in release builds (Pong 22H374
++   // backboardd crash in tu_bo_init_new_explicit_iova). Preserve the real
++   // Vulkan error and let vkEndCommandBuffer refuse this command buffer.
++   VkResult const_result = tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
++   if (const_result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, const_result);
++      return (struct tu_draw_state) {};
++   }
+ 
+    if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
+       tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
+@@ -8357,6 +8365,8 @@
+                 /* note: draw_count is 0 for indirect */
+                 uint32_t draw_count)
+ {
++   if (vk_command_buffer_has_error(&cmd->vk))
++      return cmd->vk.record_result;
+    const struct tu_program_state *program = &cmd->state.program;
+    struct tu_render_pass_state *rp = &cmd->state.rp;
+ 
+@@ -8532,6 +8542,8 @@
+    if (dirty & TU_CMD_DIRTY_SHADER_CONSTS)
+       cmd->state.shader_const = tu_emit_consts<CHIP>(cmd, false);
+ 
++   if (vk_command_buffer_has_error(&cmd->vk))
++      return cmd->vk.record_result;
+ 
+    if (dirty & TU_CMD_DIRTY_DESC_SETS)
+       tu6_emit_descriptor_sets<CHIP>(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+@@ -8824,7 +8836,9 @@
+ 
+    tu6_emit_vs_params(cmd, 0, firstVertex, firstInstance);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, false, vertexCount);
++   if (tu6_draw_common<CHIP>(cmd, cs, false, vertexCount) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDX_OFFSET, 3);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+@@ -8865,7 +8879,8 @@
+       tu6_emit_vs_params(cmd, i, draw->firstVertex, firstInstance);
+ 
+       if (i == 0)
+-         tu6_draw_common<CHIP>(cmd, cs, false, max_vertex_count);
++         if (tu6_draw_common<CHIP>(cmd, cs, false, max_vertex_count) != VK_SUCCESS)
++            return;
+ 
+       if (cmd->state.dirty & TU_CMD_DIRTY_VS_PARAMS) {
+          tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3);
+@@ -8898,7 +8913,9 @@
+ 
+    tu6_emit_vs_params(cmd, 0, vertexOffset, firstInstance);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, true, indexCount);
++   if (tu6_draw_common<CHIP>(cmd, cs, true, indexCount) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDX_OFFSET, 7);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+@@ -8944,7 +8961,8 @@
+       tu6_emit_vs_params(cmd, i, vertexOffset, firstInstance);
+ 
+       if (i == 0)
+-         tu6_draw_common<CHIP>(cmd, cs, true, max_index_count);
++         if (tu6_draw_common<CHIP>(cmd, cs, true, max_index_count) != VK_SUCCESS)
++            return;
+ 
+       if (cmd->state.dirty & TU_CMD_DIRTY_VS_PARAMS) {
+          tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3);
+@@ -8997,7 +9015,9 @@
+    if (cmd->device->physical_device->info->props.indirect_draw_wfm_quirk)
+       draw_wfm(cmd);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, false, 0);
++   if (tu6_draw_common<CHIP>(cmd, cs, false, 0) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 6);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+@@ -9028,7 +9048,9 @@
+    if (cmd->device->physical_device->info->props.indirect_draw_wfm_quirk)
+       draw_wfm(cmd);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, true, 0);
++   if (tu6_draw_common<CHIP>(cmd, cs, true, 0) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 9);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+@@ -9068,7 +9090,9 @@
+     */
+    draw_wfm(cmd);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, false, 0);
++   if (tu6_draw_common<CHIP>(cmd, cs, false, 0) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 8);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+@@ -9102,7 +9126,9 @@
+ 
+    draw_wfm(cmd);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, true, 0);
++   if (tu6_draw_common<CHIP>(cmd, cs, true, 0) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 11);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+@@ -9142,7 +9168,9 @@
+ 
+    tu6_emit_vs_params(cmd, 0, 0, firstInstance);
+ 
+-   tu6_draw_common<CHIP>(cmd, cs, false, 0);
++   if (tu6_draw_common<CHIP>(cmd, cs, false, 0) != VK_SUCCESS)
++
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_DRAW_AUTO, 6);
+    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_XFB));
+@@ -9444,6 +9472,9 @@
+ 
+    /* note: no reason to have this in a separate IB */
+    tu_cs_emit_state_ib(cs, tu_emit_consts<CHIP>(cmd, true));
++
++   if (vk_command_buffer_has_error(&cmd->vk))
++      return;
+ 
+    tu_emit_compute_driver_params<CHIP>(cmd, cs, info);
+ 
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -558,6 +558,16 @@
+ static bool
+ darwin_cache_put(struct tu_device *dev, struct darwin_retire_state *retire, const struct darwin_retired_bo *bo)
+ {
++   // ABI1 uses disjoint finite VA windows. A ten-second unbounded BO cache
++   // plus the translator's spare images can retain most of a client's VA
++   // until the next allocation stalls to flush everything. Bound only the
++   // already-retired cache; in-flight ownership and fences stay unchanged.
++   static const int cache_mib = debug_get_num_option("TU_DARWIN_BO_CACHE_MIB", -1);
++   if (cache_mib >= 0) {
++      const uint64_t budget = MIN2((uint64_t)MIN2(cache_mib, 1024) << 20, dw.info.va_size / 4);
++      if (bo->size > budget || retire->cache_bytes > budget - bo->size)
++         return false;
++   }
+    if (retire->cache_count == retire->cache_capacity) {
+       const unsigned capacity = retire->cache_capacity ? retire->cache_capacity * 2 : 64;
+       struct darwin_cached_bo *cache = (struct darwin_cached_bo *)realloc(retire->cache, capacity * sizeof(*cache));
+@@ -949,10 +959,10 @@
+    /* IOUserClient::mapClientMemory64 takes the cache mode from THESE flags, not from the descriptor the driver returns, so a plain
+     * kIOMapAnywhere would give a cached mapping of memory the GPU reads non-cacheable. Write combine is Normal non-cacheable: the
+     * GPU sees CPU writes after a barrier, and memcpy/unaligned stores stay legal (device-memory mappings fault on those). */
+-   /* With IO-coherent BOs (the kernel reports NativeAdrenoParamsOwnedCoherent) the GPU maps the pages write-back inner-shareable, so the CPU
+-    * view is a write-back one too: a write-combined view of a page the GPU snoops and the kernel's cacheable alias would disagree. */
+-   uint32_t options = (placed_addr ? 0 : kIOMapAnywhere) |
+-                      ((dw.params.flags & NativeAdrenoParamsOwnedCoherent) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
++   // Pong's qualified ABI1 BOs are write-combined. Its Params flag 2 means
++   // SubmitBatch, whereas newer upstream uses 2 for OwnedCoherent; those
++   // meanings cannot be mixed when compiling against this board's header.
++   uint32_t options = (placed_addr ? 0 : kIOMapAnywhere) | kIOMapWriteCombineCache;
+    kr = IOConnectMapMemory64(dw.conn, reply.token, mach_task_self(), &address, &length, options);
+    if (kr != KERN_SUCCESS || !address || length < bo->size) {
+       NativeAdrenoAbiBoCpuUnmap undo = {.handle = bo->darwin_handle, .token = reply.token};

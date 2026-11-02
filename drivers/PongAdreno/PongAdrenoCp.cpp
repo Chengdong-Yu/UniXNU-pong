@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "PongAdrenoCp.h"
+#include "../PongPower/PongPlatformResources.h"
 #include "PongAdrenoCpProfile.h"
 #include "PongAdrenoZap.h"
 #include "submit/NativeAdrenoSmmuContext.h"
@@ -19,6 +20,9 @@
 extern "C" const uint8_t PongAdrenoSqeFirmware[],PongAdrenoZapMdt[],PongAdrenoZapCode[],PongAdrenoZapSignature[];
 extern "C" const size_t PongAdrenoSqeFirmwareBytes,PongAdrenoZapMdtBytes,PongAdrenoZapCodeBytes,PongAdrenoZapSignatureBytes;
 extern "C" volatile uint32_t native_adreno_wc_enabled;
+extern "C" volatile uint32_t native_adreno_coherence[8],native_adreno_wc_audit[6];
+extern "C" uint64_t (*native_adreno_vm_now_us)(void);
+extern "C" {uint64_t (*native_adreno_gpu_ticks)(void)=nullptr;}
 extern "C" unsigned int pong_adreno_zap_reserved;
 extern "C" IOReturn armcpu_spi_attach(uint32_t,bool,void (*)(void *),void *,uint32_t *,uint64_t *);
 extern "C" int get_preemption_level(void);
@@ -56,6 +60,7 @@ struct Device {
 };
 Device *gpu;
 static uint64_t now(void *) {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
+static uint64_t vm_now() {return now(nullptr);}
 /* Sheng's IRQ-driven wait avoids a 1ms sleep on every GPU completion. */
 static int idle(void *)
 {
@@ -63,7 +68,12 @@ static int idle(void *)
         /* The fence IRQ wakes this immediately. A 100 us timeout generated
          * thousands of scheduler wakeups while a wallpaper pass ran; retain
          * a bounded 1 ms fallback for a missed/early interrupt. */
+        const uint32_t before=__atomic_load_n(&gpu->irq_count,__ATOMIC_ACQUIRE);
         assert_wait_timeout(event_t(&gpu->irq_count),THREAD_UNINT,1,NSEC_PER_MSEC);
+        // Close the IRQ-before-sleep window: a completion that arrived while
+        // establishing the wait must not pay the whole fallback millisecond.
+        if(__atomic_load_n(&gpu->irq_count,__ATOMIC_ACQUIRE)!=before)
+            thread_wakeup(event_t(&gpu->irq_count));
         thread_block(THREAD_CONTINUE_NULL);
     } else IODelay(20);
     return 0;
@@ -93,6 +103,26 @@ static bool faulted()
             ((cause&(1u<<4))?rd(GEN7_CP_PROTECT_STATUS):0);
         note("CP cause/protection",cause,(uint64_t(protect)<<32)|rd(GEN7_CP_BV_PROTECT_STATUS),
             (uint64_t(rd(GEN7_CP_RB_RPTR))<<32)|rd(GEN7_CP_RB_WPTR));
+        if(cause&1u) {
+            // Bounded records already collected before submission. Report
+            // them only on a real fault, including WC handoff evidence.
+            note("IB cache/DRAM",native_adreno_coherence[0],
+                (uint64_t(native_adreno_coherence[1])<<32)|native_adreno_coherence[2],
+                (uint64_t(native_adreno_coherence[3])<<32)|native_adreno_wc_audit[5]);
+            note("IB cache audit",native_adreno_wc_audit[0],
+                (uint64_t(native_adreno_wc_audit[2])<<32)|native_adreno_wc_audit[3],native_adreno_wc_audit[4]);
+            const auto &ring=gpu->buffers[1];
+            const auto *words=static_cast<const volatile uint32_t *>(ring.mapping());
+            const uint32_t count=uint32_t(ring.bytes()/4),rptr=rd(GEN7_CP_RB_RPTR);
+            if(words && count>=8 && !(count&(count-1)) && rptr<count) {
+                for(unsigned line=0;line<2;++line) {
+                    const uint32_t at=(rptr+count-4+line*4)&(count-1);
+                    note("CP ring words at opcode fault",at,
+                        (uint64_t(words[at])<<32)|words[(at+1)&(count-1)],
+                        (uint64_t(words[(at+2)&(count-1)])<<32)|words[(at+3)&(count-1)]);
+                }
+            }
+        }
         /* Nothing gen7's opcode-error callback selects SQE_STAT index1.
          * Capture once after poisoning, never on healthy submissions. */
         if(cause&(1u<<13)) {
@@ -104,6 +134,10 @@ static bool faulted()
         if(fsr&SmmuContextFaultMask)
             note("GPU fault FAR/syndrome",fsr,(uint64_t(sr(p->context_offset+0x64))<<32)|sr(p->context_offset+0x60),
                 (uint64_t(sr(p->context_offset+0x68))<<32)|sr(p->context_offset+0x6c));
+        // Gen7 A730 register definitions, captured only after a real fault.
+        // Distinguish a bad nested IB from an unmapped shader data pointer.
+        note("GPU fault IB1",rd(0x092a),(uint64_t(rd(0x0929))<<32)|rd(0x0928));
+        note("GPU fault IB2",rd(0x092d),(uint64_t(rd(0x092c))<<32)|rd(0x092b));
     }
     return gpu->poisoned;
 }
@@ -199,6 +233,8 @@ static bool wait_bootstrap(uint32_t wptr,const char *phase)
  */
 static int scm(void *,uint32_t fn,uint32_t info,const uint64_t args[3],int32_t *transport,int64_t *result)
 {
+    if(!pong_scm_call_lock())return 1;
+    struct ScmSession {~ScmSession(){pong_scm_call_unlock();}} session;
     uint64_t first=fn,a6=0,begin=now(nullptr);unsigned busy=0;
     for(unsigned resumes=0;resumes<10000 && now(nullptr)-begin<1000000;) {
         register uint64_t x0 asm("x0")=first,x1 asm("x1")=info,x2 asm("x2")=args[0],x3 asm("x3")=args[1];
@@ -290,7 +326,7 @@ static bool hardware_init()
 IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
 {
     if(gpu || !ops || !ops->record)return kIOReturnBadArgument;
-    gpu=new Device;if(!gpu)return kIOReturnNoMemory;gpu->ops=*ops;
+    gpu=new Device;if(!gpu)return kIOReturnNoMemory;gpu->ops=*ops;native_adreno_vm_now_us=vm_now;
     const uint32_t id0=sr(0x20),id1=sr(0x24),id2=sr(0x28);
     const unsigned count=(id0&255)>PongAdrenoStreamSlots?PongAdrenoStreamSlots:(id0&255);
     const unsigned pages=1u<<(((id1>>28)&7)+1);const bool ex=(id0>>8)&1;
@@ -326,16 +362,6 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
         if(!sw(0xc00+slots[i]*4,0x20000) || !sw(0x800+slots[i]*4,(ex?0:0x80000000u)|gpu_sids[i]) ||
            !sw(0xc00+slots[i]*4,0x20000|(ex?1024:0)))return kIOReturnIOError;
     }
-    /* Sheng reserves the user BO pool before fragmentation. Pong has a
-     * smaller boot memory window: start at 256MiB, halve on allocation failure. */
-    unsigned pool=256;PE_parse_boot_argn("pong_gpu_pool_mib",&pool,sizeof(pool));
-    if(pool>256)pool=256;
-    for(unsigned mib=pool;mib>=16;mib>>=1)
-        if(!NativeAdrenoMemory::reservePool(gpu->output_bits,size_t(mib)<<20))break;
-    if(NativeAdrenoMemory::poolBytes()) {
-        const auto status=NativeAdrenoMemory::writeCombinePool();
-        note("native BO pool",status,NativeAdrenoMemory::poolBytes());
-    }
     // Keep the previously working 32-bit IOVA aperture while recovering
     // boot. The wider context was rejected by the software TBI policy;
     // that failure did not establish a hardware address-width limitation.
@@ -367,6 +393,21 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
     }
     note("GPU native4K/SQE prepared",status,slots[0],slots[1]);
     if(!status)note("LPAC native4K shared context",0,slots[2],slots[3]);
+    if(!status) {
+        /* Kernel page tables and firmware come first. An unused 512 MiB
+         * reservation previously consumed most of Darwin24's 620 MiB data
+         * VA range before dyld could allocate its 4 KiB signature cache.
+         * The pool is an optimization; BOs can use wired scattered pages. */
+        unsigned pool=0;PE_parse_boot_argn("pong_gpu_pool_mib",&pool,sizeof(pool));
+        if(pool>128)pool=128;
+        for(unsigned mib=pool;mib>=16;mib>>=1)
+            if(!NativeAdrenoMemory::reservePool(gpu->output_bits,size_t(mib)<<20))break;
+        if(NativeAdrenoMemory::poolBytes()) {
+            const auto cached=NativeAdrenoMemory::writeCombinePool();
+            note("native BO pool",cached,NativeAdrenoMemory::poolBytes());
+            if(cached)return cached;
+        }
+    }
     gpu->prepared=!status;return status;
 }
 
@@ -416,6 +457,9 @@ IOReturn PongAdrenoCpStart(PongGpuGmuDevice *gmu)
     if(!status)status=gpu->timer.attach(&timer,NativeAdrenoTimeCp);
     uint64_t ticks=0;if(!status)status=gpu->timer.read(&ticks);
     if(status || !ticks)return status?status:kIOReturnNotReady;
+    unsigned timeline=1;PE_parse_boot_argn("pong_gpu_timeline",&timeline,sizeof timeline);
+    gpu->ring.setTimeline(timeline!=0);
+    native_adreno_gpu_ticks=[]()->uint64_t{uint64_t value=0;if(gpu && !gpu->poisoned)(void)gpu->timer.read(&value);return value;};
     gpu->started=true;native_adreno_wc_enabled=1;
     gpu->backend={&gpu->vm,&gpu->submit,&gpu->ring,&gpu->timer,&gpu->status,{nullptr,now,idle},
         {PongAdrenoChipId,PongAdrenoGmemBytes,0,0x1fffffffff000ULL,0x20000000,0xA0000000,

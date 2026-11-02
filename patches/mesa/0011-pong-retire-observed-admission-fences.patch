@@ -1,0 +1,28 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -293,8 +293,24 @@
+          slice = abs_timeout_ns > now ? MIN2(abs_timeout_ns - now, slice) : 0;
+       NativeAdrenoAbiWaitFence req = {.fence = fence, .timeout_ns = slice};
+       kern_return_t kr = dw_call(NativeAdrenoMethodWaitFence, &req, sizeof(req), NULL, 0);
+-      if (kr == KERN_SUCCESS)
++      if (kr == KERN_SUCCESS) {
++         /* A real observation of this shared-ring fence retires every older
++          * fence of this connection. Leaving them at inflight[0] makes an
++          * admission Busy wait on an already-completed fence in a hot loop.
++          * Serial-number arithmetic is safe for this at-most-eight list. */
++         pthread_mutex_lock(&dw.lock);
++         unsigned done = 0;
++         while (done < dw.inflight_count &&
++                (int32_t)(dw.inflight[done] - fence) <= 0)
++            ++done;
++         if (done) {
++            dw.inflight_count -= done;
++            memmove(dw.inflight, dw.inflight + done,
++                    dw.inflight_count * sizeof(dw.inflight[0]));
++         }
++         pthread_mutex_unlock(&dw.lock);
+          return VK_SUCCESS;
++      }
+       if (kr != kIOReturnTimeout)
+          return dw_status_to_vk(dev, kr, "wait fence");
+       if (slice == 0)

@@ -41,7 +41,7 @@
 #define LPAIF 0u /* MI2S-LPAIF-RX-TERTIARY: LPAIF=0; RX is direction, not LPAIF_WSA=2 */
 #define LPAIF_RXTX 1u
 #define I2S_TERTIARY 2u /* tertiary interface, actual Pong topology */
-#define I2S_SD0 1u /* SD0, stereo TFA9873 slots */
+#define I2S_SPEAKER_SD 2u /* SD1: live Pong tert rx-lines=BIT(1); SD0 is TX feedback */
 #define WS_INTERNAL 1u
 #define CODEC_TX3 4u
 #define INTERLEAVED 1u
@@ -125,8 +125,11 @@ static uint32_t graph_open(uint8_t *out, uint32_t capacity, uint32_t port, uint3
 
 uint32_t ar_open_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
 {
-    static const Sg sg = {AR_SG_SPEAKER, PERF_LOW_LATENCY, DIR_TX, SCENARIO_PLAYBACK};
-    static const Container c = {AR_SG_SPEAKER, POS_STREAM};
+    /* Pong's MI2S-LPAIF-RX-TERTIARY is the device end of the same RX
+     * playback route, not a TX stream. Keep the hardware endpoint in its
+     * device container instead of inheriting Sheng's stream placement. */
+    static const Sg sg = {AR_SG_SPEAKER, PERF_LOW_LATENCY, DIR_RX, SCENARIO_PLAYBACK};
+    static const Container c = {AR_SG_SPEAKER, POS_GLOBAL_DEV};
     static const Module m[] = {{AR_MOD_I2S_SINK, AR_IID_SPEAKER_I2S, 1, 0}};
     return graph_open(out, capacity, port, token, &sg, &c, m, 1, 0, 0);
 }
@@ -179,7 +182,7 @@ uint32_t ar_config_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port
     begin(&w, out, capacity, port, AR_APM_IID, token, AR_OP_SET_CFG);
     const uint32_t cmd = cmd_payload_start(&w);
     const uint32_t at = param_begin(&w, AR_IID_SPEAKER_I2S, PARAM_I2S_INTF);
-    put32(&w, LPAIF); put32(&w, I2S_TERTIARY); put16(&w, I2S_SD0); put16(&w, WS_INTERNAL);
+    put32(&w, LPAIF); put32(&w, I2S_TERTIARY); put16(&w, I2S_SPEAKER_SD); put16(&w, WS_INTERNAL);
     param_end(&w, at);
     hw_ep_mf(&w, AR_IID_SPEAKER_I2S, f);
     frame_size_factor(&w, AR_IID_SPEAKER_I2S);
@@ -244,8 +247,11 @@ uint32_t ar_config_playback_shmem(uint8_t *out, uint32_t capacity, uint32_t port
     begin(&w, out, capacity, port, AR_IID_PLAY_SHMEM, token, AR_OP_SET_CFG);
     const uint32_t cmd = cmd_payload_start(&w);
     const uint32_t at = param_begin(&w, AR_IID_PLAY_SHMEM, PARAM_MEDIA_FORMAT);
-    const uint32_t body = align8(12u + 16u + f->channels);
-    put32(&w, 1); put32(&w, MEDIA_PCM); put32(&w, body + PARAM_HEADER - 12u);
+    // media_format.payload_size counts the PCM body only. The outer
+    // apm_module_param_data header and media_format's own 12 bytes are
+    // separate; advertising them here overstates the stereo body by16.
+    const uint32_t pcm_bytes = (16u + f->channels + 3u) & ~3u;
+    put32(&w, 1); put32(&w, MEDIA_PCM); put32(&w, pcm_bytes);
     put32(&w, f->rate); put16(&w, f->bits); put16(&w, 1); put16(&w, f->bits); put16(&w, f->bits - 1u); put16(&w, 1);
     put16(&w, f->channels);
     channel_map(&w, f->channels);
@@ -367,6 +373,7 @@ int ar_parse(const uint8_t *in, uint32_t length, ArAnswer *a)
     case AR_OP_READ_DONE:
         if (p.payload_bytes < 20) return ArBad;
         a->status = le32(d); a->address = le32(d + 4) | (uint64_t)le32(d + 8) << 32; a->handle = le32(d + 12); a->data_bytes = le32(d + 16);
+        a->offset = p.payload_bytes >= 24 ? le32(d + 20) : 0;
         return ArReadDone;
     default:
         return ArUnknown;

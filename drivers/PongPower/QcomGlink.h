@@ -12,7 +12,9 @@ extern "C" {
 #endif
 
 #define QCOM_GLINK_MAX_CHANNELS 6u
-#define QCOM_GLINK_MAX_REMOTE_INTENTS 24u
+/* DSP advertises 24 small intents before its larger command buffer.
+ * Keep room for that later advertisement (shared transport, not SM8850 MMIO). */
+#define QCOM_GLINK_MAX_REMOTE_INTENTS 48u
 #define QCOM_GLINK_MAX_LOCAL_INTENTS 24u
 #define QCOM_GLINK_NAME 32u
 #define QCOM_GLINK_FEATURE_INTENT_REUSE 1u

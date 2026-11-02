@@ -1,0 +1,32 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -219,6 +219,28 @@
+       (after!=2 || (dw.params.flags&NativeAdrenoParamsExplicitHostAcquire));
+    const kern_return_t result=active?dw_call(NativeAdrenoMethodSyncHostRange,&request,sizeof(request),NULL,0):kIOReturnUnsupported;
+    pthread_mutex_unlock(&dw.lock);
++   return int32_t(result);
++}
++
++extern "C" __attribute__((visibility("default"))) int32_t
++tu_darwin_sync_host_batch(const uint64_t *ranges,uint32_t count,uint32_t after,uint64_t *covered);
++extern "C" __attribute__((visibility("default"))) int32_t
++tu_darwin_sync_host_batch(const uint64_t *ranges,uint32_t count,uint32_t after,uint64_t *covered)
++{
++   if(!ranges || !covered || !count || count>64 || after>2)return int32_t(kIOReturnBadArgument);
++   *covered=0;NativeAdrenoAbiSyncHostBatch request={};request.count=count;request.after=after;
++   for(unsigned i=0;i<count;++i) {
++      request.ranges[i]={ranges[2*i],ranges[2*i+1]};
++      if(!request.ranges[i].address || !request.ranges[i].bytes ||
++         ((request.ranges[i].address|request.ranges[i].bytes)&4095))return int32_t(kIOReturnBadArgument);
++   }
++   NativeAdrenoAbiSyncHostBatchReply reply={};
++   pthread_mutex_lock(&dw.lock);
++   const bool active=dw.open && (dw.params.flags&NativeAdrenoParamsHostSyncBatch) &&
++      (after!=2 || (dw.params.flags&NativeAdrenoParamsExplicitHostAcquire));
++   const kern_return_t result=active?dw_call(NativeAdrenoMethodSyncHostBatch,&request,sizeof(request),&reply,sizeof(reply)):kIOReturnUnsupported;
++   pthread_mutex_unlock(&dw.lock);
++   if(!result)*covered=reply.covered;
+    return int32_t(result);
+ }
+ 

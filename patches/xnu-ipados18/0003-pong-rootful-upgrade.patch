@@ -1,0 +1,44 @@
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -1061,12 +1061,40 @@
+ 			goto retry;
+ 		}
+ 	}
+ 
+ 	return error;
+ }
++
++#if defined(PONG) && (DEVELOPMENT || DEBUG)
++/* The 22H374 APFS upgrade gate calls this board adapter instead of
++ * vfs_flags at that single call site. The mount itself retains ROOTFS;
++ * every remaining APFS/VFS write-upgrade check still runs unchanged. */
++uint64_t
++native_pong_apfs_upgrade_flags(mount_t mp)
++{
++	uint64_t flags = vfs_flags(mp);
++	int rootful = 0;
++	PE_parse_boot_argn("pong_rootful", &rootful, sizeof(rootful));
++	if (rootful != 1 || !(flags & MNT_ROOTFS) || !rootvnode ||
++	    vnode_mount(rootvnode) != mp || kauth_cred_getuid(kauth_cred_get()) != 0 ||
++	    strcmp(vfs_statfs(mp)->f_fstypename, "apfs")) return flags;
++	extern volatile int native_owner_cache_status, native_owner_cache_authorized, native_owner_cache_root_recheck;
++	extern volatile uintptr_t native_owner_cache_current_root;
++	extern volatile dev_t native_owner_cache_bound_root_device;
++	vnode_t devvp = vfs_devvp(mp);
++	if (!devvp) return flags;
++	dev_t device = vnode_specrdev(devvp);
++	vnode_put(devvp);
++	if (device == NODEV || device != native_owner_cache_bound_root_device ||
++	    native_owner_cache_status != 0 || !native_owner_cache_authorized ||
++	    !native_owner_cache_root_recheck || native_owner_cache_current_root != (uintptr_t)rootvnode) return flags;
++	printf("PONG rootful: authorized OS-only APFS write upgrade dev=%x\n", device);
++	return flags & ~MNT_ROOTFS;
++}
++#endif
+ 
+ /*
+  * common mount implementation (final stage of mounting)
+  *
+  * Arguments:
+  *  fstypename	file system type (ie it's vfs name)

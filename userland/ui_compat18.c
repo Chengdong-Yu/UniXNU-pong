@@ -76,6 +76,7 @@ static bool boot_option(const char *option);
 static bool own_directory(const char *path);
 void pong_boot_snapshot_start(const char *name);
 void pong_settings18_start(void);
+void pong_audio_volume18_start(void);
 
 static char abi_type_kind(const char *type)
 {
@@ -642,6 +643,114 @@ static bool install_compositor_code(const struct mach_header *header,intptr_t sl
     fprintf(stderr,"Pong UI18: 22H374 %s selected\n",label);return true;
 }
 
+/* 22H374 initializes its missing-calibration fallback limits by converting
+ * slider values BEFORE it allocates its built-in marketing curve. The helper
+ * tests for a null curve, then unconditionally reads curve[0]. services84 IPS
+ * records all stop there. Use that SAME selected runtime's built-in software
+ * curve during this initialization window; calibrated/native mappings still
+ * call the original helper. This is not measured Pong panel photometry. */
+static float (*brightness18_slider_original)(void *,float);
+static float brightness18_defaults[3];
+struct pong_tracked_brightness_state {unsigned char a,b,c,d;};
+static void brightness18_skip_uncalibrated_telemetry(id self,SEL selector,int64_t event,
+    float from,float to,struct pong_tracked_brightness_state state)
+{
+    (void)self;(void)selector;(void)event;(void)from;(void)to;(void)state;
+    // This is only CBSliderCommitTelemetry's reporting entry, not the
+    // brightness transaction or the control-center slider implementation.
+}
+static void brightness18_telemetry(const struct mach_header_64 *header,intptr_t slide)
+{
+    Class cls=objc_lookUpClass("CBSliderCommitTelemetry");
+    if(!cls)return;
+    unsigned count=0;Method *methods=class_copyMethodList(cls,&count);
+    const uintptr_t entry=(uintptr_t)header+0xf22f0;
+    if(!executable_image_range(header,slide,entry,4)){free(methods);return;}
+    for(unsigned i=0;i<count;i++) {
+        Method method=methods[i];
+        const char *encoding=method_getTypeEncoding(method);
+        if((uintptr_t)method_getImplementation(method)!=entry ||
+           !method_abi(method,"v",4,"qff{") || !encoding ||
+           !strstr(encoding,"{TrackedState=BBBB}"))continue;
+        method_setImplementation(method,(IMP)brightness18_skip_uncalibrated_telemetry);
+        fprintf(stderr,"Pong brightness18: uncalibrated slider telemetry skipped; native brightness control retained\n");
+        break;
+    }
+    free(methods);
+}
+static float brightness18_slider(void *display,float slider)
+{
+    uintptr_t curve=0;
+    if(display)memcpy(&curve,(const char *)display+0x48,sizeof(curve));
+    if(display && !curve) {
+        if(!(slider>=0.0f))slider=0.0f;
+        if(slider>1.0f)slider=1.0f;
+        const float position=slider*2.0f;
+        const unsigned lower=position>=1.0f?1:0;
+        static unsigned reported;
+        if(__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)==0)
+            fprintf(stderr,"Pong brightness18: native software curve used before mapping initialization\n");
+        return brightness18_defaults[lower]+(position-(float)lower)*
+            (brightness18_defaults[lower+1]-brightness18_defaults[lower]);
+    }
+    return brightness18_slider_original(display,slider);
+}
+static void brightness18_image(const struct mach_header *header,intptr_t slide)
+{
+    if(brightness18_slider_original || strcmp(getprogname(),"backboardd") || header->magic!=MH_MAGIC_64)return;
+    static const uint8_t uuid[16]={0x0a,0x02,0x14,0x08,0xa8,0xf4,0x37,0x2c,
+                                 0xb5,0xd5,0x5f,0xdf,0xcc,0x83,0xc3,0x4a};
+    const struct mach_header_64 *h=(const void *)header;
+    const struct load_command *lc=(const void *)(h+1);
+    const char *end=(const char *)lc+h->sizeofcmds;bool matched=false;
+    for(uint32_t i=0;i<h->ncmds;i++) {
+        if((const char *)lc+sizeof(*lc)>end || lc->cmdsize<sizeof(*lc) ||
+           lc->cmdsize>(size_t)(end-(const char *)lc))return;
+        if(lc->cmd==LC_UUID && lc->cmdsize==sizeof(struct uuid_command) &&
+           !memcmp(((const struct uuid_command *)lc)->uuid,uuid,sizeof(uuid)))matched=true;
+        lc=(const void *)((const char *)lc+lc->cmdsize);
+    }
+    if(!matched)return;
+    // Restrict the adapter to the actually published NT37705 DCS service.
+    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
+    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
+    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+    if(!matching||!get||!release)return;
+    CFMutableDictionaryRef dict=matching("IOService");
+    const void *key=CFSTR("PongPanel"),*value=CFSTR("NT37705 Visionox / SM8475 DSI0");
+    CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
+    CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+    uint32_t service=get(0,dict);if(!service)return;release(service);
+    // Same exact 22H374 CoreBrightness UUID and actual Pong panel as below.
+    // Its optional telemetry expects DisplayBrightness/NitsPhysical to be a
+    // calibration dictionary; the board's native scalar state is not one.
+    brightness18_telemetry(h,slide);
+    const uintptr_t offset=0x144f5c,entry=(uintptr_t)header+offset;
+    const uintptr_t defaults=(uintptr_t)header+0x1bead4;
+    static const uint32_t expected[]={0xd10103ff,0xa9037bfd,0x9100c3fd,0xf81f83a0};
+    if(!executable_image_range(h,slide,entry,sizeof(expected)) ||
+       !executable_image_range(h,slide,defaults,sizeof(brightness18_defaults)) ||
+       memcmp((const void *)entry,expected,sizeof(expected)))return;
+    memcpy(brightness18_defaults,(const void *)defaults,sizeof(brightness18_defaults));
+    if(!(brightness18_defaults[0]>0.0f && brightness18_defaults[0]<brightness18_defaults[1] &&
+         brightness18_defaults[1]<brightness18_defaults[2] && brightness18_defaults[2]<100000.0f))return;
+    vm_address_t trampoline=0;
+    if(vm_allocate(mach_task_self(),&trampoline,vm_page_size,VM_FLAGS_ANYWHERE)!=KERN_SUCCESS)return;
+    uint32_t back[]={0x58000050,0xd61f0200,(uint32_t)(entry+16),(uint32_t)((entry+16)>>32)};
+    memcpy((void *)trampoline,expected,sizeof(expected));memcpy((void *)(trampoline+16),back,sizeof(back));
+    sys_icache_invalidate((void *)trampoline,32);
+    if(vm_protect(mach_task_self(),trampoline,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) {
+        (void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);return;
+    }
+    const uintptr_t replacement=(uintptr_t)brightness18_slider;
+    const uint32_t jump[]={0x58000050,0xd61f0200,(uint32_t)replacement,(uint32_t)(replacement>>32)};
+    brightness18_slider_original=(float(*)(void *,float))trampoline;
+    if(!install_compositor_code(header,slide,offset,expected,jump,sizeof(expected),"CoreBrightness fallback mapping initialization")) {
+        brightness18_slider_original=NULL;(void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);
+    }
+}
+
 /* This build's generated deviceSupportsDynamicIsland getter calls
  * MGGetBoolAnswer with this exact key. Keep every other answer native: in
  * particular this does not advertise Face ID, telephony or camera hardware.
@@ -1102,85 +1211,6 @@ static id singleton(const char *name)
     Class cls=objc_lookUpClass(name);SEL selector=sel_registerName("sharedInstance");
     return method_abi(cls?class_getClassMethod(cls,selector):NULL,"@",0,"")?
         ((id(*)(id,SEL))objc_msgSend)((id)cls,selector):nil;
-}
-
-/* Use the already-created controller. The 22H374 volumeControl getter is an
- * ivar load; preserve that ownership rather than creating a controller from a
- * boot timer. Resolve the object ivar afresh on the main queue, without
- * constructing it. */
-static id volume18_control(void)
-{
-    Class cls=objc_lookUpClass("SpringBoard");
-    SEL shared=sel_registerName("sharedApplication");
-    if(!method_abi(cls?class_getClassMethod(cls,shared):NULL,"@",0,""))return nil;
-    id app=((id(*)(id,SEL))objc_msgSend)((id)cls,shared);
-    Class application=app?object_getClass(app):Nil;
-    Ivar ivar=application?class_getInstanceVariable(application,"_volumeControl"):NULL;
-    const char *type=ivar?ivar_getTypeEncoding(ivar):NULL;
-    ptrdiff_t offset=ivar?ivar_getOffset(ivar):-1;
-    if(!type || type[0]!='@' || offset<0 ||
-       (size_t)offset+sizeof(id)>class_getInstanceSize(application))return nil;
-    id control=object_getIvar(app,ivar);
-    Class expected=objc_lookUpClass("SBVolumeControl");
-    for(Class actual=control?object_getClass(control):Nil;actual;actual=class_getSuperclass(actual))
-        if(actual==expected)return control;
-    return nil;
-}
-
-static struct { uint64_t presses; bool held; } volume18_keys[2];
-static bool volume18_ready;
-static int volume18_ready_token=-1;
-static const char *volume18_names[]={"dev.unixnu.pong.volume18.increase","dev.unixnu.pong.volume18.decrease"};
-static bool volume18_step(unsigned index)
-{
-    id control=volume18_control();
-    SEL action=sel_registerName(index?"decreaseVolume":"increaseVolume");
-    if(!control || !method_abi(class_getInstanceMethod(object_getClass(control),action),"v",0,""))return false;
-    ((void(*)(id,SEL))objc_msgSend)(control,action);
-    return true;
-}
-static void volume18_repeat(void *context)
-{
-    uintptr_t value=(uintptr_t)context;unsigned index=value&1;
-    if(!volume18_keys[index].held || volume18_keys[index].presses!=(value>>1))return;
-    if(volume18_step(index))dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),
-        dispatch_get_main_queue(),context,volume18_repeat);
-}
-static void volume18_prepare(void *context)
-{
-    if(volume18_ready)return;
-    unsigned attempt=(unsigned)(uintptr_t)context;
-    id control=volume18_control();
-    Class cls=control?object_getClass(control):Nil;
-    if(!cls ||
-       !method_abi(class_getInstanceMethod(cls,sel_registerName("increaseVolume")),"v",0,"") ||
-       !method_abi(class_getInstanceMethod(cls,sel_registerName("decreaseVolume")),"v",0,"")) {
-        if(attempt<30)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),
-            dispatch_get_main_queue(),(void *)(uintptr_t)(attempt+1),volume18_prepare);
-        else fprintf(stderr,"Pong volume18: matching SBVolumeControl ABI unavailable; keep consumer HID\n");
-        return;
-    }
-    for(unsigned i=0;i<2;i++) {
-        int token=-1;
-        if(notify_register_dispatch(volume18_names[i],&token,dispatch_get_main_queue(),^(int changed){
-            uint64_t state=0;if(notify_get_state(changed,&state))return;
-            uint64_t count=state>>1,old=volume18_keys[i].presses;
-            volume18_keys[i].held=(state&1)!=0;volume18_keys[i].presses=count;
-            // A restarted backboardd begins a new counter. Consume the new
-            // click, never replay an old queue or synthesize a device report.
-            uint64_t steps=count>=old?count-old:count;
-            if(steps>8)steps=8;
-            for(uint64_t n=0;n<steps;n++)(void)volume18_step(i);
-            if(steps && volume18_keys[i].held)dispatch_after_f(
-                dispatch_time(DISPATCH_TIME_NOW,400*NSEC_PER_MSEC),dispatch_get_main_queue(),
-                (void *)(uintptr_t)((count<<1)|i),volume18_repeat);
-            fprintf(stderr,"Pong volume18: native %s presses=%llu held=%u\n",i?"decrease":"increase",
-                (unsigned long long)steps,volume18_keys[i].held);
-        })!=NOTIFY_STATUS_OK)return;
-    }
-    if(notify_register_check("dev.unixnu.pong.volume18.ready",&volume18_ready_token)!=NOTIFY_STATUS_OK)return;
-    volume18_ready=true;(void)notify_set_state(volume18_ready_token,1);
-    fprintf(stderr,"Pong volume18: physical volume keys routed to 22H374 SBVolumeControl; power uses HID\n");
 }
 
 static void wake_home(void *unused)
@@ -1682,6 +1712,93 @@ static void poster_fatal_capture(void)
     (void)sigaction(SIGTRAP,&action,NULL);(void)sigaction(SIGABRT,&action,NULL);
 }
 
+/* This board has no CoreMotion activity provider yet. The iPhone identity
+ * must not make contextstored synchronously query a nonexistent motion
+ * service during CDMonitorManager construction. On 22H374 that blocks its
+ * complete context endpoint, then PowerUIAgent and the Battery pane. Use
+ * CoreMotion's own unavailable branch, scoped to contextstored; preserve
+ * all battery, power, location and other contextual monitors. */
+static bool context_motion_installed;
+static BOOL context_activity_unavailable(id self,SEL selector)
+{ (void)self;(void)selector;return NO; }
+static void context_motion_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    if(context_motion_installed)return;
+    Class cls=objc_lookUpClass("CMMotionActivityManager");
+    Method method=cls?class_getClassMethod(cls,sel_registerName("isActivityAvailable")):NULL;
+    if(!method_abi(method,"Bc",0,""))return;
+    method_setImplementation(method,(IMP)context_activity_unavailable);
+    context_motion_installed=true;
+    fprintf(stderr,"Pong context18: activity hardware unavailable; native motion monitor remains inactive\n");
+}
+
+/* The 22H374 SBRendererService aborts in NUDevice_iOS when CoreImage
+ * cannot construct its Metal context. Keep a real CPU CoreImage context
+ * as a failure-only path for this image service, never a fake renderer or
+ * a global switch away from the board's working Metal compositor. */
+static IMP poster_ci_original;
+static id poster_ci_context(id self,SEL selector,id device,id options)
+{
+    id context=((id(*)(id,SEL,id,id))poster_ci_original)(self,selector,device,options);
+    if(context)return context;
+    const CFStringRef *software=dlsym(RTLD_DEFAULT,"kCIContextUseSoftwareRenderer");
+    if(!software || !*software)return nil;
+    CFMutableDictionaryRef fallback=options?CFDictionaryCreateMutableCopy(NULL,0,(CFDictionaryRef)options):
+        CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(!fallback)return nil;
+    CFDictionarySetValue(fallback,*software,kCFBooleanTrue);
+    context=((id(*)(id,SEL,id))objc_msgSend)(self,sel_registerName("contextWithOptions:"),(id)fallback);
+    CFRelease(fallback);
+    return context;
+}
+static void poster_ci_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;if(poster_ci_original)return;
+    Class cls=objc_lookUpClass("CIContext");
+    Method method=cls?class_getClassMethod(cls,sel_registerName("contextWithMTLDevice:options:")):NULL;
+    Method cpu=cls?class_getClassMethod(cls,sel_registerName("contextWithOptions:")):NULL;
+    if(!method_abi(method,"@",2,"@@") || !method_abi(cpu,"@",1,"@"))return;
+    poster_ci_original=method_setImplementation(method,(IMP)poster_ci_context);
+}
+
+/* PowerUI's 22H374 startup asks CoreDuet synchronously for external power.
+ * The board publishes that measurement on its real IOPMPowerSource. Read
+ * it directly rather than making battery discovery depend on optional
+ * contextual monitors. Absence of a valid measurement retains native code. */
+static IMP powerui_external_original;
+static CFTypeRef (*powerui_property)(uint32_t,CFStringRef,CFAllocatorRef,uint32_t);
+static BOOL powerui_external(id self,SEL selector)
+{
+    uint32_t source=matching_service(0,service_matching("IOPMPowerSource"));
+    if(source) {
+        CFTypeRef value=powerui_property(source,CFSTR("ExternalConnected"),NULL,0);
+        release_service(source);
+        if(value) {
+            bool valid=CFGetTypeID(value)==CFBooleanGetTypeID();
+            BOOL connected=valid?CFBooleanGetValue(value):NO;
+            CFRelease(value);if(valid)return connected;
+        }
+    }
+    return ((BOOL(*)(id,SEL))powerui_external_original)(self,selector);
+}
+static void powerui_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;if(powerui_external_original)return;
+    Class cls=objc_lookUpClass("PowerUISmartChargeManager");
+    Method method=cls?class_getInstanceMethod(cls,sel_registerName("isExternalConnected")):NULL;
+    if(!method_abi(method,"Bc",0,""))return;
+    // Image callbacks also run while dyld installs dependencies. Resolve
+    // existing exports only; never recursively dlopen from this callback.
+    void *kit=RTLD_DEFAULT;
+    service_matching=(__typeof__(service_matching))dlsym(kit,"IOServiceMatching");
+    matching_service=(__typeof__(matching_service))dlsym(kit,"IOServiceGetMatchingService");
+    release_service=(__typeof__(release_service))dlsym(kit,"IOObjectRelease");
+    powerui_property=(__typeof__(powerui_property))dlsym(kit,"IORegistryEntryCreateCFProperty");
+    if(!service_matching||!matching_service||!release_service||!powerui_property)return;
+    powerui_external_original=method_setImplementation(method,(IMP)powerui_external);
+}
+
 static id process_root(id self,SEL selector)
 { (void)self;(void)selector;return (id)container_root; }
 static id process_library(id self,SEL selector)
@@ -1719,11 +1836,190 @@ static void backboard_container(void)
     fprintf(stderr,"Pong UI18: backboardd container uses writable %s\n",path);
 }
 
+/* Sileo is a no-container system app. Resolve its real mobile directories before
+ * Evander caches them and avoid requesting SEP-backed file protection for its
+ * local cache/database on this software-keybag development port. */
+static IMP sileo_urls_original,sileo_mkdir_original;
+static id sileo_urls(id self,SEL selector,unsigned long directory,unsigned long domains)
+{
+    const char *path=directory==5?"/var/mobile/Library":directory==9?"/var/mobile/Documents":
+        directory==13?"/var/mobile/Library/Caches":directory==14?"/var/mobile/Library/Application Support":NULL;
+    if(path && (domains&1)) {
+        CFURLRef url=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)path,strlen(path),true);
+        if(url) {CFArrayRef list=CFArrayCreate(NULL,(const void **)&url,1,&kCFTypeArrayCallBacks);CFRelease(url);
+            return list?((id(*)(id,SEL))objc_msgSend)((id)list,sel_registerName("autorelease")):nil;}
+    }
+    return ((id(*)(id,SEL,unsigned long,unsigned long))sileo_urls_original)(self,selector,directory,domains);
+}
+static BOOL sileo_mkdir(id self,SEL selector,id url,BOOL parents,id attributes,id *error)
+{
+    UInt8 path[PATH_MAX]={0};CFMutableDictionaryRef sanitized=NULL;
+    if(url && CFURLGetFileSystemRepresentation((CFURLRef)url,true,path,sizeof(path)) &&
+       (!strncmp((const char *)path,"/var/jb/var/mobile/",19) ||
+        !strncmp((const char *)path,"/private/var/jb/var/mobile/",27) ||
+        !strncmp((const char *)path,"/var/mobile/",12) ||
+        !strncmp((const char *)path,"/private/var/mobile/",20)) && attributes &&
+       CFGetTypeID((CFTypeRef)attributes)==CFDictionaryGetTypeID()) {
+        sanitized=CFDictionaryCreateMutableCopy(NULL,0,(CFDictionaryRef)attributes);
+        if(sanitized)CFDictionaryRemoveValue(sanitized,CFSTR("NSFileProtectionKey"));
+    }
+    BOOL result=((BOOL(*)(id,SEL,id,BOOL,id,id *))sileo_mkdir_original)(self,selector,url,parents,
+        sanitized?(id)sanitized:attributes,error);
+    if(sanitized)CFRelease(sanitized);
+    if(!result)fprintf(stderr,"Pong Sileo: directory create failed: %s\n",url?(const char *)path:"(nil)");
+    return result;
+}
+static void sileo_directories(void)
+{
+    setenv("HOME","/var/mobile",1);setenv("CFFIXED_USER_HOME","/var/mobile",1);
+    setenv("TMPDIR","/var/mobile/Library/Caches/",1);
+    Class cls=objc_lookUpClass("NSFileManager");
+    SEL urls=sel_registerName("URLsForDirectory:inDomains:");
+    SEL mkdir=sel_registerName("createDirectoryAtURL:withIntermediateDirectories:attributes:error:");
+    Method um=class_getInstanceMethod(cls,urls),dm=class_getInstanceMethod(cls,mkdir);
+    if(um && dm) {
+        sileo_urls_original=method_getImplementation(um);sileo_mkdir_original=method_getImplementation(dm);
+        class_replaceMethod(cls,urls,(IMP)sileo_urls,method_getTypeEncoding(um));
+        class_replaceMethod(cls,mkdir,(IMP)sileo_mkdir,method_getTypeEncoding(dm));
+        fprintf(stderr,"Pong Sileo: writable mobile database directories selected\n");
+    }
+}
+
+/* Setup is skipped on this port. A fresh Data seed therefore has locale
+ * preferences but no AppleKeyboards list (confirmed in services108).
+ * Initialize only an absent/empty native list; retain user choices. */
+static void keyboard_defaults(void)
+{
+    CFTypeRef old=CFPreferencesCopyValue(CFSTR("AppleKeyboards"),kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    bool needed=!old || (CFGetTypeID(old)==CFArrayGetTypeID() && !CFArrayGetCount(old));
+    // 22H374's native TextInput preferences normalized the old seed to
+    // Pinyin-Simplified, but AppleKeyboards still named the unmatched Pinyin
+    // layout. Migrate that exact obsolete seed; retain all user-added modes.
+    if(old && CFGetTypeID(old)==CFArrayGetTypeID() && CFArrayGetCount(old)) {
+        CFMutableArrayRef updated=CFArrayCreateMutableCopy(NULL,0,(CFArrayRef)old);
+        bool changed=false;
+        if(updated)for(CFIndex i=0;i<CFArrayGetCount(updated);i++) {
+            CFTypeRef mode=CFArrayGetValueAtIndex(updated,i);
+            if(mode && CFGetTypeID(mode)==CFStringGetTypeID() &&
+               CFEqual(mode,CFSTR("zh_Hans-Pinyin@sw=Pinyin;hw=US"))) {
+                CFArraySetValueAtIndex(updated,i,CFSTR("zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=US"));changed=true;
+            }
+        }
+        if(changed) {
+            CFPreferencesSetValue(CFSTR("AppleKeyboards"),updated,kCFPreferencesAnyApplication,
+                kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+            (void)CFPreferencesSynchronize(kCFPreferencesAnyApplication,kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+        }
+        if(updated)CFRelease(updated);
+    }
+    if(old)CFRelease(old);
+    if(!needed)return;
+    const void *modes[]={CFSTR("zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=US"),
+        CFSTR("en_US@sw=QWERTY;hw=Automatic"),CFSTR("emoji@sw=Emoji")};
+    CFArrayRef list=CFArrayCreate(NULL,modes,3,&kCFTypeArrayCallBacks);
+    if(!list)return;
+    CFPreferencesSetValue(CFSTR("AppleKeyboards"),list,kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    Boolean saved=CFPreferencesSynchronize(kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    CFRelease(list);
+    fprintf(stderr,"Pong keyboard: native Pinyin/English/emoji defaults saved=%u\n",saved);
+}
+
+static bool keyboard_native_scheduled;
+static bool keyboard_phone_installed;
+static void keyboard_retire_old_images(void)
+{
+    const char *marker="/private/var/mobile/Library/Caches/.pong-keyboard-phone152";
+    struct stat st={0};if(lstat(marker,&st)==0)return;
+    // Only rendered key images are disposable. Do not touch learned words,
+    // replacements, input modes or the keyboard dictionaries/databases.
+    Class manager=objc_lookUpClass("NSFileManager");
+    if(!manager)return;
+    id files=((id(*)(id,SEL))objc_msgSend)((id)manager,sel_registerName("defaultManager"));
+    SEL remove=sel_registerName("removeItemAtPath:error:");
+    if(!method_abi(class_getInstanceMethod(manager,remove),"B",2,"@^"))return;
+    id path=(id)CFSTR("/private/var/mobile/Library/Caches/com.apple.keyboards/images");
+    const char *images="/private/var/mobile/Library/Caches/com.apple.keyboards/images";
+    const int present=lstat(images,&st);
+    bool done=present!=0 && errno==ENOENT;
+    if(present==0 && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
+        done=((BOOL(*)(id,SEL,id,id *))objc_msgSend)(files,remove,path,NULL);
+    if(done) {
+        int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+        if(fd>=0)close(fd);
+    }
+}
+static long long keyboard_phone_idiom(id self,SEL selector)
+{(void)self;(void)selector;return 0; /* UIUserInterfaceIdiomPhone */}
+static void keyboard_phone_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    if(keyboard_phone_installed)return;
+    Class cls=objc_lookUpClass("UIDevice");
+    Method method=cls?class_getInstanceMethod(cls,sel_registerName("userInterfaceIdiom")):NULL;
+    if(!method_abi(method,"q",0,""))return;
+    // InputUI is a separate native process: the SpringBoard-only phone
+    // adapter never reached its keyboard/number keyplane layout decisions.
+    // Use UIKit's phone layout/resources, not a coordinate/123-key emulation.
+    method_setImplementation(method,(IMP)keyboard_phone_idiom);
+    keyboard_phone_installed=true;
+    fprintf(stderr,"Pong keyboard: InputUI native phone idiom selected\n");
+}
+static void keyboard_native_refresh(void *unused)
+{
+    (void)unused;
+    Class cls=objc_lookUpClass("TIPreferencesController");
+    SEL shared=sel_registerName("sharedPreferencesController");
+    SEL update=sel_registerName("updateInputModes:");
+    SEL shown=sel_registerName("setKeyboardShownByTouch:");
+    SEL sync=sel_registerName("synchronizePreferences");
+    if(!method_abi(class_getClassMethod(cls,shared),"@",0,"") ||
+       !method_abi(class_getInstanceMethod(cls,update),"v",1,"@") ||
+       !(method_abi(class_getInstanceMethod(cls,shown),"v",1,"B") ||
+         method_abi(class_getInstanceMethod(cls,shown),"v",1,"c")))return;
+    CFTypeRef list=CFPreferencesCopyValue(CFSTR("AppleKeyboards"),kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,kCFPreferencesAnyHost);
+    if(!list || CFGetTypeID(list)!=CFArrayGetTypeID() || !CFArrayGetCount(list)){if(list)CFRelease(list);return;}
+    id prefs=((id(*)(id,SEL))objc_msgSend)((id)cls,shared);
+    if(prefs) {
+        // Use the selected OS's setter to register language preferences,
+        // update its cache and issue its normal input-mode notifications.
+        ((void(*)(id,SEL,id))objc_msgSend)(prefs,update,(id)list);
+        ((void(*)(id,SEL,BOOL))objc_msgSend)(prefs,shown,YES);
+        if(method_abi(class_getInstanceMethod(cls,sync),"v",0,""))
+            ((void(*)(id,SEL))objc_msgSend)(prefs,sync);
+        fprintf(stderr,"Pong keyboard: native TextInput modes refreshed count=%ld; touch keyboard enabled\n",(long)CFArrayGetCount(list));
+    }
+    CFRelease(list);
+}
+static void keyboard_native_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    if(keyboard_native_scheduled || !objc_lookUpClass("TIPreferencesController"))return;
+    keyboard_native_scheduled=true;
+    // Never execute ObjC preference setters while dyld is loading images.
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,keyboard_native_refresh);
+}
+
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
-    phone_ui_process=!strcmp(name,"Preferences") || !strcmp(name,"SpringBoard");
+    if(!strcmp(name,"InputUI")) {
+        char product[32]={};size_t length=sizeof(product);
+        if(!sysctlbyname("hw.product",product,&length,NULL,0) && !strcmp(product,"iPhone17,1"))
+            _dyld_register_func_for_add_image(keyboard_phone_image);
+        return; // Do not import SpringBoard/status-bar/container hooks here.
+    }
+    if(!strcmp(name,"Sileo")){sileo_directories();return;}
+    if(!strcmp(name,"SpringBoard")) {
+        keyboard_retire_old_images();
+        keyboard_defaults();_dyld_register_func_for_add_image(keyboard_native_image);
+        pong_audio_volume18_start();
+    }
+    phone_ui_process=!strcmp(name,"Preferences") || !strcmp(name,"SpringBoard") || !strcmp(name,"MobilePhone");
     // Install the capability answer before status-provider +initialize can
     // cache it during the regular all-images callback below.
     if(phone_ui_process)for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
@@ -1740,10 +2036,25 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     wallpaper_process=boot_option("pong_wallpaper_catalog_override=1") && wallpaper_paths_process;
     (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
     fprintf(stderr,"Pong iPadOS18 adapter: %s (22H374)\n",name);
+    if(!strcmp(name,"wifid")) {
+        if(boot_option("pong_boot_snapshot=1"))pong_boot_snapshot_start(name);
+        return;
+    }
+    if(!strcmp(name,"PowerUIAgent")) {
+        _dyld_register_func_for_add_image(powerui_image);return;
+    }
+    if(!strcmp(name,"SBRendererService")) {
+        _dyld_register_func_for_add_image(poster_ci_image);return;
+    }
+    if(!strcmp(name,"contextstored")) {
+        _dyld_register_func_for_add_image(context_motion_image);
+        return;
+    }
     if(strcmp(name,"Preferences")==0)pong_settings18_start();
     // Keep SpringBoard/compositor adapters out of the poster renderer.
     // Only its native storage path and single-user identity are adapted.
     if(!strcmp(name,"PosterBoard")){
+        _dyld_register_func_for_add_image(poster_ci_image);
         poster_fatal_capture();_dyld_register_func_for_add_image(poster_image);
         if(boot_option("pong_poster_snapshot=1"))pong_boot_snapshot_start(name);
         return;
@@ -1767,12 +2078,7 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     }
     if(strcmp(name,"SpringBoard")==0) {
         springboard_process=true;
-        // The consumer reports are accepted but physical volume remains
-        // unresponsive on this imported iPad board. Route those transitions
-        // to the existing 22H374 controller after checking its actual ABI.
-        // Power stays on HID; backboardd sends each volume transition once.
-        if(!boot_option("pong_volume_direct=0"))
-            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,volume18_prepare);
+        // Physical volume keys stay on the native HID/system event route.
         skip_setup=boot_option("pong_skip_setup=1");
         CFPreferencesSetAppValue(CFSTR("SBDisableAutoDim"),kCFBooleanTrue,kCFPreferencesCurrentApplication);
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,wake_home);
@@ -1781,6 +2087,7 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         software_composition=boot_option("pong_ui_software=1");
         scanout_format=true;
         backboard_container();
+        _dyld_register_func_for_add_image(brightness18_image);
         pong_touch_start();
     }
     _dyld_register_func_for_add_image(compositor_image);

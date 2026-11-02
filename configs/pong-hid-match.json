@@ -1,0 +1,16 @@
+{
+  "Pong PMIC volume keys": {
+    "CFBundleIdentifier": "com.apple.iokit.IOHIDFamily",
+    "IOClass": "IOHIDEventDriver",
+    "IOProviderClass": "IOHIDInterface",
+    "IOProbeScore": 100000,
+    "IOMatchDefer": false,
+    "HIDDefaultBehavior": true,
+    "Transport": "SPMI",
+    "Manufacturer": "Pong",
+    "Product": "Pong PMIC volume keys",
+    "DeviceUsagePairs": [
+      {"DeviceUsagePage": 12, "DeviceUsage": 1}
+    ]
+  }
+}

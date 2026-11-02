@@ -5,25 +5,36 @@
 #include <pthread.h>
 #include "../PongAdreno/PongScanoutWire.h"
 #include "GpuScanoutPresenter.h"
+extern "C" void native_bridge_metal_release_idle_imports(void);
 namespace pongscanout {
 using Open=kern_return_t(*)(unsigned,mach_port_t,unsigned,unsigned *);
 using Call=kern_return_t(*)(unsigned,unsigned,const void *,size_t,void *,size_t *);
 using Map=kern_return_t(*)(unsigned,unsigned,mach_port_t,uint64_t *,uint64_t *,unsigned);
-struct Context {unsigned connection;Call call;gpupresent::Presenter *presenter;};
+struct Context {unsigned connection,version;Call call;gpupresent::Presenter *presenter;};
 static void *serve(void *opaque)
 {
     auto *context=static_cast<Context *>(opaque);unsigned copies=0,refusals=0;
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     for(;;) {
+        bool resetImports=false;
         @autoreleasepool {
             PongScanoutWaitInfo wait{500};PongScanoutFrame frame{};size_t bytes=sizeof(frame);
             auto status=context->call(context->connection,PongScanoutWait,&wait,sizeof(wait),&frame,&bytes);
             if(unsigned(status)==0xe00002d6)continue;
-            if(status || bytes!=sizeof(frame) || frame.reserved || frame.format!=PongScanoutBgra) {
+            if(unsigned(status)==0xe00002eb) {
+                native_bridge_metal_release_idle_imports();
+                // The Pong display blanks the existing framebuffer; it does
+                // not reset the GPU or revoke these bounded three mappings.
+                // Keep idle imports paired with their kernel descriptors.
+                // Destroying/reimporting them on every lock-screen blank can
+                // exhaust transient VA while other compositor jobs retire.
+                continue;
+            } else {
+            if(status || bytes!=sizeof(frame) || (context->version==1 && frame.source_id) || frame.format!=PongScanoutBgra) {
                 report("scanout frame wait stopped",status?:-1);return nullptr;
             }
             auto result=context->presenter->present({reinterpret_cast<void *>(frame.address),size_t(frame.bytes),
-                size_t(frame.stride),frame.width,frame.height});
+                size_t(frame.stride),frame.width,frame.height,context->version>=2?frame.source_id:0});
             // Presenter returns kOk only after waitUntilCompleted reports the
             // real command buffer completed. Errors never retire as success.
             const bool notSubmitted=result!=gpupresent::kOk && result!=gpupresent::kGpuFailed;
@@ -34,14 +45,28 @@ static void *serve(void *opaque)
                 report("GPU scanout copy failed; mappings retained",status?:int(result));return nullptr;
             }
             if(notSubmitted) {
-                report("scanout copy not submitted; CPU fallback available",int(result));
-                // Retry a transient resource refusal, then leave the kernel's
-                // CPU path active instead of repeatedly stalling each frame.
-                if(++refusals>=3)return nullptr;
-                continue;
+                if(++refusals<=3 || !(refusals&(refusals-1)))
+                    report("scanout copy not submitted; retire unused imports and retry",int(result));
+                // No DMA was submitted. Retire stale imported surfaces after
+                // sleep/wake, keep the waiter alive, and back off. A genuine
+                // submitted GPU failure above still retains all DMA backing.
+                context->presenter->resetSources();
+                resetImports=true;
+            } else {
+                refusals=0;
+                if(copies++<3)report("actual GPU scanout copy completed",0);
             }
-            refusals=0;
-            if(copies++<3)report("actual GPU scanout copy completed",0);
+            }
+        } // drain temporary command buffers/encoders before unmapping
+        if(resetImports) {
+            size_t bytes=0;kern_return_t status=0;
+            for(unsigned i=0;i<100;i++) {
+                status=context->call(context->connection,PongScanoutResetSources,nullptr,0,nullptr,&bytes);
+                if(unsigned(status)!=0xe00002d5)break;
+                usleep(1000);
+            }
+            if(status){report("scanout source retirement refused; retain backing",status);return nullptr;}
+            usleep(refusals?20000:1000);
         }
     }
 }
@@ -69,7 +94,7 @@ static void start(void *iokit,unsigned service,id<MTLDevice> device)
     if(status){report("scanout connection unavailable; CPU display remains available",status);return;}
     PongScanoutModeInfo mode{};size_t size=sizeof(mode);
     status=call(connection,PongScanoutMode,nullptr,0,&mode,&size);
-    if(status || size!=sizeof(mode) || mode.version!=1 || mode.format!=PongScanoutBgra ||
+    if(status || size!=sizeof(mode) || (mode.version!=1 && mode.version!=2) || mode.format!=PongScanoutBgra ||
        !mode.width || !mode.height || mode.width>16384 || mode.height>16384 ||
        mode.stride<mode.width*4 || mode.bytes<mode.stride*mode.height) {
         close(connection);report("scanout mode refused",status?:-1);return;
@@ -84,7 +109,7 @@ static void start(void *iokit,unsigned service,id<MTLDevice> device)
         // connection/backing for teardown rather than silently recycle it.
         report("GPU scanout import unavailable; CPU fallback requires retired DMA",-1);return;
     }
-    auto *context=new Context{connection,call,presenter};pthread_t thread;
+    auto *context=new Context{connection,mode.version,call,presenter};pthread_t thread;
     pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&attr,1024*1024);
     int result=pthread_create(&thread,&attr,serve,context);pthread_attr_destroy(&attr);

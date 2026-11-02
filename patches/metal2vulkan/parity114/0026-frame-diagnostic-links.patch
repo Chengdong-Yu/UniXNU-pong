@@ -1,0 +1,1056 @@
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/completion.rs b/crates/metal2vulkan-runtime/src/command_buffer/completion.rs
+--- a/crates/metal2vulkan-runtime/src/command_buffer/completion.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/completion.rs
+@@ -438,6 +438,11 @@
+         } = batch;
+         lists.gathered.extend(fence.map(|fence| (queue, fence)));
+         if last {
++            crate::stage_trace::mark(
++                Arc::as_ptr(&*buffer) as usize,
++                crate::stage_trace::Stage::Seen,
++                queue.min(255) as u32,
++            );
+             let mut state = lock(&buffer.state);
+             state.times.completed = seen;
+             state.keep_holds(holds);
+@@ -670,6 +675,8 @@
+     value: u64,
+     /// The fence its submission signals, where it has one.
+     fence: Option<vk::Fence>,
++    /// Its command buffer, for the stage trace (`stage_trace.rs`).
++    id: usize,
+ }
+ 
+ /// `VkQueue` `queue`'s waiter (the module docs): it waits for its queue's first pending batch
+@@ -705,6 +712,7 @@
+                         let front = Front {
+                             value: batch.value,
+                             fence: batch.fence,
++                            id: Arc::as_ptr(&*batch.buffer) as usize,
+                         };
+                         Some((front, batch.buffer.device().clone()))
+                     }
+@@ -726,11 +734,18 @@
+             continue;
+         };
+         device.shared().counts.completion_armed(slept);
++        crate::stage_trace::mark(
++            front.id,
++            crate::stage_trace::Stage::PollArmed,
++            (queue.min(255) as u32) | (u32::from(slept) << 8),
++        );
+         // The wait is a section of the exit guard; once the process is exiting the waiters end,
+         // and what is pending stays pending, as Metal's does.
+         let polled = match exit_guard::enter() {
+             Some(busy) => {
++                let id = front.id;
+                 let polled = poll(&device, queue, front);
++                crate::stage_trace::mark(id, crate::stage_trace::Stage::PollDone, queue.min(255) as u32);
+                 drop(busy);
+                 Some(polled)
+             }
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -1778,6 +1778,9 @@
+ }
+ 
+ impl CommandBuffer {
++    /// Stable trace identity for this command buffer until its completion.
++    pub fn diagnostic_id(&self) -> u64 { Arc::as_ptr(&self.0) as u64 }
++
+     /// A new command buffer of `queue`, holding `slot` of it.
+     pub(super) fn new(queue: &CommandQueue, slot: Slot) -> CommandBuffer {
+         CommandBuffer(Arc::new(CommandBufferShared {
+@@ -2401,6 +2404,11 @@
+     /// ([`CommandBufferError::CallRefused`] of `commit`, where no call of it was refused before;
+     /// [`refusal`](Self::refusal) keeps the error): it completes in its queue's order, its
+     /// completed handlers run.
++    /// Bounded diagnostic stages of this actual shared command state.
++    pub fn stage_summary(&self) -> [u64; 12] {
++        crate::stage_trace::command_summary(Arc::as_ptr(&self.0) as u64)
++    }
++
+     pub fn commit(&self) -> Result<(), Error> {
+         self.commit_as("commit", None)
+     }
+@@ -2436,9 +2444,12 @@
+     /// [`commit`](Self::commit) for `call`, or, with `failure`,
+     /// [`commit_failed`](Self::commit_failed).
+     fn commit_as(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
++        let id = Arc::as_ptr(&self.0) as usize;
++        crate::stage_trace::mark(id, crate::stage_trace::Stage::CommitCall, 0);
+         // Left to wait for the last render encoder's end, where its call left it to the device's
+         // lowering thread and the thread has not lowered it, or for the commits left so.
+         if failure.is_none() && self.queue_commit(call)? {
++            crate::stage_trace::mark(id, crate::stage_trace::Stage::CommitQueued, 0);
+             return Ok(());
+         }
+         // The last render encoder's end, where its call left it to the device's lowering thread.
+@@ -2527,6 +2538,12 @@
+         failure: Option<CommitFailure>,
+         run: CommitRun,
+     ) -> Result<(), Error> {
++        let run_kind = match run {
++            CommitRun::AtCall => 0,
++            CommitRun::Queued => 1,
++            CommitRun::Refused => 2,
++        };
++        crate::stage_trace::mark(Arc::as_ptr(&self.0) as usize, crate::stage_trace::Stage::CommitRun, run_kind);
+         // The waiting fetched render targets take their storage form at this commit where it
+         // allows (`storage_form.rs`): one atomic read where none waits. The scheduler's thread
+         // ends the switch once it submitted the command buffer. None where nothing of it runs.
+@@ -2739,6 +2756,11 @@
+                 return Err(error);
+             }
+         };
++        crate::stage_trace::mark(
++            Arc::as_ptr(&self.0) as usize,
++            crate::stage_trace::Stage::Prepared,
++            prepared.len() as u32,
++        );
+         // The first segment a host step records, which the device announces (a loop's check
+         // records nothing).
+         let announced = segments
+@@ -4362,18 +4384,23 @@
+         result: Result<(), CommandBufferError>,
+     ) {
+         let (contexts, queue) = (buffer.device.shared().contexts.clone(), buffer.queue.id());
++        let id = Arc::as_ptr(&*buffer) as usize;
+         let item = Item::Transition(Transition::finished(buffer, result));
+         let item = match program_objects::Unheld::enter() {
+             Some(unheld) => {
+                 let ran = contexts.run_here(queue, item);
+                 drop(unheld);
+                 match ran {
+-                    Ok(()) => return,
++                    Ok(()) => {
++                        crate::stage_trace::mark(id, crate::stage_trace::Stage::Finished, 1);
++                        return;
++                    }
+                     Err(item) => item,
+                 }
+             }
+             None => item,
+         };
++        crate::stage_trace::mark(id, crate::stage_trace::Stage::Finished, 2);
+         contexts.post(queue, item);
+     }
+ 
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
+--- a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
+@@ -338,6 +338,29 @@
+     /// place. Where the group went in this batch's submission, its outcome is the group's
+     /// (`Group::take_outcome`).
+     pub(crate) fn submit_batch(
++        self: &Arc<Self>,
++        index: usize,
++        last: bool,
++        event_waits: &[(vk::Semaphore, u64)],
++        scheduler: &mut scheduler::State,
++    ) -> Result<Submitting, CommandBufferError> {
++        let id = Arc::as_ptr(self) as usize;
++        let at = (index.min(0x7fff) as u32) | (u32::from(last) << 15);
++        crate::stage_trace::mark(id, crate::stage_trace::Stage::SubmitBegin, at);
++        let submitted = self.submit_batch_now(index, last, event_waits, scheduler);
++        let outcome = match &submitted {
++            Ok(Submitting::Submitted(_)) => 0,
++            Ok(Submitting::Grouped) => 1,
++            Ok(Submitting::Later) => 2,
++            Ok(Submitting::AfterGroup(_)) => 3,
++            Err(_) => 4,
++        };
++        crate::stage_trace::mark(id, crate::stage_trace::Stage::SubmitEnd, outcome);
++        submitted
++    }
++
++    /// [`submit_batch`](Self::submit_batch) itself.
++    fn submit_batch_now(
+         self: &Arc<Self>,
+         index: usize,
+         last: bool,
+@@ -455,6 +478,7 @@
+         };
+         // The scrubs of emulated textures' writes, as mapped now, then every segment in its place.
+         self.record_scrubs(&mut state, range.clone())?;
++        crate::stage_trace::mark(Arc::as_ptr(self) as usize, crate::stage_trace::Stage::SubmitStep, 1);
+         state
+             .place(range.clone())
+             .map_err(|error| recording_error(device, error))?;
+@@ -873,6 +897,9 @@
+                 false => work.insert(0, lead),
+             }
+         }
++        for command in work.iter().chain(finale.iter()) {
++            crate::stage_trace::diagnostic_link(Arc::as_ptr(self) as u64, ash::vk::Handle::as_raw(*command), index as u64);
++        }
+         let mut work_timeline = vk::TimelineSemaphoreSubmitInfo::default()
+             .wait_semaphore_values(wait_values)
+             .signal_semaphore_values(work_signal_values);
+@@ -916,6 +943,7 @@
+         let buffers = (submits.iter())
+             .map(|info| info.command_buffer_count as usize)
+             .sum();
++        crate::stage_trace::mark(Arc::as_ptr(self) as usize, crate::stage_trace::Stage::SubmitStep, 2);
+         // From here its heap set versions may be pending: nothing writes them any more, and its
+         // first batch takes the ticket a texture that goes from now on waits for
+         // (`heap_sets.rs`). One committed and not yet submitted holds no gone texture.
+@@ -966,6 +994,7 @@
+                 scheduler
+                     .group
+                     .submit(device, &mut scheduler.waited[queue], Some(after));
++            crate::stage_trace::mark(Arc::as_ptr(self) as usize, crate::stage_trace::Stage::SubmitStep, 3);
+             if let Err(error) = submitted {
+                 if let Some(fence) = fence {
+                     // SAFETY: the failed submission is not pending; inside the section.
+@@ -1047,6 +1076,7 @@
+         // The holds its completion lets go (`State::holds_until`).
+         let holds = state.holds_until(index);
+         drop(state);
++        crate::stage_trace::mark(Arc::as_ptr(self) as usize, crate::stage_trace::Stage::SubmitStep, 4);
+         if rebound {
+             device.degrade_encoded_use_rebound(rebound_use);
+         }
+diff --git a/crates/metal2vulkan-runtime/src/creation.rs b/crates/metal2vulkan-runtime/src/creation.rs
+--- a/crates/metal2vulkan-runtime/src/creation.rs
++++ b/crates/metal2vulkan-runtime/src/creation.rs
+@@ -117,7 +117,8 @@
+ /// The call stacks that allocated device memory of at least [`SITE_BYTES`], by the bytes they
+ /// allocated: what a process's GPU memory went to, without a debugger on the device. A stack is
+ /// its first [`SITE_FRAMES`] return addresses past this function's; at most [`SITE_COUNT`]
+-/// stacks are kept, a new one past them counted under the last.
++/// stacks are kept, a new one past them counted under the last. Kept only with the diagnostics on
++/// (`stage_trace::diagnostics`).
+ const SITE_BYTES: u64 = 4 << 20;
+ const SITE_FRAMES: usize = 10;
+ const SITE_COUNT: usize = 32;
+@@ -135,7 +136,7 @@
+ }
+ 
+ fn note_allocation_site(bytes: u64) {
+-    if bytes < SITE_BYTES {
++    if bytes < SITE_BYTES || !crate::stage_trace::diagnostics() {
+         return;
+     }
+     let mut raw = [std::ptr::null_mut::<libc::c_void>(); SITE_FRAMES + 2];
+diff --git a/crates/metal2vulkan-runtime/src/device/mod.rs b/crates/metal2vulkan-runtime/src/device/mod.rs
+--- a/crates/metal2vulkan-runtime/src/device/mod.rs
++++ b/crates/metal2vulkan-runtime/src/device/mod.rs
+@@ -27,6 +27,7 @@
+ pub(super) mod prime;
+ pub(super) mod properties;
+ pub(crate) mod relay;
++mod room;
+ mod staging;
+ pub(super) mod submit;
+ pub(crate) mod submit_stalls;
+@@ -501,6 +502,9 @@
+     /// The thread that lets go of what a released state's pool pieces gave back as they ended
+     /// (`pipeline/reaper.rs`).
+     pub(super) reaper: crate::pipeline::reaper::Reaper,
++    /// The thread that keeps room in the pools the encodings and commits place their own
++    /// resources in, asked by the creation calls (`device/room.rs`).
++    room: room::Room,
+     /// The trails its threads open between a signal and their last let-go of what they held for
+     /// the work, which a command buffer's waiters wait for (`trails.rs`).
+     pub(crate) trails: Arc<crate::trails::Trails>,
+@@ -718,6 +722,9 @@
+         // What the reaper is handed holds the device: none is left, and it only stops, unless
+         // this teardown runs on its thread.
+         self.reaper.stop();
++        // The room keeper holds the device only for a pass: it stops, unless this teardown runs
++        // on its thread.
++        self.room.stop();
+         // What the residency thread releases holds the device: none is left.
+         #[cfg(unix)]
+         self.residency.stop();
+@@ -1014,13 +1021,24 @@
+     /// a pipeline state's, a buffer's, a texture's, a heap's), so that no encoding or commit makes
+     /// a memory block, whose `vkAllocateMemory` waited 2.37 s for other processes' GPU work on
+     /// NVIDIA's driver. Nothing in a host step, a serial point of the command buffers' stream
+-    /// that makes only what it needs.
++    /// that makes only what it needs. The device's room keeper makes the blocks, so the call
++    /// returns at once (`device/room.rs`).
+     pub(crate) fn keep_room(&self) {
+         if crate::exit_guard::in_host_step() {
+             return;
+         }
++        self.0.room.ask(self);
++    }
++
++    /// Give back the memory kept for later placements: every spare dedicated block and every
++    /// kept empty pooled block (`memory::SPARE_FOR`), as Metal's resource cache gives memory
++    /// back when the system reports memory pressure. How many blocks went. No Metal counterpart.
++    pub fn release_kept_memory(&self) -> usize {
++        let Some(_busy) = crate::exit_guard::enter() else {
++            return 0;
++        };
+         let shared = self.shared();
+-        crate::memory::keep_room(&shared.memory, shared.vk(), &shared.counts);
++        lock(&shared.memory).release_spare(shared.vk())
+     }
+ 
+     /// Whether `other` is this device (the same handle, not merely the same physical device).
+@@ -1898,6 +1916,7 @@
+             uncommitted: Arc::default(),
+             pipeline_pool: Default::default(),
+             reaper: Default::default(),
++            room: Default::default(),
+             trails: Arc::default(),
+             recoveries: Arc::default(),
+             libraries: graphics_pipeline_library.then(Default::default),
+diff --git a/crates/metal2vulkan-runtime/src/device/room.rs b/crates/metal2vulkan-runtime/src/device/room.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/device/room.rs
+@@ -0,0 +1,122 @@
++//! The device's room keeper: one thread of the device's that keeps room in the pools its encodings
++//! and commits place their own resources in (`memory::keep_room`), so the creation call that asks
++//! for room returns at once.
++//!
++//! - **Asked by the creation calls.** [`Room::ask`] marks that room is wanted and wakes the
++//!   thread, which it starts unless it runs; asks that come while the thread works are one more
++//!   pass, not one each.
++//! - **Why a thread.** Making a block is a `vkAllocateMemory` that a driver may make wait: on an
++//!   iPadOS guest whose GPU takes the system's pages, each 64 MiB block was wired page by page as it
++//!   was made, 30-110 ms in the texture creation that asked for it (Core Animation's surfaces,
++//!   the widget renderer's textures). A placement that finds no room before the block is there
++//!   makes its own, and the keeper's block then goes at once (`memory::keep_room`).
++//! - **Holds nothing of the device.** The thread holds a weak handle only while it waits, and the
++//!   device itself only for a pass. Where that pass held its last handle, the teardown runs here,
++//!   and its [`Room::stop`] does not join this thread.
++
++use super::{lock, Device, WeakDevice};
++use crate::exit_guard;
++use std::sync::{Arc, Condvar, Mutex, PoisonError};
++use std::thread::JoinHandle;
++
++/// The device's room keeper: its thread, once a creation call started it.
++#[derive(Default)]
++pub(crate) struct Room {
++    shared: Arc<Shared>,
++    thread: Mutex<Option<JoinHandle<()>>>,
++}
++
++#[derive(Default)]
++struct Shared {
++    state: Mutex<State>,
++    /// Room was asked for, or the thread is asked to stop.
++    work: Condvar,
++}
++
++#[derive(Default)]
++struct State {
++    asked: bool,
++    stopping: bool,
++}
++
++impl Room {
++    /// Ask for room in `device`'s pools: the thread keeps it, started unless it runs. Where the
++    /// host cannot start a thread, the room is kept here, as before there was one.
++    pub(crate) fn ask(&self, device: &Device) {
++        {
++            let mut state = lock(&self.shared.state);
++            if state.stopping {
++                return;
++            }
++            state.asked = true;
++        }
++        self.shared.work.notify_all();
++        let mut thread = lock(&self.thread);
++        if thread.is_some() {
++            return;
++        }
++        let shared = Arc::clone(&self.shared);
++        let weak = device.downgrade();
++        match exit_guard::spawn(
++            std::thread::Builder::new().name("metal2vulkan-room".into()),
++            move || run(&shared, &weak),
++        ) {
++            Ok(handle) => *thread = Some(handle),
++            Err(_) => {
++                drop(thread);
++                lock(&self.shared.state).asked = false;
++                keep(device);
++            }
++        }
++    }
++
++    /// The device's teardown: the thread ends, and is joined unless this is it.
++    pub(crate) fn stop(&self) {
++        lock(&self.shared.state).stopping = true;
++        self.shared.work.notify_all();
++        let mut thread = lock(&self.thread);
++        let own = thread
++            .as_ref()
++            .is_some_and(|handle| handle.thread().id() == std::thread::current().id());
++        if !own {
++            if let Some(handle) = thread.take() {
++                let _ = handle.join();
++            }
++        }
++    }
++}
++
++/// One pass: room kept in `device`'s pools, in a section of the exit guard.
++fn keep(device: &Device) {
++    let Some(_busy) = exit_guard::enter() else {
++        return;
++    };
++    let shared = device.shared();
++    crate::memory::keep_room(&shared.memory, shared.vk(), &shared.counts);
++}
++
++/// The thread's loop: a pass for each time room was asked since the last, until stopped.
++fn run(shared: &Shared, weak: &WeakDevice) {
++    loop {
++        {
++            let mut state = lock(&shared.state);
++            while !state.asked && !state.stopping {
++                state = shared
++                    .work
++                    .wait(state)
++                    .unwrap_or_else(PoisonError::into_inner);
++            }
++            if state.stopping {
++                return;
++            }
++            state.asked = false;
++        }
++        let Some(device) = weak.upgrade() else {
++            return;
++        };
++        keep(&device);
++        // Outside the state's lock: it may be the device's last handle, whose teardown stops
++        // this thread.
++        drop(device);
++    }
++}
+diff --git a/crates/metal2vulkan-runtime/src/exit_guard.rs b/crates/metal2vulkan-runtime/src/exit_guard.rs
+--- a/crates/metal2vulkan-runtime/src/exit_guard.rs
++++ b/crates/metal2vulkan-runtime/src/exit_guard.rs
+@@ -955,7 +955,7 @@
+ /// `device/compiles.rs`). MoltenVK runs each
+ /// compile on a dispatch queue that takes the class of the thread asking, so the class here is the
+ /// compile's class in Metal's compiler service.
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub(crate) fn raise_to_user_initiated() {
+     if !at_least_user_initiated() {
+         // SAFETY: sets the calling thread's own class; no pointer.
+@@ -965,13 +965,13 @@
+     }
+ }
+ 
+-/// Nothing: no quality of service class here ([`raise_to_user_initiated`] on macOS).
+-#[cfg(not(target_os = "macos"))]
++/// Nothing: no quality of service class here ([`raise_to_user_initiated`] on macOS and iOS).
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ pub(crate) fn raise_to_user_initiated() {}
+ 
+ /// Run this thread at the user-interactive quality of service, whatever its class: a thread of
+ /// the runtime's own that takes command buffers to their handlers ([`spawn_user_interactive`]).
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ fn run_at_user_interactive() {
+     // Metal runs every command buffer's scheduled and completed handlers at the user-interactive
+     // class, whatever the class of the thread that committed it: measured on an M3 Max, macOS
+@@ -1092,12 +1092,12 @@
+ }
+ 
+ /// Nothing: no such hint here ([`run_at_user_interactive`] on macOS and Linux).
+-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
++#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+ fn run_at_user_interactive() {}
+ 
+ /// Whether this thread runs at the user-initiated quality of service or above: its class is
+ /// user-initiated or user-interactive. Always where there is no such class.
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub(crate) fn at_least_user_initiated() -> bool {
+     use libc::qos_class_t as Q;
+     let mut class = Q::QOS_CLASS_UNSPECIFIED;
+@@ -1112,8 +1112,8 @@
+         )
+ }
+ 
+-/// Always: no quality of service class here ([`at_least_user_initiated`] on macOS).
+-#[cfg(not(target_os = "macos"))]
++/// Always: no quality of service class here ([`at_least_user_initiated`] on macOS and iOS).
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ pub(crate) fn at_least_user_initiated() -> bool {
+     true
+ }
+diff --git a/crates/metal2vulkan-runtime/src/lib.rs b/crates/metal2vulkan-runtime/src/lib.rs
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -24,6 +24,7 @@
+ #![warn(missing_docs)]
+ 
+ mod address;
++pub mod stage_trace;
+ mod address_map;
+ mod address_pool;
+ mod amplification;
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -74,6 +74,17 @@
+ /// (`runtime_lane::pool_churn`).
+ pub(super) const KEPT_EMPTY_BLOCKS: usize = 2;
+ 
++// Optional board budget for idle memory only. The upstream default remains
++// unchanged when unset; live resources and submitted DMA are never reclaimed.
++fn board_spare_limit() -> Option<u64> {
++    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
++    *LIMIT.get_or_init(|| {
++        std::env::var("METAL2VULKAN_SPARE_IMAGE_MIB").ok()?
++            .parse::<u64>().ok()?.checked_mul(1 << 20)
++    })
++}
++
++
+ /// How long a kept empty pooled block beyond its pool's one stays empty before it is freed
+ /// ([`Pool::stale`]): a frame's dip comes back well within it.
+ pub(super) const KEPT_EMPTY_FOR: Duration = Duration::from_secs(1);
+@@ -89,6 +100,26 @@
+ /// otherwise held a 64 MiB block in each of its pools: 256-640 MiB each, 2 GiB in all at an iPadOS
+ /// guest's home screen.
+ pub(super) const FIRST_BLOCK_BYTES: u64 = 4 << 20;
++
++/// How long a dedicated block of images whose image went stays spare for the next dedicated image
++/// of its pool ([`Memory::take_spare`]) before it is freed. Core Animation makes a memoryless
++/// attachment for every surface it renders to and releases it with the surface: where the device's
++/// lazily allocated memory is backed at the first pass (every pass renders in system memory), each
++/// one was a new 40-112 MiB allocation wired page by page, 1.4 s of an iPadOS render server's
++/// first minute in 29 of them, and its free unwired it again. No count or byte limit: as the
++/// pooled blocks kept empty, the spares go when a block of their type cannot be made
++/// ([`Memory::release_kept`]) and when the system reports memory pressure
++/// ([`Memory::release_spare`]).
++pub(super) const SPARE_FOR: Duration = Duration::from_secs(10);
++
++/// A dedicated block of images whose image went, kept for the next dedicated image of its pool
++/// ([`SPARE_FOR`]).
++#[derive(Debug)]
++struct Spare {
++    pool: (Holds, u32),
++    block: Block,
++    since: Instant,
++}
+ 
+ /// What memory a resource needs.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+@@ -555,7 +586,7 @@
+         let kept = (self.blocks.iter().enumerate())
+             .filter(|&(other, block)| other != index && block.as_ref().is_some_and(PoolBlock::kept))
+             .count();
+-        if !dedicated && kept < KEPT_EMPTY_BLOCKS {
++        if !dedicated && kept < if board_spare_limit().is_some() { 1 } else { KEPT_EMPTY_BLOCKS } {
+             if let Some(block) = self.blocks[index].as_mut() {
+                 block.emptied = Some(now);
+             }
+@@ -754,6 +785,12 @@
+ }
+ 
+ impl Block {
++    /// Whether it is the runtime's own memory, imported from nothing: what a spare may be
++    /// ([`SPARE_FOR`]).
++    fn plain(&self) -> bool {
++        !self.imported && self.pages.is_none() && self.view.is_none()
++    }
++
+     /// The cause its `vkFreeMemory` is counted under. A block freed as the one placement in it
+     /// went ([`FreeCause::Dedicated`]) that is an import of its own is counted as that import
+     /// instead: the caller's host memory ([`Memory::import_host`]) or a buffer's fresh pages
+@@ -1052,6 +1089,9 @@
+     /// ([`binds_wait`]), so an image bound while such work may be queued takes a block of its own
+     /// ([`allocate_image_while_queued`]).
+     binds_wait: bool,
++    /// The dedicated blocks of images kept for the next dedicated image of their pool
++    /// ([`SPARE_FOR`]).
++    spare: Vec<Spare>,
+ }
+ 
+ impl Memory {
+@@ -1087,6 +1127,7 @@
+             freed_by: [0; FreeCause::COUNT],
+             log: None,
+             binds_wait: binds_wait(driver),
++            spare: Vec::new(),
+         }
+     }
+ 
+@@ -1161,6 +1202,10 @@
+         let mut census = Census::default();
+         for pool in &self.pools {
+             pool.count_into(&mut census, |block| block.imported);
++        }
++        for spare in &self.spare {
++            census.empty += 1;
++            census.empty_bytes += spare.block.size;
+         }
+         census
+     }
+@@ -1433,7 +1478,21 @@
+             // SAFETY: nothing is placed in a kept empty block, and no command reads it.
+             drop(unsafe { self.let_go(device, stale, FreeCause::KeptStale, None) });
+         }
++        self.age_spare(device, now);
+         match freed {
++            Some((block, true)) if holds == Holds::Images && block.plain() &&
++                board_spare_limit().map_or(true, |limit| {
++                    let kept = self.spare.iter().fold(0u64, |sum, spare| sum.saturating_add(spare.block.size));
++                    block.size <= limit.saturating_sub(kept)
++                }) => {
++                self.say_block("kept a dedicated block of an image spare", &block);
++                self.spare.push(Spare {
++                    pool: (holds, type_index),
++                    block,
++                    since: now,
++                });
++                after
++            }
+             Some((block, dedicated)) => {
+                 let cause = match dedicated {
+                     true => FreeCause::Dedicated,
+@@ -1449,13 +1508,58 @@
+     /// Release every kept empty pooled block of memory type `type_index`, of buffers and of
+     /// images, as a block of that type fails to be made ([`place`]): how many went.
+     fn release_kept(&mut self, device: &ash::Device, type_index: u32) -> usize {
+-        let blocks: Vec<Block> = [Holds::Buffers, Holds::Images]
++        let mut blocks: Vec<Block> = [Holds::Buffers, Holds::Images]
+             .into_iter()
+             .flat_map(|holds| self.pool(holds, type_index).take_kept())
+             .collect();
++        blocks.extend(
++            (self.spare)
++                .extract_if(.., |spare| spare.pool.1 == type_index)
++                .map(|spare| spare.block),
++        );
+         let count = blocks.len();
+         for block in blocks {
+             // SAFETY: nothing is placed in a kept empty block, and no command reads it.
++            drop(unsafe { self.let_go(device, block, FreeCause::KeptForRoom, None) });
++        }
++        count
++    }
++
++    /// Free the spare blocks that stayed spare for [`SPARE_FOR`] at `now`.
++    fn age_spare(&mut self, device: &ash::Device, now: Instant) {
++        let stale: Vec<Spare> = (self.spare)
++            .extract_if(.., |spare| now.saturating_duration_since(spare.since) >= SPARE_FOR)
++            .collect();
++        for spare in stale {
++            // SAFETY: nothing is placed in a spare block, and no command reads it.
++            drop(unsafe { self.let_go(device, spare.block, FreeCause::KeptStale, None) });
++        }
++    }
++
++    /// The smallest spare block of `pool` that holds `size` bytes with at most a quarter of it
++    /// left over, taken out for a dedicated image ([`place`]); the stale spares go first.
++    fn take_spare(&mut self, device: &ash::Device, pool: (Holds, u32), size: u64) -> Option<Block> {
++        self.age_spare(device, Instant::now());
++        let (index, _) = (self.spare.iter().enumerate())
++            .filter(|(_, spare)| {
++                spare.pool == pool
++                    && spare.block.size >= size
++                    && spare.block.size - size <= spare.block.size / 4
++            })
++            .min_by_key(|(_, spare)| spare.block.size)?;
++        Some(self.spare.swap_remove(index).block)
++    }
++
++    /// Free every spare block and every kept empty pooled block: the system reports memory
++    /// pressure, the signal Metal's resource cache gives memory back on. How many went.
++    pub(super) fn release_spare(&mut self, device: &ash::Device) -> usize {
++        let mut blocks: Vec<Block> = self.spare.drain(..).map(|spare| spare.block).collect();
++        for pool in &mut self.pools {
++            blocks.extend(pool.take_kept());
++        }
++        let count = blocks.len();
++        for block in blocks {
++            // SAFETY: nothing is placed in a spare or kept empty block, and no command reads it.
+             drop(unsafe { self.let_go(device, block, FreeCause::KeptForRoom, None) });
+         }
+         count
+@@ -1741,9 +1845,10 @@
+     /// and no resource is left. What waited with them, for the caller to let go of with no lock
+     /// held.
+     pub(super) fn destroy(&mut self, device: &ash::Device) -> Vec<Box<dyn Send>> {
+-        let blocks: Vec<Block> = (self.pools.iter_mut())
++        let mut blocks: Vec<Block> = (self.pools.iter_mut())
+             .flat_map(|pool| pool.drain())
+             .collect();
++        blocks.extend(self.spare.drain(..).map(|spare| spare.block));
+         for block in blocks {
+             self.say_block("freed a block as the device is destroyed", &block);
+             self.freed_by[block.cause(FreeCause::Teardown) as usize] += 1;
+@@ -2123,6 +2228,19 @@
+                 return Ok(placement);
+             }
+         }
++        // A dedicated image takes a spare block of its pool where one fits ([`SPARE_FOR`]); one
++        // placed apart takes memory no submission has used ([`Fit`]).
++        if dedicated && fit == Fit::Pooled && holds == Holds::Images && addressed.is_none() {
++            let mut memory = lock(memory);
++            if let Some(block) = memory.take_spare(device, pool, size) {
++                let bytes = block.size;
++                memory.say_block("took a spare dedicated block for an image", &block);
++                let index = memory.pool(pool.0, pool.1).add(bytes, true, block, size);
++                let placement = memory.placement(pool, index, 0, size, false);
++                memory.say_placement("placed", &placement, Some(class));
++                return Ok(placement);
++            }
++        }
+         // The type's kept empty blocks go before a block of it fails to be made.
+         let made = match maker.make(device, type_index, block_size, addressed) {
+             Err(Error::OutOfMemory(_)) if lock(memory).release_kept(device, type_index) > 0 => {
+diff --git a/crates/metal2vulkan-runtime/src/scheduler/mod.rs b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+--- a/crates/metal2vulkan-runtime/src/scheduler/mod.rs
++++ b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+@@ -388,6 +388,9 @@
+     /// (`asleep`, read under the lock the mark was made under; one that sleeps later reads the
+     /// mark first), counted as `woken`; else the notify, a system call, is spared.
+     fn woken(&self, woken: Woken, asleep: Asleep) {
++        if !matches!(asleep, Asleep::No) {
++            crate::stage_trace::mark(0, crate::stage_trace::Stage::SchedulerWake, woken as u32);
++        }
+         match asleep {
+             Asleep::OnCondvar => {
+                 self.wakings[woken as usize].fetch_add(1, Ordering::Relaxed);
+@@ -537,6 +540,8 @@
+     /// The host nanoseconds at the first look of the scheduler's that found it held
+     /// ([`held_for`](Self::held_for)), until it goes ([`hold_ended`](Self::hold_ended)).
+     held_since: Option<u64>,
++    /// The reasons a look held it for that the stage trace recorded (`stage_trace.rs`), a bit each.
++    traced_reasons: u8,
+ }
+ 
+ impl Held {
+@@ -545,6 +550,15 @@
+     /// read from the host's clock while nothing waits.
+     fn held_for(&mut self, reason: HeldFor) {
+         (self.buffer.device().shared().counts).head_held_for(reason);
++        let bit = 1u8 << (reason as u8);
++        if self.traced_reasons & bit == 0 {
++            self.traced_reasons |= bit;
++            crate::stage_trace::mark(
++                Arc::as_ptr(&*self.buffer) as usize,
++                crate::stage_trace::Stage::Held,
++                (reason as u32 + 1) | ((self.index.min(255) as u32) << 8),
++            );
++        }
+         if self.held_since.is_none() {
+             self.held_since = Some(gpu_time::host_nanos());
+         }
+@@ -685,6 +699,11 @@
+         batches: Vec<BatchSync>,
+     ) {
+         let shared = &*self.shared;
++        crate::stage_trace::mark(
++            Arc::as_ptr(buffer) as usize,
++            crate::stage_trace::Stage::Handed,
++            batches.len() as u32,
++        );
+         let committed = Committed {
+             buffer: buffer.hold(),
+             queue,
+@@ -966,15 +985,20 @@
+             };
+             let slice = bound.map_or(slice, |left| left.min(slice));
+             shared.sleeps.fetch_add(1, Ordering::Relaxed);
++            let slice_ms = slice.as_millis().min(0x7fff) as u32;
+             if let Some(nudge) = shared.nudge.get().filter(|_| shared.gpu_waits(&mut gpu)) {
++                crate::stage_trace::mark(0, crate::stage_trace::Stage::SchedulerSleep, slice_ms | 0x8000);
+                 state = wait_for_gpu(shared, state, nudge, &mut gpu, (slice, short));
++                crate::stage_trace::mark(0, crate::stage_trace::Stage::SchedulerResumed, 0);
+                 continue;
+             }
+             state.asleep = true;
++            crate::stage_trace::mark(0, crate::stage_trace::Stage::SchedulerSleep, slice_ms);
+             let (woke, waited) = shared
+                 .wake
+                 .wait_timeout(state, slice)
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
++            crate::stage_trace::mark(0, crate::stage_trace::Stage::SchedulerResumed, u32::from(waited.timed_out()));
+             state = woke;
+             state.asleep = false;
+             if waited.timed_out() && !short {
+@@ -1072,7 +1096,10 @@
+     let (buffer, index) = &work;
+     match kind {
+         Kind::Step => {
++            let id = Arc::as_ptr(&**buffer) as usize;
++            crate::stage_trace::mark(id, crate::stage_trace::Stage::StepBegin, *index as u32);
+             buffer.host_step(*index);
++            crate::stage_trace::mark(id, crate::stage_trace::Stage::StepEnd, *index as u32);
+             for &call in exit_guard::HOST_STEP {
+                 exit_guard::called(call);
+             }
+@@ -1098,7 +1125,11 @@
+ fn round(shared: &SchedulerShared, left: &mut Left<Work>, passed: &mut Passed) -> bool {
+     (shared.inbox).pass(|state, commits| {
+         shared.passes.fetch_add(1, Ordering::Relaxed);
++        crate::stage_trace::mark(0, crate::stage_trace::Stage::PassBegin, 0);
++        let before = passed.spent.len();
+         pass(state, commits, (&mut *passed, &mut *left), &shared.awaits);
++        let spent = passed.spent.len().saturating_sub(before);
++        crate::stage_trace::mark(0, crate::stage_trace::Stage::PassEnd, spent.min(0xffff) as u32);
+         !passed.exiting && left.is_empty() && !passed.more
+     });
+     passed.more = false;
+@@ -1137,6 +1168,11 @@
+     } in commits.drain(..)
+     {
+         let count = batches.len();
++        crate::stage_trace::mark(
++            Arc::as_ptr(&*buffer) as usize,
++            crate::stage_trace::Stage::Taken,
++            count as u32,
++        );
+         let State { order, binary, .. } = &mut *state;
+         let held = batches.into_iter().enumerate().map(|(index, batch)| Held {
+             buffer: buffer.hold(),
+@@ -1151,6 +1187,7 @@
+             hastened: false,
+             counted_held: false,
+             held_since: None,
++            traced_reasons: 0,
+         });
+         order.push(queue, held);
+         spent.push(buffer);
+diff --git a/crates/metal2vulkan-runtime/src/stage_trace.rs b/crates/metal2vulkan-runtime/src/stage_trace.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/stage_trace.rs
+@@ -0,0 +1,229 @@
++//! A process-wide ring of the stages each command buffer passes from its commit to its completion,
++//! for a host that asks where the time between them goes ([`read`]): when it was committed, left
++//! to the lowering thread, run, recorded, handed to the scheduler and taken in, what held its
++//! batches, when each was submitted, and when the completion waiter armed, saw it and finished it.
++//! The scheduler's and the waiters' own sleeps and wakes are recorded under id 0 and the queue.
++//!
++//! - **Cheap.** A record is one atomic add and three stores; nothing allocates or locks. The ring
++//!   keeps the newest [`RING`] records; a reader that falls behind loses the oldest.
++//! - **One clock.** The host's uptime clock in nanoseconds (`CLOCK_UPTIME_RAW` on Apple
++//!   platforms), the one the frontend's trace and the driver's rings use.
++//! - **Off unless asked for.** Records are kept only where the host's environment has
++//!   `SHENG_DIAG` ([`diagnostics`]), read once; the same switch keeps the allocation sites
++//!   (`creation.rs`). Without it a record costs one relaxed load.
++//! - **Ids.** A command buffer's id is the address of its shared state, alive from its commit to
++//!   its completion: records of one id between a commit stage and its completion are one command
++//!   buffer's.
++
++use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
++
++/// The records the ring keeps.
++const RING: usize = 1 << 16;
++
++/// What happened, the record's `stage`.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[repr(u16)]
++pub enum Stage {
++    /// `commit` was called (`arg`: 0).
++    CommitCall = 1,
++    /// The commit was left to wait for the lowering thread's end of its last render encoder.
++    CommitQueued = 2,
++    /// The commit's own work began (`arg`: 0 at the call, 1 queued, 2 refused).
++    CommitRun = 3,
++    /// Its segments were recorded or prepared for their host steps (`arg`: segments).
++    Prepared = 4,
++    /// Its batches were handed to the scheduler (`arg`: batches).
++    Handed = 5,
++    /// The scheduler took its batches into its order (`arg`: batches).
++    Taken = 6,
++    /// A look of the scheduler's held one of its batches (`arg`: the reason, `HeldFor` + 1, |
++    /// batch index << 8); recorded once per reason and batch.
++    Held = 7,
++    /// A batch's submission began (`arg`: batch index | last << 15).
++    SubmitBegin = 8,
++    /// A batch's submission returned (`arg`: 0 submitted, 1 grouped, 2 later, 3 after the group,
++    /// 4 failed).
++    SubmitEnd = 9,
++    /// Its host step began recording on the scheduler's thread (`arg`: batch index).
++    StepBegin = 10,
++    /// Its host step ended (`arg`: batch index).
++    StepEnd = 11,
++    /// A completion waiter began waiting for its batch (`arg`: queue | slept first << 8).
++    PollArmed = 12,
++    /// The waiter's wait for its batch returned (`arg`: queue).
++    PollDone = 13,
++    /// A completion turn saw it complete (`arg`: queue).
++    Seen = 14,
++    /// Its completion ran (`arg`: 1 on the waiter, 2 posted to its queue's context).
++    Finished = 15,
++    /// A step inside a batch's submission ended (`arg`: 1 the scrubs and segments placed, 2 its
++    /// waits and signals gathered, 3 the driver's `vkQueueSubmit` returned, 4 the submission's
++    /// changes made).
++    SubmitStep = 16,
++    /// The scheduler's thread went to sleep (id 0, `arg`: slice in ms, | 0x8000 on the GPU).
++    SchedulerSleep = 20,
++    /// Something woke the scheduler's thread (id 0, `arg`: 0 commit, 1 completion, 2 host).
++    SchedulerWake = 21,
++    /// The scheduler's thread resumed after its sleep (id 0, `arg`: 1 timed out).
++    SchedulerResumed = 22,
++    /// The scheduler's thread began a pass (id 0).
++    PassBegin = 23,
++    /// The scheduler's thread ended a pass (id 0, `arg`: batches submitted, capped).
++    PassEnd = 24,
++}
++
++struct Slot {
++    when: AtomicU64,
++    id: AtomicU64,
++    /// stage | arg << 16 | sequence << 32: a reader takes the slot only where the sequence is the
++    /// one it asked for.
++    word: AtomicU64,
++}
++
++#[allow(clippy::declare_interior_mutable_const)]
++const EMPTY: Slot = Slot {
++    when: AtomicU64::new(0),
++    id: AtomicU64::new(0),
++    word: AtomicU64::new(0),
++};
++static SLOTS: [Slot; RING] = [EMPTY; RING];
++static NEXT: AtomicU64 = AtomicU64::new(1);
++static TIMELINE: AtomicU8 = AtomicU8::new(0);
++
++/// Enable only the bounded GPU stage ring, without allocation-site backtraces.
++pub fn enable_timeline() { TIMELINE.store(1, Ordering::Relaxed); }
++
++/// First timestamps of a command's stages 1,3,4,5,6,8,9,12,13,14,15,
++/// followed by a mask of the scheduler's actual HeldFor reasons. A missing
++/// or overwritten stage remains zero. Only the most recent 16384 slots are
++/// inspected; this is for rate-limited slow-command reporting, not hot paths.
++pub fn command_summary(id: u64) -> [u64; 12] {
++    let mut result = [0u64; 12];
++    let newest = NEXT.load(Ordering::Acquire);
++    let oldest = newest.saturating_sub(16384).max(1);
++    for sequence in (oldest..newest).rev() {
++        let slot = &SLOTS[(sequence as usize) & (RING - 1)];
++        let word = slot.word.load(Ordering::Acquire);
++        if word >> 32 != sequence & 0xffff_ffff || word & 0xffff == 0 { continue; }
++        let when = slot.when.load(Ordering::Relaxed);
++        let owner = slot.id.load(Ordering::Relaxed);
++        if owner != id || slot.word.load(Ordering::Acquire) != word { continue; }
++        let stage = (word & 0xffff) as u16;
++        if let Some(at) = [1u16,3,4,5,6,8,9,12,13,14,15].iter().position(|&s| s == stage) {
++            result[at] = when;
++        }
++        if stage == 7 {
++            let reason = (word >> 16) & 0xff;
++            if reason > 0 && reason <= 7 { result[11] |= 1 << (reason - 1); }
++        }
++        if stage == 1 { break; }
++    }
++    result
++}
++
++/// The host's uptime clock in nanoseconds.
++pub fn now_nanos() -> u64 {
++    #[cfg(any(target_os = "macos", target_os = "ios"))]
++    {
++        let mut spec = libc::timespec {
++            tv_sec: 0,
++            tv_nsec: 0,
++        };
++        // SAFETY: a valid clock id and an owned timespec.
++        if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &mut spec) } == 0 {
++            return spec.tv_sec as u64 * 1_000_000_000 + spec.tv_nsec as u64;
++        }
++        0
++    }
++    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
++    {
++        crate::gpu_time::host_nanos()
++    }
++}
++
++/// Whether the host asked for the runtime's diagnostics: `SHENG_DIAG` in the environment, read
++/// once.
++pub(crate) fn diagnostics() -> bool {
++    // 0 not read yet, 1 off, 2 on.
++    static ON: AtomicU8 = AtomicU8::new(0);
++    match ON.load(Ordering::Relaxed) {
++        0 => {
++            let on = std::env::var_os("SHENG_DIAG").is_some();
++            ON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
++            on
++        }
++        state => state == 2,
++    }
++}
++
++/// Record `stage` of `id` with `arg`, now, where the diagnostics are on ([`diagnostics`]).
++pub(crate) fn mark(id: usize, stage: Stage, arg: u32) {
++    if TIMELINE.load(Ordering::Relaxed) == 0 && !diagnostics() {
++        return;
++    }
++    if let Some(hook)=DIAGNOSTIC_HOOK.get() { hook(39,id as u64,stage as u64,arg as u64); }
++    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
++    let slot = &SLOTS[(sequence as usize) & (RING - 1)];
++    slot.word.store(0, Ordering::Release);
++    slot.when.store(now_nanos(), Ordering::Relaxed);
++    slot.id.store(id as u64, Ordering::Relaxed);
++    let word = stage as u64 | ((arg as u64 & 0xffff) << 16) | ((sequence & 0xffff_ffff) << 32);
++    slot.word.store(word, Ordering::Release);
++}
++
++/// One record as [`read`] gives it.
++#[derive(Clone, Copy, Debug, Default)]
++#[repr(C)]
++pub struct StageRecord {
++    /// Host uptime nanoseconds.
++    pub when: u64,
++    /// The command buffer's id (0: the scheduler's thread).
++    pub id: u64,
++    /// Its place among all records.
++    pub sequence: u32,
++    /// [`Stage`] as its number.
++    pub stage: u16,
++    /// The stage's argument.
++    pub arg: u16,
++}
++
++/// The records from sequence `from` on (the oldest kept where `from` fell out of the ring), at most
++/// `out.len()`, oldest first: how many, and the sequence to ask for next.
++pub fn read(from: u64, out: &mut [StageRecord]) -> (usize, u64) {
++    let newest = NEXT.load(Ordering::Acquire);
++    let mut sequence = from.max(1).max(newest.saturating_sub(RING as u64 - 1024));
++    let mut written = 0;
++    while sequence < newest && written < out.len() {
++        let slot = &SLOTS[(sequence as usize) & (RING - 1)];
++        let word = slot.word.load(Ordering::Acquire);
++        if word >> 32 == sequence & 0xffff_ffff && word & 0xffff != 0 {
++            let when = slot.when.load(Ordering::Relaxed);
++            let id = slot.id.load(Ordering::Relaxed);
++            if slot.word.load(Ordering::Acquire) == word {
++                out[written] = StageRecord {
++                    when,
++                    id,
++                    sequence: sequence as u32,
++                    stage: (word & 0xffff) as u16,
++                    arg: ((word >> 16) & 0xffff) as u16,
++                };
++                written += 1;
++            }
++        } else if word == 0 {
++            // Being written: read again at the next call.
++            break;
++        }
++        sequence += 1;
++    }
++    (written, sequence)
++}
++
++/// Optional native host callback, held for the process lifetime.
++pub type DiagnosticHook = extern "C" fn(u32,u64,u64,u64);
++static DIAGNOSTIC_HOOK: std::sync::OnceLock<DiagnosticHook> = std::sync::OnceLock::new();
++/// Install before queue creation. This does not change rendering ownership.
++pub fn set_diagnostic_hook(hook: DiagnosticHook) { let _=DIAGNOSTIC_HOOK.set(hook); }
++/// Link actual command-buffer and Vulkan batch identities.
++pub(crate) fn diagnostic_link(id:u64,command:u64,batch:u64) {
++ if let Some(hook)=DIAGNOSTIC_HOOK.get(){hook(45,id,command,batch);}
++}

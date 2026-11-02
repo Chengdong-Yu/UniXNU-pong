@@ -14,14 +14,14 @@ Nothing Phone (2)（Pong / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。
 | 部分 | Pong 配置及实际进度 |
 | --- | --- |
 | CPU / 内存 | SM8475，Cortex-X2 + 3×A710 + 4×A510，PSCI/GICv3，19.2 MHz timer，原生 4 KiB 页；物理 12 GiB，受管容量受保留区限制 |
-| 屏幕 | 1080×2412，stride 4320，120 Hz 请求；桌面、触摸与壁纸已有实机记录，实际刷新率和亮度继续完善 |
-| GPU / Metal | Adreno 730，Pong 固件、Turnip 与 Metal 前端接入；渲染已用于桌面，部分路径仍需完善 |
-| 存储 | 原生 UFS/APFS 启动，独立 OS / SystemOS / 8 GiB 可写 UFS Data，Data 挂载至 `/private/var` |
-| Wi-Fi | QCA6490 / ath11k；PCIe0 link、BAR 和 DMA 分配已有日志，SMMU 编程顺序已修补；扫描与联网尚未确认 |
-| 声音 | ADSP、AudioReach、TFA9873 双功放与输出 HAL 已接通；已修补 CoreMedia 路由服务选择，实际 PCM 发声尚未确认 |
-| 按键 / 电源 | PMIC 物理事件已送达 HID / SpringBoard；电源键与音量键当前反馈仍有问题，继续适配系统动作；完整挂起恢复未完成 |
+| 屏幕 | 1080×2412，stride 4320，120 Hz 请求；桌面、触摸与壁纸已有实机记录，亮度调节已获实机确认，实际刷新率继续完善 |
+| GPU / Metal | Adreno 730，Pong 固件、Turnip 与 Metal 前端接入；渲染已用于桌面，已合并上游调度、共享缓存和 Metal 更新；慢帧及部分恢复路径仍在修复 |
+| 存储 | 原生 UFS/APFS 启动，独立 OS / SystemOS / 可写 UFS Data（实机已扩至 128 GB；CI 初始卷仍为 8 GiB），Data 挂载至 `/private/var` |
+| Wi-Fi | QCA6490 / ath11k；PCIe0 link、BAR 和 DMA 分配已有日志，SMMU 编程顺序已修补；扫描和连接已获实机确认，固件来自 Pong |
+| 声音 | ADSP、AudioReach、TFA9873 双功放与输出 HAL 已接通；已修补 CoreMedia 路由服务选择，原生 IOAudio2 发声和音量已获实机确认，锁屏后恢复仍需修复 |
+| 按键 / 电源 | PMIC 物理事件已送达 HID / SpringBoard；电源键和音量键已接入系统动作；完整挂起恢复未完成 |
 
-主机编译、服务发布和设备功能分开记录。最新修补见 [SMMU 与音频路由审计](migration/ipados18/services73-smmu-audio.md)
+主机编译、服务发布和设备功能分开记录。本次汇总包含此前的 Wi-Fi、亮度、输入、音频、电池、USB、系统组件和 GPU 修复，见 [完整运行时修复及构建接入](migration/ipados18/runtime-fixes-and-build-overlay.md)。arm64e 仍是准备阶段，当前系统保持 arm64。
 
 ## 构建
 

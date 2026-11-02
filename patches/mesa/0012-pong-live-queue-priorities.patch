@@ -1,0 +1,46 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -169,10 +169,8 @@
+ }
+ 
+ // Pong ABI1 priority extension is additive method18; method17 stays the
+-//128-IB submit. Follow upstream's strongest process request policy.
++//128-IB submit. The frontend aggregates current live queue requests.
+ static uint32_t darwin_fg=1,darwin_bg=3;
+-static bool darwin_asked_fg=false,darwin_asked_bg=false;
+-static unsigned priority_rank(uint32_t p) {static const unsigned ranks[]={1,3,4,5,2,0};return p<6?ranks[p]:99;}
+ extern "C" __attribute__((visibility("default"))) bool
+ tu_darwin_set_priority(uint32_t foreground,uint32_t background);
+ extern "C" __attribute__((visibility("default"))) bool
+@@ -180,19 +178,21 @@
+    if ((foreground!=UINT32_MAX && (foreground>5 || foreground==3)) ||
+        (background!=UINT32_MAX && background>5))return false;
+    pthread_mutex_lock(&dw.lock);
+-   if(foreground!=UINT32_MAX) {
+-      if(!darwin_asked_fg || priority_rank(foreground)<priority_rank(darwin_fg))darwin_fg=foreground;
+-      darwin_asked_fg=true;
+-   }
+-   if(background!=UINT32_MAX) {
+-      if(!darwin_asked_bg || priority_rank(background)<priority_rank(darwin_bg))darwin_bg=background;
+-      darwin_asked_bg=true;
+-   }
+-   const NativeAdrenoAbiPriority request={darwin_fg,darwin_bg};
++   const NativeAdrenoAbiPriority request={foreground==UINT32_MAX?darwin_fg:foreground,
++                                         background==UINT32_MAX?darwin_bg:background};
+    const bool active=dw.open && (dw.params.flags&NativeAdrenoParamsPriority);
+-   const kern_return_t result=active?dw_call(NativeAdrenoMethodSetPriority,&request,sizeof(request),NULL,0):kIOReturnUnsupported;
++   const kern_return_t result=active?((request.foreground==darwin_fg && request.background==darwin_bg)?
++      KERN_SUCCESS:dw_call(NativeAdrenoMethodSetPriority,&request,sizeof(request),NULL,0)):kIOReturnUnsupported;
++   if(result==KERN_SUCCESS){darwin_fg=request.foreground;darwin_bg=request.background;}
+    pthread_mutex_unlock(&dw.lock);
+    return result==KERN_SUCCESS;
++}
++
++extern "C" __attribute__((visibility("default"))) uint64_t tu_darwin_va_budget(void);
++extern "C" __attribute__((visibility("default"))) uint64_t tu_darwin_va_budget(void) {
++   pthread_mutex_lock(&dw.lock);
++   const uint64_t bytes=dw.open?dw.info.va_size:0;
++   pthread_mutex_unlock(&dw.lock);return bytes;
+ }
+ 
+ // Exact live host-import ownership phases, negotiated independently from
