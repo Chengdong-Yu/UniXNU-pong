@@ -1,0 +1,548 @@
+name: package
+
+# docs/porting/packaging.md, plus the artifact that document leaves out: the
+# userdata image.
+#
+#   package   runs scripts/package.sh, i.e. `unixnu release -D .` with its fixed
+#             steps deps, preflight, patches, build, pack, verify, and writes
+#             out/pong/ipados-18.7.10-22H374/<config>/{boot/boot.img,
+#             payload/payload.img, kernel/kernel.macho, package.manifest.json}.
+#   userdata  builds the SHNGROOT image the NativeUfs transport reads as the root
+#             filesystem, and its volume UUIDs are what the kernel is compiled with.
+#
+# The two jobs are separate because they compete for disk, not for CPU: the
+# userdata chain peaks near 37 GiB and the package job near 25 GiB of XNU objects
+# and EDK II output, and one hosted runner has 14 GiB of RAM and 80-180 GiB of
+# disk. The package job needs one thing from the other job, ci-volume-layout.json,
+# and that is a two-KB file.
+#
+# Why the userdata image is not `unixnu userdata`: that step writes the windows
+# of [userdata] windows, which come from IPSW components, and writes the manifest
+# as version 2 as soon as --object adds anything. This board's transport
+# (drivers/NativeUfs/RootLayout.h) accepts version 1 only, needs a "Data" window
+# that is not an IPSW component, and rejects a window whose block size or flags
+# are not 512/1. The device scripts therefore own this chain; see the packaging
+# area of porting.toml.
+#
+# Why a second boot image: the firmware (uefi-pong Platforms/Nothing/pongPkg/
+# Drivers/PongBootMemoryDxe) publishes an initrd only when it carries the
+# PONGFAT1 envelope, and `release` puts payload.img in the ramdisk slot unchanged.
+# The package job also writes boot/pong-xnu-initial.img with payload.img wrapped
+# and the container the local flow produces, so one image is the document's
+# artifact and the other is the flashable one. scripts/finalize-pong-adt.py
+# writes it under the same ADT parameters the local build uses.
+#
+# Nothing Apple's is committed: the IPSW is downloaded on the runner and goes
+# away with it. The platform seed comes from the repository secret
+# UNIXNU_UNIQUE_CHIP_ID and is baked into the images.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options: ["ipados-18.7.10-22H374"]
+        default: "ipados-18.7.10-22H374"
+      prelink:
+        description: "Prelink the original 22H374 kernelcache into kernel.macho"
+        type: boolean
+        default: false
+      ipsw_url:
+        description: "https URL of the iPadOS 18.7.10 / 22H374 restore (.ipsw). Empty skips the userdata image."
+        type: string
+        default: ""
+      ipsw_sha256:
+        description: "Optional sha256 of that IPSW; a mismatch stops the run."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A push carries no inputs context at all, so each value a step reads is copied
+  # here once and read from the environment.
+  OS_PROFILE: ${{ inputs.os || 'ipados-18.7.10-22H374' }}
+  IPSW_URL: ${{ inputs.ipsw_url }}
+  IPSW_SHA256: ${{ inputs.ipsw_sha256 }}
+  PRELINK: ${{ inputs.prelink }}
+  # Pinned: `release`, its steps and this repository's scripts/package.sh are one
+  # interface. Move both together.
+  UNIXNU_REF: c96b29975645b711dc06bc435c3ad27321ce817c
+  # The Homebrew kegs the Tier 3 Intel runner has but does not link.
+  LLVM_KEG: /usr/local/opt/llvm@18
+  LLD_KEG: /usr/local/opt/lld
+
+jobs:
+  userdata:
+    name: userdata image
+    runs-on: macos-15-intel
+    timeout-minutes: 300
+    outputs:
+      staged: ${{ steps.userland.outputs.staged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+      - name: reclaim disk
+        run: |
+          set -euo pipefail
+          selected="$(xcode-select -p)"
+          echo "xcode-select: ${selected}"
+          # Peak of this job is about 37 GiB: a 7.4 GiB download, the expanded
+          # restore, two AEA decryptions, a fresh 5 GiB SystemOS and 8 GiB Data
+          # volume, and a 19 GiB image. The unused Xcode copies go below 80 GiB
+          # free; the selected one always stays.
+          need=$((80 * 1024 * 1024))
+          avail="$(df -k / | awk 'NR==2 {print $4}')"
+          echo "avail_kb=${avail} need_kb=${need}"
+          if [ "$avail" -lt "$need" ]; then
+            for app in /Applications/Xcode*.app; do
+              [ -d "$app" ] || continue
+              case "$selected" in
+                "$app"/*) echo "keep $app" ;;
+                *) echo "remove $app"; sudo rm -rf "$app" ;;
+              esac
+            done
+          fi
+          sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" || true
+          df -h
+      - name: tools
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install blacktop/tap/ipsw
+          ok=1
+          for t in hdiutil diskutil aea ipsw python3; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          # apply and build-systemos18 attach images with ownership on, so they
+          # need root without a prompt. A runner that cannot sudo is a failure,
+          # not a skip: a userland prepared without it boots nothing.
+          sudo -n true || { echo 'this runner cannot sudo -n, and the userland chain needs it'; ok=0; }
+          [ "$ok" = 1 ]
+      - name: prepared userland from the IPSW
+        id: userland
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="$(printf '%s' "${IPSW_URL}" | tr -d '[:space:]')"
+          sha="$(printf '%s' "${IPSW_SHA256}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          if [ -z "$url" ]; then
+            echo 'No ipsw_url input: no prepared userland, so this job builds no userdata image.'
+            echo 'The package job still runs and packages the kernel, the payload and the boot'
+            echo 'image; its volume layout falls back to uuid5 placeholders.'
+            printf '%s\n' 'staged=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$url" in
+            https://*) ;;
+            *) echo "ipsw_url must be an https URL, got: ${url}" >&2; exit 1 ;;
+          esac
+          rm -rf "${RUNNER_TEMP}/pong-userland" "${RUNNER_TEMP}/pong-ipsw-work"
+          python3 device/scripts/prepare-pong-userland-from-ipsw.py \
+            --ipsw-url "$url" \
+            --work-dir "${RUNNER_TEMP}/pong-ipsw-work" \
+            --out "${RUNNER_TEMP}/pong-userland" \
+            --developer "$(xcode-select -p)" \
+            --json-out ci-userland-from-ipsw.json \
+            --volume-layout-out ci-volume-layout.json \
+            --jobs 4 \
+            ${sha:+--ipsw-sha256 "$sha"}
+          printf '%s\n' "${RUNNER_TEMP}/pong-userland" > ci-userland-path.txt
+          # The layout below reads the images this run made; a placeholder UUID
+          # here would compile a kernel that mounts nothing.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          layout = json.loads(Path('ci-volume-layout.json').read_text())
+          report = json.loads(Path('ci-userland-from-ipsw.json').read_text())
+          if layout.get('ci_placeholder'):
+              raise SystemExit('ci-volume-layout.json still holds placeholders')
+          for key in ('os', 'systemos', 'data'):
+              if len(layout.get(key, {}).get('uuid', '')) != 36:
+                  raise SystemExit('ci-volume-layout.json has no usable %s uuid' % key)
+          if report.get('build') != '22H374':
+              raise SystemExit('the userland report names build %r' % report.get('build'))
+          print('userland bytes', report['userland_bytes'], 'in', report['seconds'], 'seconds')
+          for name in ('os', 'systemos', 'data'):
+              print(' ', name, layout[name]['uuid'])
+          PY
+          df -h
+          printf '%s\n' 'staged=true' >> "$GITHUB_OUTPUT"
+      - name: SHNGROOT directory
+        if: steps.userland.outputs.staged == 'true'
+        # This reads every byte of roughly 19 GiB to record the SHA-256 of each
+        # window, and it is the slow, disk-bound part of the job.
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          prepared="$(cat ci-userland-path.txt)"
+          mkdir -p out/ipados18/ufs
+          python3 device/scripts/prepare-ipados18-ufs-layout.py \
+            --userland "${prepared}" \
+            --systemos "${prepared}/pong-ipados18-systemos.cdr" \
+            --volume-layout ci-volume-layout.json \
+            --output-dir out/ipados18/ufs
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          header = Path('out/ipados18/ufs/shngroot-ipados18.bin').read_bytes()
+          layout = json.loads(Path('out/ipados18/ufs/ufs-layout.json').read_text())
+          names = [window['name'] for window in layout['windows']]
+          if header[:8] != b'SHNGROOT' or len(header) != 4096:
+              raise SystemExit('the SHNGROOT header is not a 4096-byte directory')
+          if names != ['OS', 'SystemOS', 'Data']:
+              raise SystemExit('layout windows are %s, not OS/SystemOS/Data' % names)
+          print('SHNGROOT directory', len(header), 'bytes for', ', '.join(names))
+          PY
+          df -h
+      - name: userdata image
+        if: steps.userland.outputs.staged == 'true'
+        # Writes about 19 GiB more. upload-artifact caps one artifact at 10 GiB,
+        # so the builder writes parts: four of them, each at most 8 GiB.
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          prepared="$(cat ci-userland-path.txt)"
+          mkdir -p ci-products
+          python3 device/scripts/build-pong-userdata-image.py \
+            --layout out/ipados18/ufs/ufs-layout.json \
+            --header out/ipados18/ufs/shngroot-ipados18.bin \
+            --output out/ipados18/ufs/pong-ipados18-userdata.img \
+            --max-parts 4 \
+            --part-max-mib 8192 \
+            --delete-sources \
+            --delete-root "${prepared}" \
+            --json-out userdata-image.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          image = json.loads(Path('userdata-image.json').read_text())
+          if image['image_bytes'] <= 0 or not image['parts']:
+              raise SystemExit('the image builder wrote no parts')
+          total = sum(part['bytes'] for part in image['parts'])
+          if total != image['image_bytes']:
+              raise SystemExit('the parts hold %d bytes, the image is %d' % (total, image['image_bytes']))
+          print('userdata image', image['image_bytes'], 'bytes in', len(image['parts']), 'part(s)')
+          Path('ci-products/userdata-image.json').write_text(json.dumps(image, indent=2) + '\n')
+          PY
+          cp -f ci-volume-layout.json ci-products/ci-volume-layout.json
+          df -h
+      - uses: actions/upload-artifact@v4
+        if: steps.userland.outputs.staged == 'true'
+        with:
+          name: pong-userdata
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ci-products/
+            out/ipados18/ufs/pong-ipados18-userdata.img.part*
+      - uses: actions/upload-artifact@v4
+        # Always, so the package job has one shape to read either way: the file is
+        # absent when nothing was staged.
+        if: always()
+        with:
+          name: volume-layout
+          retention-days: 1
+          if-no-files-found: ignore
+          path: |
+            ci-volume-layout.json
+            userdata-image.json
+
+  package:
+    name: boot image, payload and kernel
+    needs: userdata
+    # A missing userdata image is not a reason to withhold the rest.
+    if: always() && !cancelled()
+    runs-on: macos-15-intel
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ env.UNIXNU_REF }}
+          path: UniXNU
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: Chengdong-Yu/uefi-pong
+          # The firmware tree the volume and the boot image are built from.
+          path: uefi-pong
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: volume-layout
+          path: device
+      - name: reclaim disk
+        run: |
+          set -euo pipefail
+          selected="$(xcode-select -p)"
+          need=$((80 * 1024 * 1024))
+          avail="$(df -k / | awk 'NR==2 {print $4}')"
+          echo "avail_kb=${avail} need_kb=${need}"
+          if [ "$avail" -lt "$need" ]; then
+            for app in /Applications/Xcode*.app; do
+              [ -d "$app" ] || continue
+              case "$selected" in
+                "$app"/*) echo "keep $app" ;;
+                *) echo "remove $app"; sudo rm -rf "$app" ;;
+              esac
+            done
+          fi
+          sudo rm -rf /Library/Developer/CoreSimulator/Caches /Library/Developer/CoreSimulator/Devices || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" "$HOME/Library/Developer/Xcode/DerivedData" || true
+          df -h
+      - name: tools
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          # cmake, ninja and llvm have no bottle on this Tier 3 runner, so nothing
+          # installs them: the image's own copies are used, and the llvm keg is put
+          # on PATH rather than linked.
+          brew install dtc lzfse mtools nasm acpica blacktop/tap/ipsw
+          ok=1
+          for t in dtc lzfse mformat mcopy nasm iasl cmake ninja make unifdef ipsw python3; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          # CLANG_BIN needs a clang with llvm-lib and lld-link beside it; Apple's
+          # clang has neither, so the keg's bin directory is what the firmware step
+          # links into its toolchain directory.
+          for t in clang llvm-nm llvm-objcopy llvm-objdump llvm-strip llvm-lib llvm-rc; do
+            [ -x "${LLVM_KEG}/bin/${t}" ] || { echo "missing tool: ${LLVM_KEG}/bin/${t}"; ok=0; }
+          done
+          for t in lld-link ld64.lld; do
+            [ -x "${LLD_KEG}/bin/${t}" ] || { echo "missing tool: ${LLD_KEG}/bin/${t}"; ok=0; }
+          done
+          dtc --version
+          [ "$ok" = 1 ]
+      - name: platform seed
+        env:
+          CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          set -euo pipefail
+          # [payload.adt] asks for the seed and the payload step refuses to run
+          # without it: it is the per-chip value the device tree is bound to, and
+          # the images serve that one device.
+          chip="$(printf '%s' "${CHIP_ID}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          if ! printf '%s' "$chip" | grep -Eq '^[0-9a-f]{8}$'; then
+            echo 'the repository secret UNIXNU_UNIQUE_CHIP_ID must be 8 hexadecimal digits' >&2
+            echo 'set it to the unique chip id of the device these images are for' >&2
+            exit 1
+          fi
+          echo "platform seed ${chip}"
+      - name: select the configuration this runner can build
+        run: |
+          set -euo pipefail
+          # `release` reads its configuration from [package.defconfig], and that
+          # mapping names the shipping defconfig, whose Wi-Fi, backlight and
+          # Adreno stages need firmware this public repository does not carry.
+          # Its precedence over a remembered selection leaves no flag to choose
+          # another, so the mapping is repointed on the runner; the repository
+          # keeps the shipping one.
+          python3 - <<'PY'
+          import json, os, re, tomllib
+          from pathlib import Path
+          path = Path('device/board.toml')
+          lines = path.read_text().splitlines(keepends=True)
+          try:
+              table = lines.index('[package.defconfig]\n')
+          except ValueError:
+              raise SystemExit('board.toml has no [package.defconfig] table')
+          for index in range(table + 1, len(lines)):
+              line = lines[index]
+              if line.startswith('['):
+                  break
+              match = re.fullmatch(r'([^\s=]+)(\s*=\s*)("[^"]*")\s*', line)
+              if not match:
+                  continue
+              lines[index] = match.group(1) + match.group(2) + json.dumps('pong_ipados18_ci_defconfig') + '\n'
+              break
+          else:
+              raise SystemExit('[package.defconfig] has no entry to repoint')
+          path.write_text(''.join(lines))
+          mapping = tomllib.loads(path.read_text())['package']['defconfig']
+          profile = os.environ['OS_PROFILE']
+          if mapping != {profile: 'pong_ipados18_ci_defconfig'}:
+              raise SystemExit('repointing left %r' % (mapping,))
+          print('configuration %s -> %s' % (profile, mapping[profile]))
+          PY
+      - name: install the OS profile and the component recipe
+        run: python3 device/scripts/install-unixnu-inputs.py --unixnu UniXNU
+      - name: build inputs
+        run: |
+          set -euo pipefail
+          # The kernel is compiled with the UUIDs of the volumes it mounts: the kit
+          # recipe hands them to scripts/build-ipados18-pong-macos.py, which writes
+          # XNU_OWNER_ROOT/DATA/CACHE_VOLUME_UUID. When this run built a userdata
+          # image it uses that layout. Otherwise the UUIDs are uuid5 placeholders,
+          # and boot-pong.json records the run as not flashable.
+          if [ -s device/ci-volume-layout.json ]; then
+            cp -f device/ci-volume-layout.json ci-volume-layout.json
+            echo 'volume layout: the userdata image of this run'
+          else
+            python3 - <<'PY'
+          import json, uuid
+          from pathlib import Path
+          # One fixed namespace, so two placeholder runs agree and a cached kernel
+          # object tree stays usable.
+          namespace = uuid.UUID('6f1b6a3e-7c2d-4a91-9e5b-0c4d8f2a1b77')
+          doc = {'ci_placeholder': True, 'build': '22H374', 'lba_bytes': 4096}
+          for role in ('os', 'systemos', 'data'):
+              doc[role] = {'uuid': str(uuid.uuid5(namespace, 'pong-%s' % role))}
+          Path('ci-volume-layout.json').write_text(json.dumps(doc, indent=2) + '\n')
+          print('volume layout: uuid5 placeholders, no userdata image in this run')
+          for role in ('os', 'systemos', 'data'):
+              print(' ', role, doc[role]['uuid'])
+          PY
+          fi
+          # local.toml is this repository's own table, ignored by git. The kit
+          # recipe reads it to find the build tree, the Xcode developer directory
+          # and the volume layout; [kernel.prelink] kernel is a path inside the tree.
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          developer = subprocess.check_output(['xcode-select', '-p'], text=True).strip()
+          lines = ['# Written on the runner; not a developer machine path.',
+                   '[pong_build]',
+                   'tree = ' + json.dumps(str(Path('tree').resolve())),
+                   'developer_dir = ' + json.dumps(developer),
+                   'volume_layout = ' + json.dumps(str(Path('ci-volume-layout.json').resolve())),
+                   '']
+          Path('device/local.toml').write_text('\n'.join(lines))
+          print(Path('device/local.toml').read_text())
+          PY
+          {
+            printf 'PONG_VOLUME_LAYOUT=%s\n' "$PWD/ci-volume-layout.json"
+            printf 'PATH=%s:%s:%s\n' "${LLVM_KEG}/bin" "${LLD_KEG}/bin" "$PATH"
+          } >> "$GITHUB_ENV"
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          UNIXNU_UEFI: ${{ github.workspace }}/uefi-pong
+          UNIXNU_DEVICE: ${{ github.workspace }}/device
+          PONG_VOLUME_LAYOUT: ${{ github.workspace }}/ci-volume-layout.json
+          PONG_LLVM: ${{ env.LLVM_KEG }}/bin
+        run: |
+          set -euo pipefail
+          args=(--os "${OS_PROFILE}" --uefi ../uefi-pong -j 3 --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
+          # Without an original kernelcache the kernel step stages the native
+          # build as kernel.macho, which is the bootable one. With prelink it
+          # prelinks the extracted 22H374 kernelcache instead.
+          if [ "${PRELINK:-false}" != 'true' ]; then
+            args+=(--skip-prelink)
+          fi
+          ./scripts/package.sh "${args[@]}"
+      - name: boot image for the firmware
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          set -euo pipefail
+          # `release` writes the document's artifacts: boot/boot.img with the raw
+          # payload in its ramdisk slot, and an ADT from the shared converter.
+          # A local run goes two steps further, and this repeats both with the
+          # same parameters, so the images match a local build:
+          #
+          #   ADT        scripts/make-pong-adt-ipados18.py at 12 GiB of DRAM, a
+          #              4 GiB DarwinBoot window and one CPU. The shared converter
+          #              writes root, chosen and the configured nodes but drops
+          #              the pong,* properties the kernel reads from /arm-io.
+          #   container  Android boot v4 with an empty kernel slot and the payload
+          #              in the PONGFAT1 envelope PongBootMemoryDxe publishes.
+          python3 device/scripts/finalize-pong-adt.py \
+            --work-dir "UniXNU/out/pong/${OS_PROFILE}/pong_ipados18_ci" \
+            --uefi uefi-pong \
+            --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}" \
+            --volume-layout ci-volume-layout.json
+      - name: check the products
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, struct
+          from pathlib import Path
+          root = Path('UniXNU/out/pong')
+          wanted = ('boot/boot.img', 'boot/pong-xnu-initial.img', 'payload/payload.img',
+                    'kernel/kernel.macho', 'package.manifest.json', 'boot/pong-boot.json',
+                    'payload/pong-boot-manifest.json')
+          found = {}
+          for name in wanted:
+              paths = sorted(root.rglob(name))
+              if len(paths) != 1:
+                  raise SystemExit('%s: expected one file, found %s' % (name, paths))
+              found[name] = paths[0]
+              data = paths[0].read_bytes()
+              print('%-38s %12d bytes  sha256 %s' % (name, len(data), hashlib.sha256(data).hexdigest()[:16]))
+          report = json.loads(found['boot/pong-boot.json'].read_text())
+          # The flashable image is the container a local run writes: Android boot
+          # v4, no kernel in the kernel slot, the payload in a PONGFAT1 envelope,
+          # and an empty signature area.
+          image = found['boot/pong-xnu-initial.img'].read_bytes()
+          header = image[:4096]
+          if header[:8] != b'ANDROID!' or struct.unpack_from('<I', header, 40)[0] != 4:
+              raise SystemExit('pong-xnu-initial.img is not an Android boot v4 container')
+          kernel_bytes, ramdisk_bytes = struct.unpack_from('<2I', header, 8)
+          if kernel_bytes or struct.unpack_from('<I', header, 20)[0] != 1584:
+              raise SystemExit('the kernel slot is not empty or the header size is not 1584')
+          if ramdisk_bytes != len(image) - 4096 - 4096:
+              raise SystemExit('the ramdisk size field does not match the image')
+          if image[4096:4104] != b'PONGFAT1':
+              raise SystemExit('the ramdisk does not begin with the PONGFAT1 envelope')
+          if any(image[-4096:]):
+              raise SystemExit('the signature area is not empty')
+          # The firmware's own bound: PongBootMemoryDxe refuses a larger initrd.
+          if ramdisk_bytes > 128 * 1024 * 1024:
+              raise SystemExit('the initrd is %d bytes, over the firmware limit' % ramdisk_bytes)
+          # The spec image stays the document's: same container, raw payload.
+          spec = found['boot/boot.img'].read_bytes()
+          if spec[4096:4104] == b'PONGFAT1':
+              raise SystemExit('boot.img should be the spec image, not the flashable one')
+          parameters = report['parameters']
+          if parameters['dram_size'] != '0x300000000' or parameters['window_size'] != '0x100000000' or parameters['cpus'] != 1:
+              raise SystemExit('the ADT parameters differ from a local run: %r' % (parameters,))
+          package = json.loads(found['package.manifest.json'].read_text())
+          print('kernel command line', package['kernel_command_line_bytes'], 'bytes')
+          print('ADT', report['adt_bytes'], 'bytes, args', report['boot_args'][:48], '...')
+          if report.get('hardware_tested') is not True:
+              print('note: no device has run this boot image')
+          PY
+      - name: collect the products
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p products
+          # The artifacts are the files themselves, not the whole output root: the
+          # build tree under it holds objects and linked sources.
+          if [ -d UniXNU/out ]; then
+            find UniXNU/out \( -path '*/boot/*' -o -path '*/payload/*.img' \
+              -o -path '*/payload/*.json' -o -path '*/kernel/*' \
+              -o -name 'package.manifest.json' -o -name '*.log' \) \
+              | while read -r f; do
+                  mkdir -p "products/$(dirname "$f")"
+                  cp -f "$f" "products/$f"
+                done
+          fi
+          [ -f ci-volume-layout.json ] && cp -f ci-volume-layout.json products/ || true
+          [ -f device/local.toml ] && cp -f device/local.toml products/local.toml || true
+          du -sh products
+          find products -type f | head -n 40
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pong-package
+          retention-days: 14
+          if-no-files-found: warn
+          path: products/

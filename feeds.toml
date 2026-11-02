@@ -49,8 +49,5 @@ git = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
 path = "migration/format2/soc-seed"
 commit = "f62243e56a30472deed9112631b2480ab461df3e"
 
-[[source]]
-name = "PongPlatform24"
-kind = "kit"
-git = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
-commit = "f62243e56a30472deed9112631b2480ab461df3e"
+# PongPlatform24 is not a feed source: the kit ships in this repository at
+# kits/PongPlatform24, so the resolver takes it from the device directories.

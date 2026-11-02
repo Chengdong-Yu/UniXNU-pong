@@ -56,7 +56,7 @@ UEFI 基础固件与 Qualcomm 固件沿用 Pong；新 loader 替换协议仍在�
 
 ## 在 CI runner 上从 IPSW 生成 userland
 
-`.github/workflows/macos-build.yml` 的 userdata 阶段不再接收事先做好的 prepared userland 压缩包，而是接收 **IPSW 下载地址**（`ipsw_url`），并在 runner 上把下面这些步骤跑完。串起来的是 `scripts/prepare-pong-userland-from-ipsw.py`：
+`.github/workflows/package.yml` 的 userdata job 不接受事先做好的 prepared userland 压缩包，只接收 **IPSW 下载地址**（`ipsw_url`），并在 runner 上把下面这些步骤跑完。串起来的是 `scripts/prepare-pong-userland-from-ipsw.py`：
 
 | 步骤 | 命令 | 要点 |
 | --- | --- | --- |
